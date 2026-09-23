@@ -1,0 +1,605 @@
+"""Typed results.
+
+Plain dataclasses rather than a validation framework: the SDK should add one dependency,
+not a runtime schema engine, and every field maps 1:1 to the documented API response.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any
+
+
+def _get(data: dict[str, Any], *names: str, default: Any = None) -> Any:
+    for name in names:
+        if name in data and data[name] is not None:
+            return data[name]
+    return default
+
+
+@dataclass(slots=True)
+class TrackedEvent:
+    event_id: str
+    status: str
+    customer_id: str
+    importance: float = 0.0
+    queued: bool = False
+
+    @classmethod
+    def from_api(cls, data: dict[str, Any]) -> TrackedEvent:
+        return cls(
+            event_id=data["event_id"],
+            status=data.get("status", "accepted"),
+            customer_id=data.get("customer_id", ""),
+            importance=float(data.get("importance", 0.0)),
+            queued=bool(data.get("queued", False)),
+        )
+
+
+@dataclass(slots=True)
+class Customer360:
+    """Everything worth knowing about one customer, from a single call.
+
+    Sections are reachable as attributes for the common ones and through
+    :meth:`section` for the rest, so a caller that asked for three sections is not
+    tempted to read eight nulls.
+    """
+
+    customer: dict[str, Any]
+    summary: str = ""
+    sections: dict[str, Any] = field(default_factory=dict)
+    withheld: int = 0
+    generated_at: str | None = None
+
+    def section(self, name: str, default: Any = None) -> Any:
+        """A section, or ``default`` if it was not built.
+
+        ``None`` for a section that was not requested is different from ``[]`` for one that
+        was and found nothing, so the default is explicit rather than assumed.
+        """
+        return self.sections.get(name, default)
+
+    @property
+    def health_score(self) -> float | None:
+        health = self.sections.get("health")
+        return float(health["score"]) if health else None
+
+    @property
+    def is_at_risk(self) -> bool:
+        health = self.sections.get("health") or {}
+        return health.get("band") in ("at_risk", "critical")
+
+    @property
+    def active_problems(self) -> list[dict[str, Any]]:
+        return list(self.sections.get("active_problems") or [])
+
+    @property
+    def recommended_actions(self) -> list[dict[str, Any]]:
+        return list(self.sections.get("recommended_actions") or [])
+
+    @classmethod
+    def from_api(cls, data: dict[str, Any]) -> Customer360:
+        return cls(
+            customer=dict(data.get("customer") or {}),
+            summary=data.get("summary", ""),
+            sections=dict(data.get("sections") or {}),
+            withheld=int(data.get("withheld", 0)),
+            generated_at=data.get("generated_at"),
+        )
+
+
+@dataclass(slots=True)
+class MemoryPlan:
+    """One statement the engine found in an event, and what it would do with it."""
+
+    content: str
+    type: str
+    action: str
+    reason: str
+    importance: float = 0.0
+    confidence: float = 0.0
+    similarity: float = 0.0
+    rule: str | None = None
+    memory_id: str | None = None
+    closest_memory_id: str | None = None
+    closest_content: str | None = None
+    sensitivity: str = "normal"
+    restricted_by: str | None = None
+    extracted_by: str | None = None
+
+    @classmethod
+    def from_api(cls, data: dict[str, Any]) -> MemoryPlan:
+        return cls(
+            content=data.get("content", ""),
+            type=data.get("type", ""),
+            action=data.get("action", ""),
+            reason=data.get("reason", ""),
+            importance=float(data.get("importance", 0.0)),
+            confidence=float(data.get("confidence", 0.0)),
+            similarity=float(data.get("similarity", 0.0)),
+            rule=data.get("rule"),
+            memory_id=data.get("memory_id"),
+            closest_memory_id=data.get("closest_memory_id"),
+            closest_content=data.get("closest_content"),
+            sensitivity=data.get("sensitivity", "normal"),
+            restricted_by=data.get("restricted_by"),
+            extracted_by=data.get("extracted_by"),
+        )
+
+
+@dataclass(slots=True)
+class EventExplanation:
+    """Why an event did, or would, become a memory.
+
+    Returned by :meth:`MemoryClient.preview`, which writes nothing. ``stop_reason`` is the field
+    to read first: when it is set, nothing else happened and it says why.
+    """
+
+    would_process: bool = False
+    stop_reason: str | None = None
+    summary: str = ""
+    importance: float = 0.0
+    threshold: float = 0.0
+    text: str | None = None
+    text_length: int = 0
+    redacted: bool = False
+    redactions: list[dict[str, Any]] = field(default_factory=list)
+    memories: list[MemoryPlan] = field(default_factory=list)
+    memory_count: int = 0
+    entities: list[dict[str, Any]] = field(default_factory=list)
+    entity_count: int = 0
+    duration_ms: float = 0.0
+
+    def __bool__(self) -> bool:
+        """Truthy when the event would produce something, so ``if not preview:`` reads right."""
+        return self.would_process and bool(self.memories)
+
+    @classmethod
+    def from_api(cls, data: dict[str, Any]) -> EventExplanation:
+        return cls(
+            would_process=bool(data.get("would_process", False)),
+            stop_reason=data.get("stop_reason"),
+            summary=data.get("summary", ""),
+            importance=float(data.get("importance", 0.0)),
+            threshold=float(data.get("threshold", 0.0)),
+            text=data.get("text"),
+            text_length=int(data.get("text_length", 0)),
+            redacted=bool(data.get("redacted", False)),
+            redactions=list(data.get("redactions") or []),
+            memories=[MemoryPlan.from_api(item) for item in data.get("memories") or []],
+            memory_count=int(data.get("memory_count", 0)),
+            entities=list(data.get("entities") or []),
+            entity_count=int(data.get("entity_count", 0)),
+            duration_ms=float(data.get("duration_ms", 0.0)),
+        )
+
+
+@dataclass(slots=True)
+class Memory:
+    id: str
+    type: str
+    content: str
+    importance: float
+    confidence: float
+    status: str = "active"
+    evidence_count: int = 1
+    source_event_ids: list[str] = field(default_factory=list)
+    last_seen_at: str | None = None
+    score: float | None = None
+    retrieved_by: list[str] = field(default_factory=list)
+
+    @classmethod
+    def from_api(cls, data: dict[str, Any]) -> Memory:
+        return cls(
+            id=data["id"],
+            type=data.get("type", "fact"),
+            content=data.get("content", ""),
+            importance=float(data.get("importance", 0.0)),
+            confidence=float(data.get("confidence", 0.0)),
+            status=data.get("status", "active"),
+            evidence_count=int(data.get("evidence_count", 1)),
+            source_event_ids=list(data.get("source_event_ids") or []),
+            last_seen_at=data.get("last_seen_at"),
+            score=data.get("score"),
+            retrieved_by=list(data.get("retrieved_by") or []),
+        )
+
+
+@dataclass(slots=True)
+class QueryResult:
+    answer: str
+    confidence: float
+    memories: list[Memory] = field(default_factory=list)
+    source_event_ids: list[str] = field(default_factory=list)
+    trace: dict[str, Any] | None = None
+
+    @property
+    def has_answer(self) -> bool:
+        return bool(self.answer) and "not enough memory" not in self.answer.lower()
+
+    @classmethod
+    def from_api(cls, data: dict[str, Any]) -> QueryResult:
+        return cls(
+            answer=data.get("answer", ""),
+            confidence=float(data.get("confidence", 0.0)),
+            memories=[Memory.from_api(item) for item in data.get("memories", [])],
+            source_event_ids=[item["event_id"] for item in data.get("sources", [])],
+            trace=data.get("trace"),
+        )
+
+
+@dataclass(slots=True)
+class CustomerContext:
+    important_facts: list[str] = field(default_factory=list)
+    active_problems: list[str] = field(default_factory=list)
+    preferences: list[str] = field(default_factory=list)
+    goals: list[str] = field(default_factory=list)
+    recent_events: list[dict[str, Any]] = field(default_factory=list)
+    relationships: list[dict[str, Any]] = field(default_factory=list)
+    memory_ids: list[str] = field(default_factory=list)
+    prompt_text: str | None = None
+    token_count: int = 0
+    truncated: bool = False
+    raw: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_api(cls, data: dict[str, Any]) -> CustomerContext:
+        context = data.get("customer_context") or {}
+        return cls(
+            important_facts=list(context.get("important_facts") or []),
+            active_problems=list(context.get("active_problems") or []),
+            preferences=list(context.get("preferences") or []),
+            goals=list(context.get("goals") or []),
+            recent_events=list(context.get("recent_events") or []),
+            relationships=list(context.get("relationships") or []),
+            memory_ids=list(context.get("memory_ids") or []),
+            prompt_text=data.get("prompt_text"),
+            token_count=int(data.get("token_count", 0)),
+            truncated=bool(data.get("truncated", False)),
+            raw=data,
+        )
+
+
+@dataclass(slots=True)
+class Health:
+    customer_id: str
+    score: float
+    band: str
+    churn_risk: float
+    explanation: str = ""
+    factors: list[dict[str, Any]] = field(default_factory=list)
+
+    @property
+    def is_at_risk(self) -> bool:
+        return self.band in ("at_risk", "critical")
+
+    @classmethod
+    def from_api(cls, data: dict[str, Any]) -> Health:
+        return cls(
+            customer_id=_get(data, "customer_id", default=""),
+            score=float(data.get("score", 0.0)),
+            band=data.get("band", "watch"),
+            churn_risk=float(data.get("churn_risk", 0.0)),
+            explanation=data.get("explanation", ""),
+            factors=list(data.get("factors") or []),
+        )
+
+
+@dataclass(slots=True)
+class Customer:
+    id: str
+    external_id: str
+    email: str | None = None
+    name: str | None = None
+    last_event_at: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_api(cls, data: dict[str, Any]) -> Customer:
+        return cls(
+            id=data["id"],
+            external_id=data.get("external_id", ""),
+            email=data.get("email"),
+            name=data.get("name"),
+            last_event_at=data.get("last_event_at"),
+            metadata=dict(data.get("metadata") or {}),
+        )
+
+
+@dataclass(slots=True)
+class Signal:
+    """One observation pointing at a likely outcome."""
+
+    key: str
+    label: str
+    direction: str
+    strength: float
+    horizon_days: int
+    rationale: str
+    memory_ids: list[str] = field(default_factory=list)
+    observed: float = 0.0
+
+    @property
+    def is_risk(self) -> bool:
+        return self.direction == "risk"
+
+    @classmethod
+    def from_api(cls, data: dict[str, Any]) -> Signal:
+        return cls(
+            key=data["key"],
+            label=data.get("label", ""),
+            direction=data.get("direction", "risk"),
+            strength=float(data.get("strength", 0.0)),
+            horizon_days=int(data.get("horizon_days", 30)),
+            rationale=data.get("rationale", ""),
+            memory_ids=list(data.get("memory_ids") or []),
+            observed=float(data.get("observed", 0.0)),
+        )
+
+
+@dataclass(slots=True)
+class SignalReport:
+    """Where a customer is heading, and why."""
+
+    customer_id: str
+    trajectory: str
+    churn_risk: float
+    expansion_score: float
+    confidence: float
+    headline: str = ""
+    health_score: float = 0.0
+    signals: list[Signal] = field(default_factory=list)
+    measurements: dict[str, float] = field(default_factory=dict)
+    series: list[dict[str, Any]] = field(default_factory=list)
+    computed_at: str | None = None
+
+    @property
+    def is_declining(self) -> bool:
+        return self.trajectory == "declining"
+
+    @property
+    def risks(self) -> list[Signal]:
+        return [signal for signal in self.signals if signal.is_risk]
+
+    @property
+    def opportunities(self) -> list[Signal]:
+        return [signal for signal in self.signals if not signal.is_risk]
+
+    @classmethod
+    def from_api(cls, data: dict[str, Any]) -> SignalReport:
+        return cls(
+            customer_id=_get(data, "customer_id", default=""),
+            trajectory=data.get("trajectory", "steady"),
+            churn_risk=float(data.get("churn_risk", 0.0)),
+            expansion_score=float(data.get("expansion_score", 0.0)),
+            confidence=float(data.get("confidence", 0.0)),
+            headline=data.get("headline", ""),
+            health_score=float(data.get("health_score", 0.0)),
+            signals=[Signal.from_api(item) for item in data.get("signals") or []],
+            measurements=dict(data.get("measurements") or {}),
+            series=list(data.get("series") or []),
+            computed_at=data.get("computed_at"),
+        )
+
+
+@dataclass(slots=True)
+class Recommendation:
+    """Something to do about a customer, and the evidence for doing it."""
+
+    key: str
+    action: str
+    rationale: str
+    category: str
+    urgency: float
+    priority: str
+    memory_ids: list[str] = field(default_factory=list)
+    goal_ids: list[str] = field(default_factory=list)
+    signals: list[str] = field(default_factory=list)
+    playbook: list[str] = field(default_factory=list)
+
+    @property
+    def is_urgent(self) -> bool:
+        return self.priority == "now"
+
+    @classmethod
+    def from_api(cls, data: dict[str, Any]) -> Recommendation:
+        return cls(
+            key=data["key"],
+            action=data.get("action", ""),
+            rationale=data.get("rationale", ""),
+            category=data.get("category", ""),
+            urgency=float(data.get("urgency", 0.0)),
+            priority=data.get("priority", "when_you_can"),
+            memory_ids=list(data.get("memory_ids") or []),
+            goal_ids=list(data.get("goal_ids") or []),
+            signals=list(data.get("signals") or []),
+            playbook=list(data.get("playbook") or []),
+        )
+
+
+@dataclass(slots=True)
+class Goal:
+    """Something a customer said they were trying to do."""
+
+    id: str
+    customer_id: str
+    statement: str
+    status: str
+    progress: float = 0.0
+    confidence: float = 0.0
+    keywords: list[str] = field(default_factory=list)
+    memory_id: str | None = None
+    evidence: list[dict[str, Any]] = field(default_factory=list)
+    opened_at: str | None = None
+    last_signal_at: str | None = None
+    closed_at: str | None = None
+    closed_reason: str | None = None
+    overridden: bool = False
+
+    @property
+    def is_live(self) -> bool:
+        return self.status not in ("achieved", "abandoned")
+
+    @classmethod
+    def from_api(cls, data: dict[str, Any]) -> Goal:
+        return cls(
+            id=data["id"],
+            customer_id=data.get("customer_id", ""),
+            statement=data.get("statement", ""),
+            status=data.get("status", "open"),
+            progress=float(data.get("progress", 0.0)),
+            confidence=float(data.get("confidence", 0.0)),
+            keywords=list(data.get("keywords") or []),
+            memory_id=data.get("memory_id"),
+            evidence=list(data.get("evidence") or []),
+            opened_at=data.get("opened_at"),
+            last_signal_at=data.get("last_signal_at"),
+            closed_at=data.get("closed_at"),
+            closed_reason=data.get("closed_reason"),
+            overridden=bool(data.get("overridden", False)),
+        )
+
+
+@dataclass(slots=True)
+class PriorSession:
+    id: str
+    agent: str
+    summary: str
+    turn_count: int = 0
+    started_at: str | None = None
+    closed_at: str | None = None
+
+    @classmethod
+    def from_api(cls, data: dict[str, Any]) -> PriorSession:
+        return cls(
+            id=data["id"],
+            agent=data.get("agent", ""),
+            summary=data.get("summary", ""),
+            turn_count=int(data.get("turn_count", 0)),
+            started_at=data.get("started_at"),
+            closed_at=data.get("closed_at"),
+        )
+
+
+@dataclass(slots=True)
+class SessionContext:
+    """What the agent should know before it writes its first word."""
+
+    text: str = ""
+    memory_ids: list[str] = field(default_factory=list)
+    token_estimate: int = 0
+    truncated: bool = False
+    prior_sessions: list[PriorSession] = field(default_factory=list)
+
+    @classmethod
+    def from_api(cls, data: dict[str, Any] | None) -> SessionContext | None:
+        if not data:
+            return None
+        return cls(
+            text=data.get("text", ""),
+            memory_ids=list(data.get("memory_ids") or []),
+            token_estimate=int(data.get("token_estimate", 0)),
+            truncated=bool(data.get("truncated", False)),
+            prior_sessions=[
+                PriorSession.from_api(item) for item in data.get("prior_sessions") or []
+            ],
+        )
+
+
+@dataclass(slots=True)
+class Turn:
+    id: str
+    role: str
+    content: str
+    occurred_at: str | None = None
+    event_id: str | None = None
+    retrieved_memory_ids: list[str] = field(default_factory=list)
+
+    @classmethod
+    def from_api(cls, data: dict[str, Any]) -> Turn:
+        return cls(
+            id=data["id"],
+            role=data.get("role", "user"),
+            content=data.get("content", ""),
+            occurred_at=data.get("occurred_at"),
+            event_id=data.get("event_id"),
+            retrieved_memory_ids=list(data.get("retrieved_memory_ids") or []),
+        )
+
+
+@dataclass(slots=True)
+class AgentSession:
+    """A conversation, and the memory it carries in and out."""
+
+    id: str
+    customer_id: str
+    agent: str = "agent"
+    status: str = "open"
+    external_id: str | None = None
+    turn_count: int = 0
+    started_at: str | None = None
+    last_active_at: str | None = None
+    closed_at: str | None = None
+    summary: str | None = None
+    summary_memory_id: str | None = None
+    memory_ids: list[str] = field(default_factory=list)
+    resumed: bool = False
+    context: SessionContext | None = None
+    turns: list[Turn] = field(default_factory=list)
+
+    @property
+    def is_open(self) -> bool:
+        return self.status == "open"
+
+    @property
+    def prompt_text(self) -> str:
+        """The briefing to put in front of your model, including earlier conversations."""
+        if self.context is None:
+            return ""
+        blocks = [self.context.text]
+        for prior in self.context.prior_sessions:
+            blocks.append(f"Earlier conversation ({prior.agent}): {prior.summary}")
+        return "\n\n".join(block for block in blocks if block)
+
+    @classmethod
+    def from_api(cls, data: dict[str, Any]) -> AgentSession:
+        return cls(
+            id=data["id"],
+            customer_id=data.get("customer_id", ""),
+            agent=data.get("agent", "agent"),
+            status=data.get("status", "open"),
+            external_id=data.get("external_id"),
+            turn_count=int(data.get("turn_count", 0)),
+            started_at=data.get("started_at"),
+            last_active_at=data.get("last_active_at"),
+            closed_at=data.get("closed_at"),
+            summary=data.get("summary"),
+            summary_memory_id=data.get("summary_memory_id"),
+            memory_ids=list(data.get("memory_ids") or []),
+            resumed=bool(data.get("resumed", False)),
+            context=SessionContext.from_api(data.get("context")),
+            turns=[Turn.from_api(item) for item in data.get("turns") or []],
+        )
+
+
+@dataclass(slots=True)
+class TurnResult:
+    session_id: str
+    turn: Turn
+    context: SessionContext | None = None
+    answer: str | None = None
+    answer_confidence: float | None = None
+    event_id: str | None = None
+    turn_count: int = 0
+
+    @classmethod
+    def from_api(cls, data: dict[str, Any]) -> TurnResult:
+        return cls(
+            session_id=data.get("session_id", ""),
+            turn=Turn.from_api(data["turn"]),
+            context=SessionContext.from_api(data.get("context")),
+            answer=data.get("answer"),
+            answer_confidence=data.get("answer_confidence"),
+            event_id=data.get("event_id"),
+            turn_count=int(data.get("turn_count", 0)),
+        )

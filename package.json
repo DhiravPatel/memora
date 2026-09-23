@@ -1,0 +1,15 @@
+{
+  "name": "ai-memory-layer",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Persistent memory infrastructure for AI-powered SaaS.",
+  "workspaces": ["apps/web", "sdk/typescript"],
+  "scripts": {
+    "dev": "npm run dev --workspace @ai-memory/web",
+    "build": "npm run build --workspace @ai-memory/sdk && npm run build --workspace @ai-memory/web",
+    "typecheck": "npm run typecheck --workspace @ai-memory/sdk && npm run typecheck --workspace @ai-memory/web"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

@@ -1,0 +1,4 @@
+Alembic migrations for the AI Memory Layer.
+
+    alembic upgrade head          # apply
+    alembic revision --autogenerate -m "message"
