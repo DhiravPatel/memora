@@ -100,18 +100,27 @@ def customer_state_changed(
     source: str,
     reason: str | None,
     evidence: list[str],
+    track: str = "lifecycle",
+    reasons: list[str] | None = None,
 ) -> OutboundEvent:
-    """A customer moved through the lifecycle — the event most workflows start from."""
+    """A customer moved through a lifecycle track — the event most workflows start from.
+
+    ``track`` names the machine (§26 4.2): receivers written before tracks existed see
+    ``"lifecycle"``, which is the only track they ever received. ``reasons`` are the
+    decisive clauses in words — "3 unresolved problems", "activity down 47%".
+    """
     return OutboundEvent(
         type=WebhookEvent.CUSTOMER_STATE_CHANGED,
         project_id=project_id,
         data={
             "customer": _customer_ref(customer),
+            "track": track,
             "previous_state": previous_state,
             "state": state,
             "transition": transition,
             "source": source,
             "reason": reason,
+            "reasons": list(reasons or []),
             "evidence": evidence[:10],
         },
     )
@@ -213,6 +222,28 @@ def agent_action_denied(*, project_id: str, customer: Any, check: Any) -> Outbou
             "request": check.request or {},
             "reasons": _reasons(check.reasons),
             "evidence": list(check.evidence or [])[:10],
+        },
+    )
+
+
+def agent_action_completed(*, project_id: str, customer: Any, action: Any) -> OutboundEvent:
+    """An agent reported an action done, failed or cancelled (§26 4.5) — for syncing what
+    agents did into a CRM or ticket system."""
+    return OutboundEvent(
+        type=WebhookEvent.AGENT_ACTION_COMPLETED,
+        project_id=project_id,
+        data={
+            "customer": _customer_ref(customer),
+            "action_id": action.id,
+            "action": action.action,
+            "request": action.request or {},
+            "status": action.status,
+            "agent": action.agent,
+            "check_id": action.check_id,
+            "approval_id": action.approval_id,
+            "note": action.outcome_note,
+            "external_ref": action.external_ref,
+            "completed_at": action.completed_at.isoformat() if action.completed_at else None,
         },
     )
 

@@ -15,7 +15,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
-from tests.conftest import database_required
+from tests.conftest import database_required, run_worker
 
 from app.main import create_app
 from common.settings import get_settings
@@ -413,34 +413,10 @@ def test_processing_an_event_places_the_customer_and_snapshots_them(client, acco
         headers=h(account["key"]),
     )
     assert sent.status_code == 202, sent.text
-    outcome = _run_worker_task(sent.json()["event_id"])
+    outcome = run_worker(sent.json()["event_id"])
 
     assert outcome["status"] == "processed"
     assert outcome["lifecycle_state"] == "at_risk"
     snapshots = client.get("/v1/customers/cus_worker/snapshots", headers=h(account["key"])).json()
     assert snapshots["total"] >= 1
     assert snapshots["data"][0]["reason"] in ("state_change", "event")
-
-
-def _run_worker_task(event_id: str) -> dict:
-    """Run the worker's process_event on a fresh loop with its own engine."""
-    import anyio
-
-    import database.session as db
-    from worker.tasks.process_event import process_event
-
-    saved = (db._engine, db._session_factory)
-    db._engine, db._session_factory = None, None
-    result: dict = {}
-
-    async def run() -> None:
-        try:
-            result.update(await process_event({}, event_id))
-        finally:
-            await db.dispose_engine()
-
-    try:
-        anyio.run(run)
-    finally:
-        db._engine, db._session_factory = saved
-    return result

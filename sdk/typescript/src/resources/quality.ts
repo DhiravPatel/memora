@@ -1,6 +1,16 @@
-/** Memory quality and retrieval evaluation (§26 phase 2). */
+/** Memory quality, retrieval and extraction evaluation (§26 2.1–2.2, 4.3). */
 
 import type { HttpClient } from "../client.js";
+
+/** A memory an extraction case expects or forbids — any combination, at least one field. */
+export interface Expectation {
+  type?: string;
+  /** Words it must say, matched in any form. */
+  contains?: string;
+  entity?: string;
+  sensitivity?: "normal" | "restricted";
+  action?: "create" | "merge" | "update" | "conflict" | "ignore";
+}
 
 export class Quality {
   constructor(private readonly http: HttpClient) {}
@@ -18,14 +28,20 @@ export class Quality {
     return this.http.request({ method: "POST", path: "/v1/evals", body: { name, description } });
   }
 
-  /** Questions whose right answers you know — expected memory ids, phrases, or both. */
+  /** Cases whose right answers you know: questions (expected memory ids, phrases, or both),
+   *  and — with `kind: "extraction"` — events and the memories they should and must not make. */
   addEvalCases(
     setId: string,
     cases: {
       customerId: string;
-      question: string;
+      kind?: "retrieval" | "extraction";
+      question?: string;
       expectedMemoryIds?: string[];
       expectedPhrases?: string[];
+      event?: { eventType: string; data?: Record<string, unknown>; occurredAt?: string };
+      expect?: Expectation[];
+      forbid?: Expectation[];
+      expectNothing?: boolean;
       notes?: string;
     }[],
   ): Promise<Record<string, any>[]> {
@@ -35,13 +51,35 @@ export class Quality {
       body: {
         cases: cases.map((item) => ({
           customer_id: item.customerId,
-          question: item.question,
+          kind: item.kind ?? "retrieval",
+          question: item.question ?? "",
           expected_memory_ids: item.expectedMemoryIds ?? [],
           expected_phrases: item.expectedPhrases ?? [],
+          event: item.event
+            ? { event_type: item.event.eventType, data: item.event.data ?? {}, occurred_at: item.event.occurredAt }
+            : undefined,
+          expect: item.expect ?? [],
+          forbid: item.forbid ?? [],
+          expect_nothing: item.expectNothing ?? false,
           notes: item.notes,
         })),
       },
     });
+  }
+
+  /** Before changing a setting: the set as configured and under `settings` (validated like
+   *  a save, never saved). `safe` is false when a passing case would fail. */
+  evalRegression(setId: string, settings: Record<string, unknown>, k = 10): Promise<Record<string, any>> {
+    return this.http.request({
+      method: "POST",
+      path: `/v1/evals/${encodeURIComponent(setId)}/regression`,
+      body: { settings, k },
+    });
+  }
+
+  /** Memory quality in one place: retrieval, extraction, duplicates and consistency. */
+  scorecard(): Promise<Record<string, any>> {
+    return this.http.request({ method: "GET", path: "/v1/evals/scorecard" });
   }
 
   /** Run a set. `comparison.regressed` is true if any question that used to be answered no

@@ -60,6 +60,9 @@ class CustomerContext:
     truncated: bool = False
     # The agent run this build was recorded as (§26 3.4), when it was recorded.
     run_id: str | None = None
+    # Memories offered but left out, and why: "section_cap", "duplicate" or "token_budget"
+    # — for the decision trace (§26 4.4), which must not call a duplicate a budget cut.
+    left_out: dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -118,6 +121,7 @@ class ContextBuilder:
         budget = token_budget or self.token_budget
         sections: dict[str, list[dict[str, Any]]] = {}
         memory_ids: list[str] = []
+        left_out: dict[str, str] = {}
         used_tokens = estimate_tokens(str(customer))
         truncated = False
 
@@ -127,14 +131,17 @@ class ContextBuilder:
             bucket = sections.setdefault(section, [])
             if len(bucket) >= self.max_per_section:
                 truncated = True
+                left_out[memory.id] = "section_cap"
                 continue
             content = memory.content.strip()
             if self._is_duplicate(content, sections):
+                left_out[memory.id] = "duplicate"
                 continue
 
             cost = estimate_tokens(content) + 12  # + per-item JSON overhead
             if used_tokens + cost > budget:
                 truncated = True
+                left_out[memory.id] = "token_budget"
                 continue
 
             used_tokens += cost
@@ -181,6 +188,7 @@ class ContextBuilder:
             memory_ids=memory_ids,
             token_count=used_tokens,
             truncated=truncated,
+            left_out=left_out,
         )
 
     def _is_duplicate(self, content: str, sections: dict[str, list[dict[str, Any]]]) -> bool:

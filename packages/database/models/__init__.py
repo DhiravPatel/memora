@@ -1,7 +1,7 @@
 """SQLAlchemy models. Importing this module registers every table on ``Base.metadata``."""
 
 from database.models.agent import AgentSession, AgentTurn
-from database.models.agent_policy import AgentApproval, AgentCheck, AgentProfile
+from database.models.agent_policy import AgentAction, AgentApproval, AgentCheck, AgentProfile
 from database.models.api_key import ApiKey
 from database.models.customer import Customer
 from database.models.customer_state import CustomerSnapshot, CustomerState
@@ -29,6 +29,7 @@ __all__ = [
     "DEFAULT_PROJECT_SETTINGS",
     "EMBEDDING_DIMENSIONS",
     "MAX_CONSECUTIVE_FAILURES",
+    "AgentAction",
     "AgentApproval",
     "AgentCheck",
     "AgentProfile",

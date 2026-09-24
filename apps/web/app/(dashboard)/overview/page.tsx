@@ -1,11 +1,13 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
+import { useState } from "react";
 import Link from "next/link";
 
 import { UsageChart } from "@/components/usage-chart";
 import { MemoryTypeBadge } from "@/components/ui/badge";
 import { StateBadge } from "@/components/lifecycle";
+import { Select } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle, StatTile } from "@/components/ui/card";
 import { EmptyState, ErrorState, LoadingRow, PageHeader } from "@/components/ui/states";
 import { useSession } from "@/hooks/use-session";
@@ -134,45 +136,86 @@ export default function OverviewPage() {
             </Card>
           </div>
 
-          {lifecycle.data?.enabled && (
-            <Card>
-              <CardHeader className="flex items-center justify-between">
-                <CardTitle>Lifecycle</CardTitle>
-                <span className="label">where every customer is now</span>
-              </CardHeader>
-              <CardContent className="space-y-2.5">
-                {(lifecycle.data.states ?? []).map((state) => {
-                  const count = lifecycle.data?.counts[state] ?? 0;
-                  const placed = Object.values(lifecycle.data?.counts ?? {}).reduce(
-                    (sum, value) => sum + value,
-                    0,
-                  );
-                  return (
-                    <Link
-                      key={state}
-                      href={`/customers?state=${state}`}
-                      className="flex items-center gap-3 hover:opacity-80"
-                    >
-                      <span className="w-28">
-                        <StateBadge state={state} />
-                      </span>
-                      <div className="h-[6px] flex-1 overflow-hidden rounded-full bg-surface-3">
-                        <div
-                          className="h-full bg-accent"
-                          style={{ width: `${placed ? (count / placed) * 100 : 0}%` }}
-                        />
-                      </div>
-                      <span className="numeric w-8 text-right text-[11px] text-muted-foreground">
-                        {count}
-                      </span>
-                    </Link>
-                  );
-                })}
-              </CardContent>
-            </Card>
+          {lifecycle.data && (lifecycle.data.enabled || lifecycle.data.tracks?.length > 0) && (
+            <LifecycleCard lifecycle={lifecycle.data} />
           )}
         </>
       )}
     </div>
+  );
+}
+
+/** Where every customer is now, on whichever track is chosen (§26 4.2). */
+function LifecycleCard({ lifecycle }: { lifecycle: LifecycleOverview }) {
+  const choices = [
+    ...(lifecycle.enabled
+      ? [
+          {
+            track: "lifecycle",
+            label: "Lifecycle",
+            states: lifecycle.states ?? [],
+            counts: lifecycle.counts,
+          },
+        ]
+      : []),
+    ...(lifecycle.tracks ?? [])
+      .filter((track) => track.enabled)
+      .map((track) => ({
+        track: track.track,
+        label: track.label,
+        states: track.states,
+        counts: track.counts,
+      })),
+  ];
+  const [chosen, setChosen] = useState(choices[0]?.track ?? "lifecycle");
+  const current = choices.find((choice) => choice.track === chosen) ?? choices[0];
+  if (!current) return null;
+  const placed = Object.values(current.counts ?? {}).reduce((sum, value) => sum + value, 0);
+  return (
+    <Card>
+      <CardHeader className="flex items-center justify-between gap-3">
+        <CardTitle>Where every customer is now</CardTitle>
+        {choices.length > 1 ? (
+          <Select
+            value={chosen}
+            onChange={(event) => setChosen(event.target.value)}
+            className="w-44"
+          >
+            {choices.map((choice) => (
+              <option key={choice.track} value={choice.track}>
+                {choice.label}
+              </option>
+            ))}
+          </Select>
+        ) : (
+          <span className="label">{current.label}</span>
+        )}
+      </CardHeader>
+      <CardContent className="space-y-2.5">
+        {current.states.map((state) => {
+          const count = current.counts[state] ?? 0;
+          return (
+            <Link
+              key={state}
+              href={`/customers?state=${state}&track=${current.track}`}
+              className="flex items-center gap-3 hover:opacity-80"
+            >
+              <span className="w-28">
+                <StateBadge state={state} />
+              </span>
+              <div className="h-[6px] flex-1 overflow-hidden rounded-full bg-surface-3">
+                <div
+                  className="h-full bg-accent"
+                  style={{ width: `${placed ? (count / placed) * 100 : 0}%` }}
+                />
+              </div>
+              <span className="numeric w-8 text-right text-[11px] text-muted-foreground">
+                {count}
+              </span>
+            </Link>
+          );
+        })}
+      </CardContent>
+    </Card>
   );
 }

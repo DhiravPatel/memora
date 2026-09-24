@@ -12,6 +12,7 @@ processing an event — pass them in, and nothing is computed twice.
 
 from __future__ import annotations
 
+from datetime import timedelta
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -21,9 +22,9 @@ from app.services.reader import Reader
 from app.services.signal_service import SignalService
 from common.time import utcnow
 from database.models import Customer, Project
-from database.repositories import GoalRepository, MemoryRepository
+from database.repositories import AgentActionRepository, GoalRepository, MemoryRepository
 from memory_engine.conditions import Condition, Evaluation
-from memory_engine.facts import CustomerFacts, FactInputs, build_facts
+from memory_engine.facts import ACTION_HISTORY_DAYS, CustomerFacts, FactInputs, build_facts
 
 # Deep enough that a customer's open problems and preferences are all present — the
 # fact builder reads every one of them — without reading their whole history.
@@ -57,6 +58,7 @@ class FactsService:
         state: str | None = None,
         state_entered_at: Any | None = None,
         state_pinned: bool = False,
+        tracks: dict[str, tuple[str | None, Any]] | None = None,
     ) -> CustomerFacts:
         if health is None:
             health = (await self.health.for_customer(project=project, customer=customer)).health
@@ -74,14 +76,23 @@ class FactsService:
         )
         restricted = await self.memories.restricted_ids(project_id=project.id, customer_id=customer.id)
         _, total = await self.memories.list(project_id=project.id, customer_id=customer.id, limit=1)
+        now = utcnow()
+        # What agents were cleared to do for this customer, or reported done (§26 4.5).
+        actions = await AgentActionRepository(self.session).history(
+            project_id=project.id, customer_id=customer.id, since=now - timedelta(days=ACTION_HISTORY_DAYS)
+        )
 
-        if state is None:
-            state, state_entered_at, state_pinned = await self._state(project, customer)
+        if state is None or tracks is None:
+            loaded_state, loaded_entered, loaded_pinned, loaded_tracks = await self._state(project, customer)
+            if state is None:
+                state, state_entered_at, state_pinned = loaded_state, loaded_entered, loaded_pinned
+            if tracks is None:
+                tracks = loaded_tracks
 
         return build_facts(
             FactInputs(
                 customer=customer,
-                now=utcnow(),
+                now=now,
                 health=health,
                 report=report,
                 memories_by_type=grouped,
@@ -93,6 +104,8 @@ class FactsService:
                 state=state,
                 state_entered_at=state_entered_at,
                 state_pinned=state_pinned,
+                tracks=tracks or {},
+                actions=actions,
             )
         )
 
@@ -115,13 +128,19 @@ class FactsService:
         that are restricted (and they lack clearance) or outside their agent profile."""
         return await Reader(self.session, cleared=cleared).facts(project.id, facts)
 
-    async def _state(self, project: Project, customer: Customer) -> tuple[str | None, Any, bool]:
-        """The customer's lifecycle state, once the state machine has recorded one."""
+    async def _state(
+        self, project: Project, customer: Customer
+    ) -> tuple[str | None, Any, bool, dict[str, tuple[str | None, Any]]]:
+        """The customer's state on every lifecycle track the machines have recorded; the
+        primary track separately, because it is also `state.current`."""
         from database.repositories import CustomerStateRepository
+        from database.repositories.customer_state import PRIMARY_TRACK
 
-        current = await CustomerStateRepository(self.session).current(
+        currents = await CustomerStateRepository(self.session).currents(
             project_id=project.id, customer_id=customer.id
         )
-        if current is None:
-            return None, None, False
-        return current.state, current.entered_at, bool(current.pinned)
+        tracks = {name: (row.state, row.entered_at) for name, row in currents.items()}
+        primary = currents.get(PRIMARY_TRACK)
+        if primary is None:
+            return None, None, False, tracks
+        return primary.state, primary.entered_at, bool(primary.pinned), tracks

@@ -37,7 +37,18 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from memory_engine.facts import CATALOG, METADATA_PREFIX, REQUEST_PREFIX, CustomerFacts, FactSpec
+from memory_engine.actions import ACTION_NAME
+from memory_engine.facts import (
+    ACTION_METRICS,
+    ACTIONS_PREFIX,
+    CATALOG,
+    DAYS_SUFFIX,
+    LIFECYCLE_PREFIX,
+    METADATA_PREFIX,
+    REQUEST_PREFIX,
+    CustomerFacts,
+    FactSpec,
+)
 from memory_engine.policy import WITHHELD
 from nlp.tokenize import root, surface_words, tokenize
 
@@ -74,6 +85,10 @@ _TEXT_FOR_OP = {
     "in": "in", "not_in": "not in", "contains": "contains", "not_contains": "not contains",
     "exists": "is set", "not_exists": "is not set", "between": "between",
 }
+
+
+# A lifecycle track's name, as it appears in `lifecycle.<track>` (§26 4.2).
+_TRACK_NAME = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
 
 
 class ConditionError(ValueError):
@@ -343,6 +358,24 @@ def _spec_for(fact: str) -> FactSpec:
         return FactSpec(name=fact, type="any", description="Customer metadata you sent")
     if fact.startswith(REQUEST_PREFIX) and len(fact) > len(REQUEST_PREFIX):
         return FactSpec(name=fact, type="any", description="A value from the proposed action")
+    if fact.startswith(ACTIONS_PREFIX):
+        name, _, metric = fact[len(ACTIONS_PREFIX) :].rpartition(".")
+        if ACTION_NAME.match(name) and metric in ACTION_METRICS:
+            described = {
+                "count_7d": ("How many times it was taken in the last 7 days", None),
+                "count_30d": ("How many times it was taken in the last 30 days", None),
+                "amount_30d": ("The total amount over the last 30 days", None),
+                "days_since_last": ("Days since it was last taken", "days"),
+            }[metric]
+            return FactSpec(name=fact, type="number", description=described[0], unit=described[1])
+        raise ConditionError(
+            f"Unknown fact {fact!r}. Action history reads actions.<action or family>.<metric>, "
+            f"with a metric of {', '.join(ACTION_METRICS)}."
+        )
+    if fact.startswith(LIFECYCLE_PREFIX) and _TRACK_NAME.match(fact[len(LIFECYCLE_PREFIX):].removesuffix(DAYS_SUFFIX)):
+        if fact.endswith(DAYS_SUFFIX):
+            return FactSpec(name=fact, type="number", description="Days in the track's current state", unit="days")
+        return FactSpec(name=fact, type="string", description="The customer's state on this lifecycle track")
     suggestion = difflib.get_close_matches(fact, list(CATALOG), n=1, cutoff=0.6)
     hint = f" Did you mean {suggestion[0]!r}?" if suggestion else ""
     raise ConditionError(
@@ -792,7 +825,9 @@ def fact_catalog() -> list[dict[str, Any]]:
 
 # Fact families whose values are aggregates or the customer's own record, never a quote
 # from a memory — shown to every reader (§17c).
-_OPEN_FAMILIES = frozenset({"customer", "health", "signals", "state", "activity", "memories", "request"})
+_OPEN_FAMILIES = frozenset(
+    {"customer", "health", "signals", "state", "activity", "memories", "request", "lifecycle", "actions"}
+)
 
 
 def is_content_fact(name: str) -> bool:

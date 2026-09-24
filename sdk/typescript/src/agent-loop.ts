@@ -17,7 +17,7 @@
 
 import { ActionDeniedError, ApprovalRequiredError, MemoryConfigError } from "./errors.js";
 import type { MemoryClient } from "./index.js";
-import type { ActionCheck, AgentSession, TurnResult } from "./types.js";
+import type { ActionCheck, AgentAction, AgentSession, TurnResult } from "./types.js";
 
 export interface TurnContext {
   /** The briefing on the customer plus what is relevant to this message: a system prompt. */
@@ -193,5 +193,49 @@ export class MemoryAgent {
         : new ApprovalRequiredError(redeemed);
     }
     throw new ApprovalRequiredError(verdict);
+  }
+
+  /**
+   * Take an action through the approval gateway (§26 4.5), start to finish: request it,
+   * optionally wait for a person, run `run` only once allowed, and report the outcome —
+   * `done`, or `failed` if `run` throws (the error is re-thrown).
+   *
+   * ```ts
+   * await agent.perform("issue_credit", () => billing.credit(20), { amount: 20 }, { waitMs: 120_000 });
+   * ```
+   */
+  async perform<T>(
+    action: string,
+    run?: () => Promise<T>,
+    request?: Record<string, unknown>,
+    options: { waitMs?: number; intervalMs?: number; idempotencyKey?: string } = {},
+  ): Promise<T | AgentAction> {
+    const session = await this.start();
+    let taken = await this.memory.actions.request({
+      customerId: this.options.customerId,
+      action,
+      request: plain(request),
+      idempotencyKey: options.idempotencyKey,
+      sessionId: session.id,
+    });
+    if (taken.status === "pending_approval" && (options.waitMs ?? 0) > 0) {
+      taken = await this.memory.actions.waitFor(taken.id, {
+        timeoutMs: options.waitMs,
+        intervalMs: options.intervalMs,
+      });
+    }
+    if (taken.status !== "allowed") {
+      throw taken.status === "pending_approval" ? new ApprovalRequiredError(taken) : new ActionDeniedError(taken);
+    }
+    if (!run) return taken;
+    try {
+      const result = await run();
+      await this.memory.actions.complete(taken.id, "done");
+      return result;
+    } catch (error) {
+      const note = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+      await this.memory.actions.complete(taken.id, "failed", { note: note.slice(0, 2000) });
+      throw error;
+    }
   }
 }

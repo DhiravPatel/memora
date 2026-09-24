@@ -89,6 +89,7 @@ class CustomerFactsOut(BaseModel):
 
 class CustomerStateOut(BaseModel):
     id: str
+    track: str = Field(default="lifecycle", description="The lifecycle track this stay belongs to")
     state: str
     previous_state: str | None = None
     entered_at: datetime
@@ -101,6 +102,18 @@ class CustomerStateOut(BaseModel):
     pinned_until: datetime | None = None
     actor_id: str | None = None
     evaluation: dict[str, Any] = Field(default_factory=dict)
+    reasons: list[str] = Field(
+        default_factory=list,
+        description='The decisive clauses in words: "3 unresolved problems", "activity down 47%"',
+    )
+
+
+class TrackStateOut(BaseModel):
+    track: str
+    label: str
+    primary: bool = False
+    current: CustomerStateOut | None = None
+    states: list[str] = Field(default_factory=list)
 
 
 class CurrentStateOut(BaseModel):
@@ -108,10 +121,13 @@ class CurrentStateOut(BaseModel):
     enabled: bool = True
     current: CustomerStateOut | None = None
     states: list[str] = Field(default_factory=list)
+    # Every track, the primary first (§26 4.2).
+    tracks: list[TrackStateOut] = Field(default_factory=list)
 
 
 class StateSetIn(BaseModel):
     state: str = Field(min_length=1, max_length=64)
+    track: str = Field(default="lifecycle", min_length=1, max_length=40)
     pin: bool = Field(default=True, description="Keep the machine from moving the customer until released.")
     pin_days: int | None = Field(default=None, ge=1, le=365)
     note: str | None = Field(default=None, max_length=500)
@@ -123,6 +139,19 @@ class StateRefreshOut(BaseModel):
     moved: bool = False
     transitions: list[dict[str, Any]] = Field(default_factory=list)
     snapshot_id: str | None = None
+    # Per track: {state, moved, transitions}.
+    tracks: dict[str, dict[str, Any]] = Field(default_factory=dict)
+
+
+class TrackDefinitionOut(BaseModel):
+    track: str
+    label: str
+    description: str | None = None
+    enabled: bool = True
+    states: list[str] = Field(default_factory=list)
+    initial: str | None = None
+    transitions: list[dict[str, Any]] = Field(default_factory=list)
+    counts: dict[str, int] = Field(default_factory=dict)
 
 
 class LifecycleOut(BaseModel):
@@ -131,6 +160,17 @@ class LifecycleOut(BaseModel):
     initial: str | None = None
     transitions: list[dict[str, Any]] = Field(default_factory=list)
     counts: dict[str, int] = Field(default_factory=dict)
+    # The extra tracks beside the primary machine (§26 4.2).
+    tracks: list[TrackDefinitionOut] = Field(default_factory=list)
+
+
+class TrackTemplateOut(BaseModel):
+    name: str
+    label: str
+    description: str | None = None
+    states: list[str]
+    initial: str
+    transitions: list[dict[str, Any]]
 
 
 # ------------------------------------------------------------------ snapshots

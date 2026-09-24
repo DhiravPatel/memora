@@ -89,3 +89,48 @@ class AgentApproval(Base):
     used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class AgentAction(Base):
+    """An action an agent asked to take, through the gateway (§26 4.5), from request to done.
+
+    A check answers "may I?"; an action is the thing itself, with a life: requested, then
+    ``allowed``, ``pending_approval`` or ``denied``; an allowed one ends ``done``, ``failed``
+    or ``cancelled`` when the agent reports back. What was allowed or done is the customer's
+    action history — ``actions.*`` facts — which is how "a third credit this month needs a
+    person" can be a rule.
+    """
+
+    __tablename__ = "agent_actions"
+    __table_args__ = (
+        Index("ix_agent_actions_customer_action_created", "customer_id", "action", "created_at"),
+        Index("ix_agent_actions_project_created", "project_id", "created_at"),
+        # Retrying a request with the same key returns the same action.
+        UniqueConstraint("project_id", "idempotency_key", name="uq_agent_actions_project_idempotency"),
+    )
+
+    id: Mapped[str] = mapped_column(String(ID_LENGTH), primary_key=True)
+    project_id: Mapped[str] = mapped_column(
+        String(ID_LENGTH), ForeignKey("projects.id", ondelete="CASCADE"), index=True
+    )
+    customer_id: Mapped[str] = mapped_column(
+        String(ID_LENGTH), ForeignKey("customers.id", ondelete="CASCADE"), nullable=False
+    )
+    action: Mapped[str] = mapped_column(String(80), nullable=False)
+    request: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    # request.amount, kept as a column so history can sum it.
+    amount: Mapped[float | None] = mapped_column()
+    # allowed | pending_approval | denied | done | failed | cancelled | expired
+    status: Mapped[str] = mapped_column(String(24), nullable=False)
+    decision: Mapped[str] = mapped_column(String(24), nullable=False)
+    check_id: Mapped[str | None] = mapped_column(String(ID_LENGTH))
+    approval_id: Mapped[str | None] = mapped_column(String(ID_LENGTH))
+    agent: Mapped[str | None] = mapped_column(String(120))
+    api_key_id: Mapped[str | None] = mapped_column(String(ID_LENGTH))
+    session_id: Mapped[str | None] = mapped_column(String(ID_LENGTH))
+    idempotency_key: Mapped[str | None] = mapped_column(String(128))
+    outcome_note: Mapped[str | None] = mapped_column(Text)
+    external_ref: Mapped[str | None] = mapped_column(String(255))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

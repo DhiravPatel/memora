@@ -83,7 +83,7 @@ export interface QueryResult {
   memories: QueriedMemory[];
   sources: { eventId: string }[];
   trace?: Record<string, unknown>;
-  /** The recorded agent run: `memory.guardrails.explainRun(runId)`. */
+  /** The recorded agent run: `memory.runs.explain(runId)` or `memory.runs.trace(runId)`. */
   runId: string | null;
 }
 
@@ -436,6 +436,10 @@ export interface ConditionResult {
 
 /** Where a customer is in the project's lifecycle, and why. */
 export interface LifecycleState {
+  /** The lifecycle track: "lifecycle" is the primary one. */
+  track: string;
+  /** The decisive clauses in words: "3 unresolved problems", "activity down 47%". */
+  reasons: string[];
   state: string;
   previousState: string | null;
   enteredAt: string;
@@ -445,6 +449,76 @@ export interface LifecycleState {
   evidence: string[];
   pinned: boolean;
   pinnedUntil: string | null;
+}
+
+// ------------------------------------------------------------- what changed (§26 4.1)
+
+/** One thing that changed about a customer: before, after, when, and the evidence. */
+export interface Change {
+  /** subscription, lifecycle, health, risk, trajectory, problem, intent, preference, goal,
+   *  feedback, relationship, fact, memory, signal or activity. */
+  type: string;
+  /** What happened to it: opened, resolved, recurring, changed, moved, crossed, … */
+  kind: string;
+  title: string;
+  before: string | null;
+  after: string | null;
+  detectedAt: string;
+  evidence: string[];
+  source: string;
+  track: string | null;
+  /** For lifecycle moves: the decisive clauses in words. */
+  reasons: string[];
+  detail: Record<string, unknown>;
+  importance: number;
+}
+
+/** The customer at one end of a window. `state` is null when nothing was recorded yet. */
+export interface CustomerAt {
+  at: string;
+  live: boolean;
+  snapshotId: string | null;
+  takenAt: string | null;
+  state: Record<string, unknown> | null;
+  description: string | null;
+}
+
+export interface CustomerChanges {
+  customerId: string;
+  /** One sentence to read before a call: "In the last 7 days: upgraded to Pro; …". */
+  summary: string;
+  changes: Change[];
+  window: {
+    since: string;
+    until: string;
+    /** span, time, snapshot, last_session, last_run or default. */
+    basis: string;
+    value: string | null;
+    found: boolean;
+    note: string | null;
+    label: string;
+  };
+  counts: Record<string, number>;
+  total: number;
+  truncated: boolean;
+  /** Changes about records this key may not read. */
+  withheld: number;
+  then: CustomerAt;
+  now: CustomerAt;
+}
+
+export interface CustomerComparison {
+  customerId: string;
+  then: CustomerAt;
+  now: CustomerAt;
+  differences: {
+    fact: string;
+    before: unknown;
+    after: unknown;
+    added?: string[] | null;
+    removed?: string[] | null;
+  }[];
+  summary: string;
 }
 
 // ------------------------------------------------------------------ agents (§26 3)
@@ -477,6 +551,33 @@ export interface Approval {
   usedAt: string | null;
   expiresAt: string;
   createdAt: string;
+  /** The memories the reasons cite, in their own words, as the reviewer may read them. */
+  evidenceMemories?: { id: string; type: string | null; content: string | null; status: string | null }[];
+  withheldEvidence?: number;
+  customer?: Record<string, unknown> | null;
+  /** The gateway action waiting on this approval, if any. */
+  actionId?: string | null;
+}
+
+/** An action through the approval gateway (§26 4.5). `nextStep` says what to do now. */
+export interface AgentAction {
+  id: string;
+  customerId: string;
+  action: string;
+  request: Record<string, unknown>;
+  status: "allowed" | "pending_approval" | "denied" | "done" | "failed" | "cancelled" | "expired";
+  decision: Decision;
+  summary: string;
+  nextStep: string;
+  reasons: GuardrailReason[];
+  approval: Approval | null;
+  checkId: string | null;
+  agent: string | null;
+  idempotencyKey: string | null;
+  outcomeNote: string | null;
+  externalRef: string | null;
+  createdAt: string;
+  completedAt: string | null;
 }
 
 export interface ActionCheck {
@@ -536,6 +637,56 @@ export interface RunExplanation {
   heldBack: Record<string, unknown>;
   stateThen: Record<string, unknown> | null;
   checks: ActionCheck[];
+}
+
+/** A memory the agent was given, with the verdict: `cited` (the answer rests on it),
+ *  `given` (handed over in a context) or `not_cited`. */
+export interface TraceGiven extends RunMemory {
+  verdict: "cited" | "given" | "not_cited";
+  why: string;
+}
+
+/** A memory the question matched that the agent was not given, and why. */
+export interface TraceIgnored {
+  id: string;
+  type: string | null;
+  /** below_cut, type_cap, token_budget, section_cap, duplicate, superseded, expired,
+   *  withheld_restricted or withheld_profile. */
+  reason: string;
+  why: string;
+  visible: boolean;
+  content: string | null;
+  score: number | null;
+  position: number | null;
+  match: number | null;
+  supersededBy: string | null;
+  replacementRank: number | null;
+}
+
+/** Why did my agent do this? (§26 4.4) */
+export interface RunTrace {
+  run: AgentRun;
+  question: string;
+  narrative: string[];
+  given: TraceGiven[];
+  ignored: TraceIgnored[];
+  decision: {
+    kind: "answer" | "context";
+    answer: string | null;
+    strategy: string | null;
+    confidence: number | null;
+    reasoning: string[];
+    evidence: string[];
+    tokenCount: number | null;
+    tokenBudget: number | null;
+    truncated: boolean | null;
+  };
+  cut: Record<string, unknown>;
+  heldBack: Record<string, unknown>;
+  stateThen: Record<string, unknown> | null;
+  checks: ActionCheck[];
+  /** False for runs recorded before traces kept what was considered. */
+  recorded: boolean;
 }
 
 export interface AgentProfile {

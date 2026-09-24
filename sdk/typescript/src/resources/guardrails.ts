@@ -15,9 +15,11 @@
 import type { HttpClient } from "../client.js";
 import type {
   ActionCheck,
+  AgentAction,
   AgentProfile,
   AgentRun,
   Approval,
+  RunTrace,
   ApprovalStatus,
   Decision,
   GuardrailReason,
@@ -53,6 +55,37 @@ export function toApproval(raw: any): Approval {
     usedAt: raw.used_at ?? null,
     expiresAt: raw.expires_at,
     createdAt: raw.created_at,
+    evidenceMemories: (raw.evidence_memories ?? []).map((memory: any) => ({
+      id: memory.id,
+      type: memory.type ?? null,
+      content: memory.content ?? null,
+      status: memory.status ?? null,
+    })),
+    withheldEvidence: raw.withheld_evidence ?? 0,
+    customer: raw.customer ?? null,
+    actionId: raw.action_id ?? null,
+  };
+}
+
+export function toAction(raw: any): AgentAction {
+  return {
+    id: raw.id,
+    customerId: raw.customer_id,
+    action: raw.action,
+    request: raw.request ?? {},
+    status: raw.status,
+    decision: raw.decision,
+    summary: raw.summary,
+    nextStep: raw.next_step,
+    reasons: (raw.reasons ?? []).map(toReason),
+    approval: raw.approval ? toApproval(raw.approval) : null,
+    checkId: raw.check_id ?? null,
+    agent: raw.agent ?? null,
+    idempotencyKey: raw.idempotency_key ?? null,
+    outcomeNote: raw.outcome_note ?? null,
+    externalRef: raw.external_ref ?? null,
+    createdAt: raw.created_at,
+    completedAt: raw.completed_at ?? null,
   };
 }
 
@@ -251,6 +284,107 @@ export class Guardrails {
   }
 }
 
+/**
+ * The approval gateway (§26 4.5): the one call an agent makes before acting.
+ *
+ * ```ts
+ * const action = await memory.actions.request({ customerId, action: "process_refund", request: { amount: 25 } });
+ * if (action.status === "allowed") {
+ *   await billing.refund(25);
+ *   await memory.actions.complete(action.id, "done", { externalRef: refundId });
+ * }
+ * ```
+ */
+export class Actions {
+  constructor(private readonly http: HttpClient) {}
+
+  async request(input: {
+    customerId: string;
+    action: string;
+    request?: Record<string, unknown>;
+    idempotencyKey?: string;
+    approvalId?: string;
+    sessionId?: string;
+    agent?: string;
+  }): Promise<AgentAction> {
+    return toAction(
+      await this.http.request<any>({
+        method: "POST",
+        path: "/v1/agent/actions/request",
+        body: {
+          customer_id: input.customerId,
+          action: input.action,
+          request: input.request ?? {},
+          idempotency_key: input.idempotencyKey,
+          approval_id: input.approvalId,
+          session_id: input.sessionId,
+          agent: input.agent,
+        },
+      }),
+    );
+  }
+
+  async get(actionId: string): Promise<AgentAction> {
+    return toAction(
+      await this.http.request<any>({ method: "GET", path: `/v1/agent/actions/${encodeURIComponent(actionId)}` }),
+    );
+  }
+
+  /** Go ahead with an action a person approved — the rules run again on today's facts. */
+  async proceed(actionId: string): Promise<AgentAction> {
+    return toAction(
+      await this.http.request<any>({
+        method: "POST",
+        path: `/v1/agent/actions/${encodeURIComponent(actionId)}/proceed`,
+      }),
+    );
+  }
+
+  /** Report what happened, so the customer's action history is what really happened. */
+  async complete(
+    actionId: string,
+    outcome: "done" | "failed" | "cancelled" = "done",
+    options: { note?: string; externalRef?: string } = {},
+  ): Promise<AgentAction> {
+    return toAction(
+      await this.http.request<any>({
+        method: "POST",
+        path: `/v1/agent/actions/${encodeURIComponent(actionId)}/complete`,
+        body: { outcome, note: options.note ?? null, external_ref: options.externalRef ?? null },
+      }),
+    );
+  }
+
+  async list(
+    params: { customerId?: string; action?: string; status?: string; agent?: string; limit?: number } = {},
+  ): Promise<Page<AgentAction>> {
+    const raw = await this.http.request<any>({
+      method: "GET",
+      path: "/v1/agent/actions",
+      query: {
+        customer_id: params.customerId,
+        action: params.action,
+        status: params.status,
+        agent: params.agent,
+        limit: params.limit ?? 50,
+      },
+    });
+    return { ...raw, data: raw.data.map(toAction) };
+  }
+
+  /** Wait for a person to decide on a waiting action, then proceed with it. */
+  async waitFor(actionId: string, options: { timeoutMs?: number; intervalMs?: number } = {}): Promise<AgentAction> {
+    const deadline = Date.now() + (options.timeoutMs ?? 300_000);
+    for (;;) {
+      const current = await this.get(actionId);
+      if (current.status !== "pending_approval") return current;
+      if (current.approval && current.approval.status !== "pending") return this.proceed(actionId);
+      if (Date.now() >= deadline) return current;
+      await sleep(Math.max(500, options.intervalMs ?? 5_000));
+    }
+  }
+}
+
 export class Runs {
   constructor(private readonly http: HttpClient) {}
 
@@ -307,6 +441,55 @@ export class Runs {
       heldBack: raw.held_back ?? {},
       stateThen: raw.state_then ?? null,
       checks: (raw.checks ?? []).map(toCheck),
+    };
+  }
+
+  /** Why did my agent do this? What it was given (cited, handed over, or retrieved and not
+   *  used), what it was not given and why — below the cut, capped by type, over the token
+   *  budget, superseded, expired, restricted, outside its profile — and what it decided. */
+  async trace(runId: string): Promise<RunTrace> {
+    const raw = await this.http.request<any>({
+      method: "GET",
+      path: `/v1/agent/runs/${encodeURIComponent(runId)}/trace`,
+    });
+    return {
+      run: toRun(raw.run),
+      question: raw.question,
+      narrative: raw.narrative ?? [],
+      given: (raw.given ?? []).map((item: any) => ({
+        ...toRunMemory(item),
+        verdict: item.verdict,
+        why: item.why,
+      })),
+      ignored: (raw.ignored ?? []).map((item: any) => ({
+        id: item.id,
+        type: item.type ?? null,
+        reason: item.reason,
+        why: item.why,
+        visible: item.visible ?? true,
+        content: item.content ?? null,
+        score: item.score ?? null,
+        position: item.position ?? null,
+        match: item.match ?? null,
+        supersededBy: item.superseded_by ?? null,
+        replacementRank: item.replacement_rank ?? null,
+      })),
+      decision: {
+        kind: raw.decision.kind,
+        answer: raw.decision.answer ?? null,
+        strategy: raw.decision.strategy ?? null,
+        confidence: raw.decision.confidence ?? null,
+        reasoning: raw.decision.reasoning ?? [],
+        evidence: raw.decision.evidence ?? [],
+        tokenCount: raw.decision.token_count ?? null,
+        tokenBudget: raw.decision.token_budget ?? null,
+        truncated: raw.decision.truncated ?? null,
+      },
+      cut: raw.cut ?? {},
+      heldBack: raw.held_back ?? {},
+      stateThen: raw.state_then ?? null,
+      checks: (raw.checks ?? []).map(toCheck),
+      recorded: raw.recorded ?? true,
     };
   }
 }

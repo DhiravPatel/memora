@@ -24,12 +24,40 @@ from nlp.tokenize import lemmatize, tokenize
 logger = get_logger(__name__)
 
 
+# How many of the candidates ranked but not returned are kept, for the decision trace
+# (§26 4.4): enough to answer "why wasn't X used?", bounded so a trace stays small.
+PASSED_OVER_LIMIT = 15
+
+
+@dataclass(slots=True)
+class PassedOver:
+    """A candidate that was ranked but not returned, and why."""
+
+    item: ScoredMemory
+    # "type_cap" — the result already held enough memories of its type; "below_cut" —
+    # it ranked after the last one returned.
+    reason: str
+    position: int  # its place in the full ranking, 1-based
+
+    def explain(self) -> dict[str, object]:
+        return {
+            **self.item.explain(),
+            "type": str(self.item.memory.type),
+            "reason": self.reason,
+            "position": self.position,
+        }
+
+
 @dataclass(slots=True)
 class RetrievalResult:
     memories: list[ScoredMemory]
     analysis: QueryAnalysis
     entity_ids: list[str] = field(default_factory=list)
     strategies_used: list[str] = field(default_factory=list)
+    passed_over: list[PassedOver] = field(default_factory=list)
+    candidate_count: int = 0
+    limit: int = 0
+    per_type: int = 0
 
     def ids(self) -> list[str]:
         return [item.memory.id for item in self.memories]
@@ -66,6 +94,7 @@ class MemoryRetriever:
         types: Sequence[MemoryType] | None = None,
         include_semantic: bool = True,
         include_concepts: bool = True,
+        keyword_any: bool = True,
         learned_synonyms: dict[str, tuple[str, ...]] | None = None,
     ) -> RetrievalResult:
         # The project's own mined vocabulary widens the keyword leg: a question about "the
@@ -142,6 +171,7 @@ class MemoryRetriever:
                     customer_id=customer_id,
                     query=query,
                     limit=self.candidate_limit,
+                    any_word=keyword_any,
                 )
             for memory, score in rows:
                 entry = candidates.setdefault(memory.id, ScoredMemory(memory=memory))
@@ -230,8 +260,11 @@ class MemoryRetriever:
                 )
             strategies.append("fallback")
 
-        ranked = self.ranker.rank(candidates.values())
-        ranked = MemoryRanker.diversify(ranked, per_type=max(2, limit // 2))[:limit]
+        everything = self.ranker.rank(candidates.values())
+        per_type = max(2, limit // 2)
+        diverse = MemoryRanker.diversify(everything, per_type=per_type)
+        ranked = diverse[:limit]
+        passed_over = _passed_over(everything, diverse, ranked)
 
         logger.info(
             "memory.retrieved",
@@ -246,6 +279,10 @@ class MemoryRetriever:
             analysis=analysis,
             entity_ids=entity_ids,
             strategies_used=strategies,
+            passed_over=passed_over,
+            candidate_count=len(candidates),
+            limit=limit,
+            per_type=per_type,
         )
 
     async def _apply_relationship_relevance(
@@ -276,3 +313,19 @@ class MemoryRetriever:
             if set(linked) & neighbour_ids:
                 candidate.relationship_relevance = max(candidate.relationship_relevance, 0.4)
                 candidate.strategies.add("relationship")
+
+
+def _passed_over(
+    everything: Sequence[ScoredMemory], diverse: Sequence[ScoredMemory], returned: Sequence[ScoredMemory]
+) -> list[PassedOver]:
+    """The best candidates that did not make it, each with the reason, best first."""
+    kept = {item.memory.id for item in diverse}
+    shown = {item.memory.id for item in returned}
+    found: list[PassedOver] = []
+    for position, item in enumerate(everything, start=1):
+        if item.memory.id in shown:
+            continue
+        found.append(PassedOver(item, "below_cut" if item.memory.id in kept else "type_cap", position))
+        if len(found) >= PASSED_OVER_LIMIT:
+            break
+    return found

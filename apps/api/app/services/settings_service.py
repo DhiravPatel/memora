@@ -19,11 +19,26 @@ from database.models import Project
 from memory_engine.analytics.health import MAX_WEIGHT, MIN_WEIGHT
 from memory_engine.analytics.health import WEIGHTS as HEALTH_WEIGHTS
 from memory_engine.guardrails import BUILTIN_RULES, GuardrailError, compile_guardrails
-from memory_engine.lifecycle import DEFAULT_LIFECYCLE, LifecycleError, compile_lifecycle
+from memory_engine.lifecycle import (
+    DEFAULT_LIFECYCLE,
+    TRACK_TEMPLATES,
+    LifecycleError,
+    compile_lifecycle,
+    compile_tracks,
+)
 from memory_engine.policy import PolicyError, compile_policy
 
 FieldKind = Literal[
-    "number", "percent", "boolean", "map", "weights", "text", "policies", "lifecycle", "guardrails"
+    "number",
+    "percent",
+    "boolean",
+    "map",
+    "weights",
+    "text",
+    "policies",
+    "lifecycle",
+    "lifecycle_tracks",
+    "guardrails",
 ]
 
 # How long a person has to answer an agent's request before it lapses, by default.
@@ -91,8 +106,12 @@ def defaults() -> dict[str, Any]:
         "health_weights": dict(HEALTH_WEIGHTS),
         "restriction_policies": [],
         "lifecycle": DEFAULT_LIFECYCLE,
+        # Extra tracks are opt-in for existing projects; new projects start with the
+        # engagement and commercial templates (see ``new_project_settings``).
+        "lifecycle_tracks": {},
         "concept_retrieval": True,
-        "guardrails": {"disabled": [], "rules": [], "approval_ttl_hours": DEFAULT_APPROVAL_TTL_HOURS},
+        "keyword_match_any": True,
+        "guardrails": {"disabled": [], "rules": [], "auto_approve": [], "approval_ttl_hours": DEFAULT_APPROVAL_TTL_HOURS},
         "ranking_weights": {
             "similarity": settings.rank_weight_similarity,
             "importance": settings.rank_weight_importance,
@@ -261,6 +280,19 @@ def schema() -> list[SettingField]:
             keys=[memory_type.value for memory_type in MemoryType],
         ),
         SettingField(
+            key="keyword_match_any",
+            label="Keyword search matches any word",
+            group="retrieval",
+            kind="boolean",
+            default=values["keyword_match_any"],
+            help=(
+                "Match a question on any of its meaningful words, ranked by how many match — "
+                "\"are the webhook retries still failing?\" finds \"the webhook retries are "
+                "failing again\". Off, every word must appear. Queries using search syntax "
+                "(quotes, -term, or) always keep it. Measure a change with an evaluation run."
+            ),
+        ),
+        SettingField(
             key="concept_retrieval",
             label="Concept retrieval",
             group="retrieval",
@@ -287,6 +319,20 @@ def schema() -> list[SettingField]:
             ),
         ),
         SettingField(
+            key="lifecycle_tracks",
+            label="Lifecycle tracks",
+            group="lifecycle",
+            kind="lifecycle_tracks",
+            default=values["lifecycle_tracks"],
+            keys=tuple(TRACK_TEMPLATES),
+            help=(
+                "More state machines beside the primary lifecycle — say, how engaged a customer "
+                "is and where they are commercially. Each is written like the lifecycle, has "
+                "its own history and its own `lifecycle.<track>` fact, and sends "
+                "customer.state_changed with its track name. Start from a template."
+            ),
+        ),
+        SettingField(
             key="guardrails",
             label="Agent guardrails",
             group="agents",
@@ -294,10 +340,13 @@ def schema() -> list[SettingField]:
             default=values["guardrails"],
             keys=tuple(BUILTIN_RULES),
             help=(
-                "What an agent may do to a customer, checked with POST /v1/agent/check before "
-                "it acts. Built-in rules can be switched off; project rules are conditions over "
-                "customer facts plus request.* (action, channel, amount, topic, plan), each "
-                "denying or requiring a person's approval. Approvals lapse after the hours set."
+                "What an agent may do to a customer, decided by POST /v1/agent/actions/request "
+                "(or /v1/agent/check) before it acts. Built-in rules — opt-outs included — can "
+                "be switched off; project rules are conditions over customer facts, the "
+                "customer's action history (actions.*) and request.* (action, channel, amount, "
+                "topic, plan, reply), each denying or requiring a person's approval. Automatic "
+                "limits approve money and account actions within an amount and a monthly count. "
+                "Approvals lapse after the hours set."
             ),
         ),
         SettingField(
@@ -366,6 +415,8 @@ def validate(patch: dict[str, Any]) -> dict[str, Any]:
         cleaned["lifecycle"] = _validate_lifecycle(cleaned["lifecycle"])
     if "guardrails" in cleaned:
         cleaned["guardrails"] = validate_guardrails(cleaned["guardrails"])
+    if "lifecycle_tracks" in cleaned:
+        cleaned["lifecycle_tracks"] = validate_tracks(cleaned["lifecycle_tracks"])
     if "integrations" in cleaned:
         cleaned["integrations"] = _encrypt_provider_secrets(cleaned["integrations"])
     return cleaned
@@ -399,14 +450,34 @@ def _validate_lifecycle(raw: Any) -> Any:
     return {"enabled": True, **machine.as_dict()}
 
 
+def validate_tracks(raw: Any) -> dict[str, Any]:
+    """Compile every track now: a typo in a transition is a 422 when saved, not a customer
+    who silently never moves."""
+    try:
+        tracks = compile_tracks(raw or {})
+    except LifecycleError as exc:
+        raise ValidationError(str(exc)) from exc
+    return {name: track.as_dict() for name, track in tracks.items()}
+
+
+def new_project_settings(settings: dict[str, Any] | None = None) -> dict[str, Any]:
+    """What a project is created with: the shipped tracks, unless the caller chose."""
+    initial = {"lifecycle_tracks": validate_tracks(TRACK_TEMPLATES)}
+    if settings:
+        initial.update(validate(settings))
+    return initial
+
+
 def validate_guardrails(raw: Any) -> dict[str, Any]:
     """Compile every rule's condition now, so a typo is a 422 when the rules are saved —
     not an agent that is never stopped because its rule could not be read."""
     if raw is None:
         raw = {}
     if not isinstance(raw, dict):
-        raise ValidationError("Guardrails must be an object with 'disabled', 'rules' and 'approval_ttl_hours'.")
-    unknown = set(raw) - {"disabled", "rules", "approval_ttl_hours"}
+        raise ValidationError(
+            "Guardrails must be an object with 'disabled', 'rules', 'auto_approve' and 'approval_ttl_hours'."
+        )
+    unknown = set(raw) - {"disabled", "rules", "auto_approve", "approval_ttl_hours"}
     if unknown:
         raise ValidationError(f"Guardrails has unknown keys: {', '.join(sorted(unknown))}.")
     try:

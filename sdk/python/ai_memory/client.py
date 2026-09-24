@@ -8,6 +8,7 @@ are safe to repeat — every write either carries an idempotency key or is dedup
 
 from __future__ import annotations
 
+import asyncio
 import random
 import time
 from collections.abc import Iterable, Mapping, Sequence
@@ -19,6 +20,7 @@ import httpx
 from ai_memory.errors import MemoryAPIError, MemoryConfigError, MemoryTimeoutError
 from ai_memory.models import (
     ActionCheck,
+    AgentAction,
     AgentProfile,
     AgentRun,
     AgentSession,
@@ -26,6 +28,7 @@ from ai_memory.models import (
     ConditionResult,
     Customer,
     Customer360,
+    CustomerChanges,
     CustomerContext,
     EventExplanation,
     Goal,
@@ -35,6 +38,7 @@ from ai_memory.models import (
     QueryResult,
     Recommendation,
     RunExplanation,
+    RunTrace,
     SignalReport,
     TrackedEvent,
     TurnResult,
@@ -51,6 +55,47 @@ def _iso(value: datetime | str | None) -> str | None:
     if value is None:
         return None
     return value.isoformat() if isinstance(value, datetime) else value
+
+
+def _action_payload(
+    customer_id: str,
+    action: str,
+    request: Mapping[str, Any] | None,
+    idempotency_key: str | None,
+    approval_id: str | None,
+    session_id: str | None,
+    agent: str | None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {"customer_id": customer_id, "action": action, "request": dict(request or {})}
+    for key, value in (
+        ("idempotency_key", idempotency_key),
+        ("approval_id", approval_id),
+        ("session_id", session_id),
+        ("agent", agent),
+    ):
+        if value:
+            payload[key] = value
+    return payload
+
+
+def _changes_params(
+    since: datetime | str | None,
+    until: datetime | str | None,
+    agent: str | None,
+    types: Sequence[str] | None,
+    order: str,
+    limit: int,
+) -> dict[str, Any]:
+    params: dict[str, Any] = {"order": order, "limit": limit}
+    if since:
+        params["since"] = _iso(since)
+    if until:
+        params["until"] = _iso(until)
+    if agent:
+        params["agent"] = agent
+    if types:
+        params["types"] = ",".join(types)
+    return params
 
 
 def _event_payload(
@@ -335,14 +380,31 @@ class MemoryClient(_BaseClient):
         return self._request("POST", "/v1/evals", json={"name": name, "description": description})
 
     def add_eval_cases(self, set_id: str, cases: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
-        """Add questions whose right answers you know.
+        """Add cases whose right answers you know — questions retrieval should answer, and
+        (``"kind": "extraction"``) events that should become the right memories.
 
             client.add_eval_cases(set_id, [
                 {"customer_id": "cus_1", "question": "Is the integration broken?",
                  "expected_phrases": ["connector"]},
+                {"customer_id": "cus_1", "kind": "extraction",
+                 "event": {"event_type": "support_message", "data": {"message": "The sync fails."}},
+                 "expect": [{"type": "problem", "contains": "sync fail"}],
+                 "forbid": [{"type": "intent"}]},
             ])
         """
         return self._request("POST", f"/v1/evals/{set_id}/cases", json={"cases": [dict(case) for case in cases]})
+
+    def eval_regression(self, set_id: str, settings: Mapping[str, Any], *, k: int = 10) -> dict[str, Any]:
+        """Before changing a setting: the set as configured and under ``settings`` (validated
+        like a save, never saved). ``safe`` is false when a passing case would fail, and
+        ``newly_failing`` names them."""
+        return self._request("POST", f"/v1/evals/{set_id}/regression", json={"settings": dict(settings), "k": k})
+
+    def eval_scorecard(self) -> dict[str, Any]:
+        """Retrieval recall, MRR and citation accuracy; extraction accuracy, false-memory
+        rate and type, sensitivity and consolidation accuracy; duplicate control and
+        consistency — memory quality in one place."""
+        return self._request("GET", "/v1/evals/scorecard")
 
     def run_eval(self, set_id: str, *, label: str | None = None, k: int = 10, wait: bool = True) -> dict[str, Any]:
         """Run a set against retrieval. The result includes the comparison with the
@@ -382,14 +444,26 @@ class MemoryClient(_BaseClient):
             )
         )
 
-    def lifecycle_state(self, customer_id: str) -> LifecycleState | None:
-        """The customer's current lifecycle state, or ``None`` if not placed yet."""
-        body = self._request("GET", f"/v1/customers/{customer_id}/state")
-        current = body.get("current")
-        return LifecycleState.from_api(current) if current else None
+    def lifecycle_state(self, customer_id: str, *, track: str = "lifecycle") -> LifecycleState | None:
+        """The customer's current state on a track, or ``None`` if not placed yet."""
+        return self.lifecycle_states(customer_id).get(track)
 
-    def lifecycle_history(self, customer_id: str, *, limit: int = 50) -> list[LifecycleState]:
-        body = self._request("GET", f"/v1/customers/{customer_id}/state/history", params={"limit": limit})
+    def lifecycle_states(self, customer_id: str) -> dict[str, LifecycleState | None]:
+        """The customer's current state on every track, keyed by track name."""
+        body = self._request("GET", f"/v1/customers/{customer_id}/state")
+        tracks = body.get("tracks") or [{"track": "lifecycle", "current": body.get("current")}]
+        return {
+            item["track"]: LifecycleState.from_api(item["current"]) if item.get("current") else None
+            for item in tracks
+        }
+
+    def lifecycle_history(
+        self, customer_id: str, *, track: str = "lifecycle", limit: int = 50
+    ) -> list[LifecycleState]:
+        """``track="all"`` interleaves every track by time."""
+        body = self._request(
+            "GET", f"/v1/customers/{customer_id}/state/history", params={"limit": limit, "track": track}
+        )
         return [LifecycleState.from_api(item) for item in body.get("data", [])]
 
     def set_lifecycle_state(
@@ -397,21 +471,24 @@ class MemoryClient(_BaseClient):
         customer_id: str,
         state: str,
         *,
+        track: str = "lifecycle",
         pin: bool = True,
         pin_days: int | None = None,
         note: str | None = None,
     ) -> LifecycleState:
-        """Set the state by hand. Pinned by default, so the machine leaves it alone."""
+        """Set the state on a track by hand. Pinned by default, so the machine leaves it alone."""
         return LifecycleState.from_api(
             self._request(
                 "PUT",
                 f"/v1/customers/{customer_id}/state",
-                json={"state": state, "pin": pin, "pin_days": pin_days, "note": note},
+                json={"state": state, "track": track, "pin": pin, "pin_days": pin_days, "note": note},
             )
         )
 
-    def release_lifecycle_state(self, customer_id: str) -> LifecycleState:
-        return LifecycleState.from_api(self._request("DELETE", f"/v1/customers/{customer_id}/state/pin"))
+    def release_lifecycle_state(self, customer_id: str, *, track: str = "lifecycle") -> LifecycleState:
+        return LifecycleState.from_api(
+            self._request("DELETE", f"/v1/customers/{customer_id}/state/pin", params={"track": track})
+        )
 
     def refresh_lifecycle_state(self, customer_id: str) -> dict[str, Any]:
         return self._request("POST", f"/v1/customers/{customer_id}/state/refresh")
@@ -420,9 +497,17 @@ class MemoryClient(_BaseClient):
         """The project's machine and how many customers are in each state."""
         return self._request("GET", "/v1/lifecycle")
 
-    def customers_in_state(self, state: str, *, limit: int = 50, offset: int = 0) -> list[Customer]:
+    def lifecycle_templates(self) -> list[dict[str, Any]]:
+        """The shipped tracks (engagement, commercial), ready for `lifecycle_tracks`."""
+        return self._request("GET", "/v1/lifecycle/templates")
+
+    def customers_in_state(
+        self, state: str, *, track: str = "lifecycle", limit: int = 50, offset: int = 0
+    ) -> list[Customer]:
         body = self._request(
-            "GET", "/v1/lifecycle/customers", params={"state": state, "limit": limit, "offset": offset}
+            "GET",
+            "/v1/lifecycle/customers",
+            params={"state": state, "track": track, "limit": limit, "offset": offset},
         )
         return [Customer.from_api(item) for item in body.get("data", [])]
 
@@ -445,6 +530,37 @@ class MemoryClient(_BaseClient):
     def snapshot_at(self, customer_id: str, time: datetime | str) -> dict[str, Any]:
         """What was known about the customer at a moment in the past."""
         return self._request("GET", f"/v1/customers/{customer_id}/snapshots/at", params={"time": _iso(time)})
+
+    def changes(
+        self,
+        customer_id: str,
+        *,
+        since: datetime | str | None = None,
+        until: datetime | str | None = None,
+        agent: str | None = None,
+        types: Sequence[str] | None = None,
+        order: str = "time",
+        limit: int = 50,
+    ) -> CustomerChanges:
+        """What changed about the customer since a moment, and what they looked like then and now.
+
+        ``since`` is a span ("7d", "12h", "2w", "3mo"), a time, a snapshot id, or
+        ``"last_session"`` — "since I last spoke to them" — or ``"last_run"``. Pass ``agent``
+        with either to mean that agent's last conversation or action.
+
+            brief = client.changes("cus_1", since="last_session", agent="support-bot")
+            print(brief.summary)  # "Since the last conversation (17 Sep 2026): upgraded to Pro; …"
+        """
+        return CustomerChanges.from_api(
+            self._request("GET", f"/v1/customers/{customer_id}/changes", params=_changes_params(since, until, agent, types, order, limit))
+        )
+
+    def compare(
+        self, customer_id: str, start: datetime | str, end: datetime | str | None = None
+    ) -> dict[str, Any]:
+        """The customer at two moments side by side ("then vs now"), with every fact that differs."""
+        params = {"from": _iso(start), **({"to": _iso(end)} if end else {})}
+        return self._request("GET", f"/v1/customers/{customer_id}/compare", params=params)
 
     def customer_360(
         self, customer_id: str, *, include: Sequence[str] | None = None
@@ -768,6 +884,80 @@ class MemoryClient(_BaseClient):
             )
         )
 
+    def request_action(
+        self,
+        customer_id: str,
+        action: str,
+        request: Mapping[str, Any] | None = None,
+        *,
+        idempotency_key: str | None = None,
+        approval_id: str | None = None,
+        session_id: str | None = None,
+        agent: str | None = None,
+    ) -> AgentAction:
+        """The one call before acting (§26 4.5): decided like :meth:`check_action`, recorded
+        as an action. ``allowed`` — go ahead and :meth:`complete_action`; ``pending_approval``
+        — a person was asked, :meth:`proceed_action` once they decide; ``denied`` — don't.
+
+            action = client.request_action("cus_1", "process_refund", {"amount": 25}, idempotency_key=ticket_id)
+            if action.allowed:
+                billing.refund(25)
+                client.complete_action(action.id, "done", external_ref=refund_id)
+        """
+        return AgentAction.from_api(
+            self._request(
+                "POST",
+                "/v1/agent/actions/request",
+                json=_action_payload(customer_id, action, request, idempotency_key, approval_id, session_id, agent),
+            )
+        )
+
+    def action(self, action_id: str) -> AgentAction:
+        return AgentAction.from_api(self._request("GET", f"/v1/agent/actions/{action_id}"))
+
+    def proceed_action(self, action_id: str) -> AgentAction:
+        """Go ahead with an action a person approved — the rules run again on today's facts."""
+        return AgentAction.from_api(self._request("POST", f"/v1/agent/actions/{action_id}/proceed"))
+
+    def complete_action(
+        self, action_id: str, outcome: str = "done", *, note: str | None = None, external_ref: str | None = None
+    ) -> AgentAction:
+        """Report what happened: ``done``, ``failed`` or ``cancelled``."""
+        return AgentAction.from_api(
+            self._request(
+                "POST",
+                f"/v1/agent/actions/{action_id}/complete",
+                json={"outcome": outcome, "note": note, "external_ref": external_ref},
+            )
+        )
+
+    def actions(
+        self,
+        *,
+        customer_id: str | None = None,
+        action: str | None = None,
+        status: str | None = None,
+        agent: str | None = None,
+        limit: int = 50,
+    ) -> list[AgentAction]:
+        params = {key: value for key, value in (("customer_id", customer_id), ("action", action), ("status", status), ("agent", agent)) if value}
+        body = self._request("GET", "/v1/agent/actions", params={**params, "limit": limit})
+        return [AgentAction.from_api(item) for item in body.get("data", [])]
+
+    def wait_for_action(self, action_id: str, *, timeout: float = 300.0, interval: float = 5.0) -> AgentAction:
+        """Wait for a person to decide on a waiting action, then proceed with it; returns it
+        whatever happened — allowed, denied, lapsed, or still waiting at the timeout."""
+        deadline = time.monotonic() + timeout
+        while True:
+            current = self.action(action_id)
+            if not current.waiting:
+                return current
+            if current.approval is not None and not current.approval.is_pending:
+                return self.proceed_action(action_id)
+            if time.monotonic() >= deadline:
+                return current
+            time.sleep(max(0.5, interval))
+
     def wait_for_approval(
         self, approval_id: str, *, timeout: float = 300.0, interval: float = 5.0
     ) -> Approval:
@@ -827,6 +1017,11 @@ class MemoryClient(_BaseClient):
     def explain_run(self, run_id: str) -> RunExplanation:
         """Why did the agent say that? Pass the ``run_id`` from a query or context call."""
         return RunExplanation.from_api(self._request("GET", f"/v1/agent/runs/{run_id}/explain"))
+
+    def run_trace(self, run_id: str) -> RunTrace:
+        """Why did my agent do this? What it was given, what it was not given and why, and
+        what it decided — with the guardrail checks around it."""
+        return RunTrace.from_api(self._request("GET", f"/v1/agent/runs/{run_id}/trace"))
 
     def my_profile(self) -> AgentProfile | None:
         """The agent profile this key acts as, or ``None`` for an unbound key."""
@@ -981,6 +1176,12 @@ class AsyncMemoryClient(_BaseClient):
         """
         return await self._request("POST", f"/v1/evals/{set_id}/cases", json={"cases": [dict(case) for case in cases]})
 
+    async def eval_regression(self, set_id: str, settings: Mapping[str, Any], *, k: int = 10) -> dict[str, Any]:
+        return await self._request("POST", f"/v1/evals/{set_id}/regression", json={"settings": dict(settings), "k": k})
+
+    async def eval_scorecard(self) -> dict[str, Any]:
+        return await self._request("GET", "/v1/evals/scorecard")
+
     async def run_eval(self, set_id: str, *, label: str | None = None, k: int = 10, wait: bool = True) -> dict[str, Any]:
         """Run a set against retrieval. The result includes the comparison with the
         previous run, and ``comparison["regressed"]`` is true if any question that used to
@@ -1019,14 +1220,23 @@ class AsyncMemoryClient(_BaseClient):
             )
         )
 
-    async def lifecycle_state(self, customer_id: str) -> LifecycleState | None:
-        """The customer's current lifecycle state, or ``None`` if not placed yet."""
-        body = await self._request("GET", f"/v1/customers/{customer_id}/state")
-        current = body.get("current")
-        return LifecycleState.from_api(current) if current else None
+    async def lifecycle_state(self, customer_id: str, *, track: str = "lifecycle") -> LifecycleState | None:
+        return (await self.lifecycle_states(customer_id)).get(track)
 
-    async def lifecycle_history(self, customer_id: str, *, limit: int = 50) -> list[LifecycleState]:
-        body = await self._request("GET", f"/v1/customers/{customer_id}/state/history", params={"limit": limit})
+    async def lifecycle_states(self, customer_id: str) -> dict[str, LifecycleState | None]:
+        body = await self._request("GET", f"/v1/customers/{customer_id}/state")
+        tracks = body.get("tracks") or [{"track": "lifecycle", "current": body.get("current")}]
+        return {
+            item["track"]: LifecycleState.from_api(item["current"]) if item.get("current") else None
+            for item in tracks
+        }
+
+    async def lifecycle_history(
+        self, customer_id: str, *, track: str = "lifecycle", limit: int = 50
+    ) -> list[LifecycleState]:
+        body = await self._request(
+            "GET", f"/v1/customers/{customer_id}/state/history", params={"limit": limit, "track": track}
+        )
         return [LifecycleState.from_api(item) for item in body.get("data", [])]
 
     async def set_lifecycle_state(
@@ -1034,21 +1244,23 @@ class AsyncMemoryClient(_BaseClient):
         customer_id: str,
         state: str,
         *,
+        track: str = "lifecycle",
         pin: bool = True,
         pin_days: int | None = None,
         note: str | None = None,
     ) -> LifecycleState:
-        """Set the state by hand. Pinned by default, so the machine leaves it alone."""
         return LifecycleState.from_api(
             await self._request(
                 "PUT",
                 f"/v1/customers/{customer_id}/state",
-                json={"state": state, "pin": pin, "pin_days": pin_days, "note": note},
+                json={"state": state, "track": track, "pin": pin, "pin_days": pin_days, "note": note},
             )
         )
 
-    async def release_lifecycle_state(self, customer_id: str) -> LifecycleState:
-        return LifecycleState.from_api(await self._request("DELETE", f"/v1/customers/{customer_id}/state/pin"))
+    async def release_lifecycle_state(self, customer_id: str, *, track: str = "lifecycle") -> LifecycleState:
+        return LifecycleState.from_api(
+            await self._request("DELETE", f"/v1/customers/{customer_id}/state/pin", params={"track": track})
+        )
 
     async def refresh_lifecycle_state(self, customer_id: str) -> dict[str, Any]:
         return await self._request("POST", f"/v1/customers/{customer_id}/state/refresh")
@@ -1057,9 +1269,13 @@ class AsyncMemoryClient(_BaseClient):
         """The project's machine and how many customers are in each state."""
         return await self._request("GET", "/v1/lifecycle")
 
-    async def customers_in_state(self, state: str, *, limit: int = 50, offset: int = 0) -> list[Customer]:
+    async def customers_in_state(
+        self, state: str, *, track: str = "lifecycle", limit: int = 50, offset: int = 0
+    ) -> list[Customer]:
         body = await self._request(
-            "GET", "/v1/lifecycle/customers", params={"state": state, "limit": limit, "offset": offset}
+            "GET",
+            "/v1/lifecycle/customers",
+            params={"state": state, "track": track, "limit": limit, "offset": offset},
         )
         return [Customer.from_api(item) for item in body.get("data", [])]
 
@@ -1084,6 +1300,31 @@ class AsyncMemoryClient(_BaseClient):
     async def snapshot_at(self, customer_id: str, time: datetime | str) -> dict[str, Any]:
         """What was known about the customer at a moment in the past."""
         return await self._request("GET", f"/v1/customers/{customer_id}/snapshots/at", params={"time": _iso(time)})
+
+    async def changes(
+        self,
+        customer_id: str,
+        *,
+        since: datetime | str | None = None,
+        until: datetime | str | None = None,
+        agent: str | None = None,
+        types: Sequence[str] | None = None,
+        order: str = "time",
+        limit: int = 50,
+    ) -> CustomerChanges:
+        """What changed about the customer since a moment — see :meth:`MemoryClient.changes`."""
+        return CustomerChanges.from_api(
+            await self._request(
+                "GET", f"/v1/customers/{customer_id}/changes", params=_changes_params(since, until, agent, types, order, limit)
+            )
+        )
+
+    async def compare(
+        self, customer_id: str, start: datetime | str, end: datetime | str | None = None
+    ) -> dict[str, Any]:
+        """The customer at two moments side by side, with every fact that differs."""
+        params = {"from": _iso(start), **({"to": _iso(end)} if end else {})}
+        return await self._request("GET", f"/v1/customers/{customer_id}/compare", params=params)
 
     async def customer_360(
         self, customer_id: str, *, include: Sequence[str] | None = None
@@ -1295,6 +1536,69 @@ class AsyncMemoryClient(_BaseClient):
             )
         )
 
+    async def request_action(
+        self,
+        customer_id: str,
+        action: str,
+        request: Mapping[str, Any] | None = None,
+        *,
+        idempotency_key: str | None = None,
+        approval_id: str | None = None,
+        session_id: str | None = None,
+        agent: str | None = None,
+    ) -> AgentAction:
+        return AgentAction.from_api(
+            await self._request(
+                "POST",
+                "/v1/agent/actions/request",
+                json=_action_payload(customer_id, action, request, idempotency_key, approval_id, session_id, agent),
+            )
+        )
+
+    async def action(self, action_id: str) -> AgentAction:
+        return AgentAction.from_api(await self._request("GET", f"/v1/agent/actions/{action_id}"))
+
+    async def proceed_action(self, action_id: str) -> AgentAction:
+        return AgentAction.from_api(await self._request("POST", f"/v1/agent/actions/{action_id}/proceed"))
+
+    async def complete_action(
+        self, action_id: str, outcome: str = "done", *, note: str | None = None, external_ref: str | None = None
+    ) -> AgentAction:
+        return AgentAction.from_api(
+            await self._request(
+                "POST",
+                f"/v1/agent/actions/{action_id}/complete",
+                json={"outcome": outcome, "note": note, "external_ref": external_ref},
+            )
+        )
+
+    async def actions(
+        self,
+        *,
+        customer_id: str | None = None,
+        action: str | None = None,
+        status: str | None = None,
+        agent: str | None = None,
+        limit: int = 50,
+    ) -> list[AgentAction]:
+        params = {key: value for key, value in (("customer_id", customer_id), ("action", action), ("status", status), ("agent", agent)) if value}
+        body = await self._request("GET", "/v1/agent/actions", params={**params, "limit": limit})
+        return [AgentAction.from_api(item) for item in body.get("data", [])]
+
+    async def wait_for_action(
+        self, action_id: str, *, timeout: float = 300.0, interval: float = 5.0  # noqa: ASYNC109 - same signature as the sync client
+    ) -> AgentAction:
+        deadline = asyncio.get_running_loop().time() + timeout
+        while True:
+            current = await self.action(action_id)
+            if not current.waiting:
+                return current
+            if current.approval is not None and not current.approval.is_pending:
+                return await self.proceed_action(action_id)
+            if asyncio.get_running_loop().time() >= deadline:
+                return current
+            await asyncio.sleep(max(0.5, interval))
+
     async def wait_for_approval(
         self, approval_id: str, *, timeout: float = 300.0, interval: float = 5.0  # noqa: ASYNC109 - same signature as the sync client
     ) -> Approval:
@@ -1350,6 +1654,9 @@ class AsyncMemoryClient(_BaseClient):
 
     async def explain_run(self, run_id: str) -> RunExplanation:
         return RunExplanation.from_api(await self._request("GET", f"/v1/agent/runs/{run_id}/explain"))
+
+    async def run_trace(self, run_id: str) -> RunTrace:
+        return RunTrace.from_api(await self._request("GET", f"/v1/agent/runs/{run_id}/trace"))
 
     async def my_profile(self) -> AgentProfile | None:
         body = await self._request("GET", "/v1/agent/profiles/me")

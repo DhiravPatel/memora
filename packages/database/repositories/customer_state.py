@@ -120,8 +120,30 @@ class CustomerSnapshotRepository(BaseRepository):
         return snapshot
 
 
+PRIMARY_TRACK = "lifecycle"
+
+
 class CustomerStateRepository(BaseRepository):
-    async def current(self, *, project_id: str, customer_id: str) -> CustomerState | None:
+    """Stays in lifecycle states, one open stay per customer per track (§26 4.2)."""
+
+    async def current(
+        self, *, project_id: str, customer_id: str, track: str = PRIMARY_TRACK
+    ) -> CustomerState | None:
+        result = await self.session.execute(
+            select(CustomerState)
+            .where(
+                CustomerState.project_id == project_id,
+                CustomerState.customer_id == customer_id,
+                CustomerState.track == track,
+                CustomerState.exited_at.is_(None),
+            )
+            .order_by(CustomerState.entered_at.desc())
+            .limit(1)
+        )
+        return result.scalars().first()
+
+    async def currents(self, *, project_id: str, customer_id: str) -> dict[str, CustomerState]:
+        """The open stay on every track, in one query."""
         result = await self.session.execute(
             select(CustomerState)
             .where(
@@ -130,17 +152,63 @@ class CustomerStateRepository(BaseRepository):
                 CustomerState.exited_at.is_(None),
             )
             .order_by(CustomerState.entered_at.desc())
-            .limit(1)
         )
-        return result.scalar_one_or_none()
+        found: dict[str, CustomerState] = {}
+        for row in result.scalars():
+            found.setdefault(row.track, row)
+        return found
+
+    async def entered_between(
+        self, *, project_id: str, customer_id: str, since: datetime, until: datetime
+    ) -> list[CustomerState]:
+        """Every stay that began inside a window, on any track — the transitions in it."""
+        result = await self.session.execute(
+            select(CustomerState)
+            .where(
+                CustomerState.project_id == project_id,
+                CustomerState.customer_id == customer_id,
+                CustomerState.entered_at >= since,
+                CustomerState.entered_at <= until,
+            )
+            .order_by(CustomerState.entered_at.asc())
+        )
+        return list(result.scalars())
+
+    async def at(
+        self, *, project_id: str, customer_id: str, moment: datetime
+    ) -> dict[str, CustomerState]:
+        """The stay on every track that was open at ``moment``."""
+        result = await self.session.execute(
+            select(CustomerState)
+            .where(
+                CustomerState.project_id == project_id,
+                CustomerState.customer_id == customer_id,
+                CustomerState.entered_at <= moment,
+                (CustomerState.exited_at.is_(None)) | (CustomerState.exited_at > moment),
+            )
+            .order_by(CustomerState.entered_at.desc())
+        )
+        found: dict[str, CustomerState] = {}
+        for row in result.scalars():
+            found.setdefault(row.track, row)
+        return found
 
     async def history(
-        self, *, project_id: str, customer_id: str, limit: int = 50, offset: int = 0
+        self,
+        *,
+        project_id: str,
+        customer_id: str,
+        track: str | None = PRIMARY_TRACK,
+        limit: int = 50,
+        offset: int = 0,
     ) -> tuple[list[CustomerState], int]:
+        """``track=None`` is every track, interleaved by time."""
         conditions = [
             CustomerState.project_id == project_id,
             CustomerState.customer_id == customer_id,
         ]
+        if track is not None:
+            conditions.append(CustomerState.track == track)
         total = await self.session.scalar(
             select(func.count()).select_from(CustomerState).where(*conditions)
         )
@@ -160,6 +228,7 @@ class CustomerStateRepository(BaseRepository):
         customer_id: str,
         state: str,
         source: str,
+        track: str = PRIMARY_TRACK,
         transition: str | None = None,
         reason: str | None = None,
         evaluation: dict[str, Any] | None = None,
@@ -172,7 +241,7 @@ class CustomerStateRepository(BaseRepository):
     ) -> CustomerState:
         """Close the current stay and open a new one, atomically within the session."""
         moment = at or utcnow()
-        previous = await self.current(project_id=project_id, customer_id=customer_id)
+        previous = await self.current(project_id=project_id, customer_id=customer_id, track=track)
         if previous is not None:
             await self.session.execute(
                 update(CustomerState)
@@ -183,6 +252,7 @@ class CustomerStateRepository(BaseRepository):
             id=new_id("cst"),
             project_id=project_id,
             customer_id=customer_id,
+            track=track,
             state=state,
             previous_state=previous.state if previous else None,
             entered_at=moment,
@@ -210,21 +280,32 @@ class CustomerStateRepository(BaseRepository):
         row.pinned_until = None
         return row
 
-    async def counts_by_state(self, project_id: str) -> dict[str, int]:
+    async def counts_by_state(self, project_id: str, track: str = PRIMARY_TRACK) -> dict[str, int]:
         result = await self.session.execute(
             select(CustomerState.state, func.count())
-            .where(CustomerState.project_id == project_id, CustomerState.exited_at.is_(None))
+            .where(
+                CustomerState.project_id == project_id,
+                CustomerState.track == track,
+                CustomerState.exited_at.is_(None),
+            )
             .group_by(CustomerState.state)
         )
         return {state: int(count) for state, count in result}
 
     async def customer_ids_in_state(
-        self, *, project_id: str, state: str, limit: int = 200, offset: int = 0
+        self,
+        *,
+        project_id: str,
+        state: str,
+        track: str = PRIMARY_TRACK,
+        limit: int = 200,
+        offset: int = 0,
     ) -> list[str]:
         result = await self.session.execute(
             select(CustomerState.customer_id)
             .where(
                 CustomerState.project_id == project_id,
+                CustomerState.track == track,
                 CustomerState.state == state,
                 CustomerState.exited_at.is_(None),
             )

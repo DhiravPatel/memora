@@ -16,6 +16,8 @@ from app.schemas.evaluation import (
     EvalSetDetail,
     EvalSetOut,
     EvalSuggestion,
+    RegressionIn,
+    RegressionOut,
 )
 from app.services.evaluation_service import INLINE_LIMIT, CaseInput, EvaluationService
 from app.services.reader import Reader
@@ -33,6 +35,7 @@ def run_summary(run: EvalRun) -> EvalRunSummaryOut:
         status=run.status,
         label=run.label,
         k=run.k,
+        proposed=run.overrides is not None,
         metrics=run.metrics or {},
         comparison=run.comparison,
         error=run.error,
@@ -53,6 +56,7 @@ def run_out(run: EvalRun, visible: set[str] | None = None) -> EvalRunOut:
         settings=run.settings or {},
         results=results,
         baseline_run_id=run.baseline_run_id,
+        overrides=run.overrides,
     )
 
 
@@ -83,9 +87,12 @@ async def _cases_out(session: AsyncSession, project: Project, cases: list[EvalCa
         EvalCaseOut(
             id=case.id,
             customer_id=external.get(case.customer_id, case.customer_id),
+            kind=case.kind or "retrieval",
             question=case.question,
             expected_memory_ids=list(case.expected_memory_ids or []),
             expected_phrases=list(case.expected_phrases or []),
+            event=case.event,
+            expectations=case.expectations,
             notes=case.notes,
             source=case.source,
             created_at=case.created_at,
@@ -156,6 +163,11 @@ async def add_cases(
                 expected_memory_ids=case.expected_memory_ids,
                 expected_phrases=case.expected_phrases,
                 notes=case.notes,
+                kind=case.kind,
+                event=case.event.model_dump() if case.event else None,
+                expect=[item.model_dump(exclude_none=True) for item in case.expect],
+                forbid=[item.model_dump(exclude_none=True) for item in case.forbid],
+                expect_nothing=case.expect_nothing,
             )
             for case in cases
         ],
@@ -211,3 +223,32 @@ async def suggestions(
 ) -> list[EvalSuggestion]:
     rows = await EvaluationService(session).suggestions(project=project, limit=limit, cleared=cleared)
     return [EvalSuggestion(**item) for item in rows]
+
+
+async def regression(
+    session: AsyncSession,
+    *,
+    project: Project,
+    set_id: str,
+    payload: RegressionIn,
+    cleared: bool,
+    actor_id: str | None,
+    embedder: Embedder,
+) -> RegressionOut:
+    service = EvaluationService(session, embedder)
+    row = await service.get_set(project=project, set_id=set_id)
+    outcome = await service.regression(
+        project=project, eval_set=row, settings=payload.settings, cleared=cleared, k=payload.k, actor_id=actor_id
+    )
+    return RegressionOut(
+        safe=outcome.safe,
+        summary=outcome.summary,
+        newly_failing=outcome.newly_failing,
+        newly_passing=outcome.newly_passing,
+        current=run_out(outcome.current, await _visible_for_run(session, project, outcome.current, cleared)),
+        proposed=run_out(outcome.proposed, await _visible_for_run(session, project, outcome.proposed, cleared)),
+    )
+
+
+async def scorecard(session: AsyncSession, *, project: Project, cleared: bool) -> dict[str, Any]:
+    return await EvaluationService(session).scorecard(project=project, cleared=cleared)

@@ -7,9 +7,8 @@ from fastapi import APIRouter, Query
 from app.core.dependencies import ApiProject, DBSession
 from app.schemas.common import Page
 from app.schemas.customers import CustomerOut
-from app.schemas.state import LifecycleOut
+from app.schemas.state import LifecycleOut, TrackTemplateOut
 from app.services import state_views
-from app.services.customer_state_service import lifecycle_for
 from app.services.serializers import customer_out
 from common.errors import ValidationError
 from database.repositories import CustomerRepository, CustomerStateRepository
@@ -19,8 +18,15 @@ router = APIRouter(prefix="/v1/lifecycle", tags=["lifecycle"])
 
 @router.get("", response_model=LifecycleOut)
 async def get_lifecycle(project: ApiProject, session: DBSession) -> LifecycleOut:
-    """The machine — states, transitions — and how many customers are in each state now."""
+    """The machines — the primary lifecycle and every extra track — and how many customers
+    are in each state now."""
     return await state_views.lifecycle(session, project=project)
+
+
+@router.get("/templates", response_model=list[TrackTemplateOut])
+async def lifecycle_templates(project: ApiProject) -> list[TrackTemplateOut]:
+    """The shipped tracks (engagement, commercial), ready to add to `lifecycle_tracks`."""
+    return state_views.templates()
 
 
 @router.get("/customers", response_model=Page[CustomerOut])
@@ -28,16 +34,21 @@ async def customers_in_state(
     project: ApiProject,
     session: DBSession,
     state: str = Query(min_length=1, max_length=64),
+    track: str = Query(default="lifecycle", max_length=40),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
 ) -> Page[CustomerOut]:
-    """Every customer currently in a state, most recently arrived first."""
-    machine = lifecycle_for(project)
-    if machine is None or state not in machine.states:
-        raise ValidationError(f"{state!r} is not a lifecycle state of this project.")
+    """Every customer currently in a state of a track, most recently arrived first."""
+    states_of = state_views.machine_states(project, track)
+    if states_of is None:
+        raise ValidationError(f"{track!r} is not a lifecycle track of this project.")
+    if state not in states_of:
+        raise ValidationError(f"{state!r} is not a state of the {track} track.")
     states = CustomerStateRepository(session)
-    counts = await states.counts_by_state(project.id)
-    ids = await states.customer_ids_in_state(project_id=project.id, state=state, limit=limit, offset=offset)
+    counts = await states.counts_by_state(project.id, track=track)
+    ids = await states.customer_ids_in_state(
+        project_id=project.id, state=state, track=track, limit=limit, offset=offset
+    )
     customers = await CustomerRepository(session).get_many(ids, project.id) if ids else []
     order = {ident: position for position, ident in enumerate(ids)}
     customers.sort(key=lambda customer: order.get(customer.id, 0))

@@ -20,6 +20,9 @@ from common.errors import ConflictError, NotFoundError, ValidationError
 from common.logging import get_logger
 from common.time import ensure_utc, utcnow
 from database.models import (
+    AgentAction,
+    AgentApproval,
+    AgentCheck,
     AgentSession,
     Customer,
     CustomerGoal,
@@ -45,6 +48,7 @@ class MergeResult:
     links_moved: int = 0
     goals_moved: int = 0
     sessions_moved: int = 0
+    agent_actions_moved: int = 0
     conflicts_relinked: int = 0
 
     def as_dict(self) -> dict[str, Any]:
@@ -56,6 +60,7 @@ class MergeResult:
             "links_moved": self.links_moved,
             "goals_moved": self.goals_moved,
             "sessions_moved": self.sessions_moved,
+            "agent_actions_moved": self.agent_actions_moved,
         }
 
 
@@ -135,6 +140,12 @@ class CustomerService:
         # Goals and agent sessions follow the person, not the record they were filed under.
         result.goals_moved = await self._move(CustomerGoal, source.id, target.id)
         result.sessions_moved = await self._move(AgentSession, source.id, target.id)
+        # So does what agents did for them: the action history is what limits like "a
+        # third credit this month needs a person" count (§26 4.5), and merging must not
+        # reset it. The checks and approvals behind those actions go with them.
+        result.agent_actions_moved = await self._move(AgentAction, source.id, target.id)
+        await self._move(AgentCheck, source.id, target.id)
+        await self._move(AgentApproval, source.id, target.id)
         # Signal snapshots are a per-day series keyed on customer: merging two series would
         # collide on (customer_id, captured_on), so the source's history is dropped and the
         # nightly job rebuilds the survivor's from the merged memories.

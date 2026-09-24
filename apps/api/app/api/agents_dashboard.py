@@ -13,6 +13,7 @@ from fastapi import APIRouter, Query
 
 from app.core.dependencies import Clearance, CurrentUserDep, DBSession, UserProject
 from app.schemas.agent_policy import (
+    ActionOut,
     AgentActivityOut,
     AgentCheckOut,
     AgentProfileIn,
@@ -25,6 +26,7 @@ from app.schemas.agent_policy import (
     RunExplanationOut,
     RunOut,
     RunSummaryOut,
+    RunTraceOut,
 )
 from app.schemas.common import Message, Page
 from app.services.agent_profile_service import AgentProfileService
@@ -254,11 +256,46 @@ async def get_run(run_id: str, project: UserProject, session: DBSession, cleared
     return await RunService(session, cleared=cleared).get(project=project, run_id=run_id)
 
 
+@router.get("/actions", response_model=Page[ActionOut])
+async def dashboard_actions(
+    project: UserProject,
+    session: DBSession,
+    cleared: Clearance,
+    customer_id: str | None = None,
+    action: str | None = Query(default=None, max_length=80),
+    status: str | None = Query(
+        default=None, pattern="^(allowed|pending_approval|denied|done|failed|cancelled|expired)$"
+    ),
+    agent: str | None = Query(default=None, max_length=120),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+) -> Page[ActionOut]:
+    customer = None
+    if customer_id:
+        customer = await CustomerRepository(session).resolve(customer_id, project.id)
+        if customer is None:
+            raise NotFoundError(f"Customer '{customer_id}' not found.")
+    rows, total = await GuardrailService(session, cleared=cleared).list_actions(
+        project=project, customer=customer, action=action, status=status, agent=agent, limit=limit, offset=offset
+    )
+    return Page[ActionOut](data=rows, total=total, limit=limit, offset=offset)
+
+
+@router.get("/actions/{action_id}", response_model=ActionOut)
+async def dashboard_action(action_id: str, project: UserProject, session: DBSession, cleared: Clearance) -> ActionOut:
+    return await GuardrailService(session, cleared=cleared).get_action(project=project, action_id=action_id)
+
+
 @router.get("/runs/{run_id}/explain", response_model=RunExplanationOut)
 async def explain_run(
     run_id: str, project: UserProject, session: DBSession, cleared: Clearance
 ) -> RunExplanationOut:
     return await RunService(session, cleared=cleared).explain(project=project, run_id=run_id)
+
+
+@router.get("/runs/{run_id}/trace", response_model=RunTraceOut)
+async def trace_run(run_id: str, project: UserProject, session: DBSession, cleared: Clearance) -> RunTraceOut:
+    return await RunService(session, cleared=cleared).trace(project=project, run_id=run_id)
 
 
 # -------------------------------------------------------------------- activity

@@ -202,17 +202,27 @@ used to probe one. Needs `memory:read`.
 
 | Endpoint | Purpose |
 | --- | --- |
-| `GET /v1/customers/{customer_id}/state` | current state, the transition that caused it and its evaluation |
-| `GET /v1/customers/{customer_id}/state/history` | every stay in a state, newest first |
-| `PUT /v1/customers/{customer_id}/state` | `{state, pin?, pin_days?, note?}` — set by hand; pinned by default |
-| `DELETE /v1/customers/{customer_id}/state/pin` | hand the customer back to the machine |
-| `POST /v1/customers/{customer_id}/state/refresh` | re-evaluate now |
-| `GET /v1/lifecycle` | the machine and how many customers are in each state |
-| `GET /v1/lifecycle/customers?state=at_risk` | who is in a state |
+| `GET /v1/customers/{customer_id}/state` | current state on every track, the transition that caused it, its evaluation and its `reasons` |
+| `GET /v1/customers/{customer_id}/state/history?track=` | every stay in a state, newest first; `track=all` interleaves every track |
+| `PUT /v1/customers/{customer_id}/state` | `{state, track?, pin?, pin_days?, note?}` — set by hand; pinned by default |
+| `DELETE /v1/customers/{customer_id}/state/pin?track=` | hand the customer back to the machine on a track |
+| `POST /v1/customers/{customer_id}/state/refresh` | re-evaluate every track now |
+| `GET /v1/lifecycle` | the machines — the primary lifecycle and every track — and how many customers are in each state |
+| `GET /v1/lifecycle/templates` | the shipped engagement and commercial tracks, ready to add |
+| `GET /v1/lifecycle/customers?state=at_risk&track=` | who is in a state on a track |
 
-The machine is the `lifecycle` project setting — states, an initial state and ordered
-transitions whose `when` is a condition. The first matching transition wins. Writes need
-`customers:write`.
+The primary machine is the `lifecycle` project setting — states, an initial state and
+ordered transitions whose `when` is a condition. The first matching transition wins.
+`lifecycle_tracks` adds named machines beside it (new projects start with **engagement**:
+new → activated → adopting → power user → at risk → churned, and **commercial**: trial →
+paying → expanding → renewing → churned). Each track's state is a fact every rule can
+read — `lifecycle.engagement == "at_risk"`, `lifecycle.commercial.days_in_state > 60`.
+
+Every state carries `reasons`: the decisive clauses of the transition in words — "3
+unresolved problems", "activity down 47%", "negative feedback increasing" — rendered from
+the evaluation as the caller may see it, so a caller without clearance gets reasons without
+the values that were withheld. The `customer.state_changed` webhook carries `track` and
+`reasons` too. Writes need `customers:write`.
 
 ## Snapshots
 
@@ -224,6 +234,60 @@ transitions whose `when` is a condition. The first matching transition wins. Wri
 
 A snapshot is taken only when something material changes — a band, a count, the state, the
 plan — so each one is a moment worth knowing about. Needs `memory:read`.
+
+## What changed
+
+### `GET /v1/customers/{customer_id}/changes`
+
+"Tell me what changed since I last spoke to them", as typed changes with before, after, when
+and the evidence — and the customer *then* and *now*.
+
+| Parameter | Meaning |
+| --- | --- |
+| `since` | a span (`7d`, `12h`, `2w`, `3mo`), an ISO time or date, a snapshot id, `last_session` (the last finished conversation with the customer) or `last_run` (the last time an agent acted for them). Default `30d`. |
+| `until` | an ISO time, a span back from now, or a snapshot id. Default now. |
+| `agent` | with `last_session`/`last_run`: only that agent's |
+| `types` | comma-separated: `subscription, lifecycle, health, risk, trajectory, problem, intent, preference, goal, feedback, relationship, fact, memory, signal, activity` |
+| `order` | `time` (newest first, default) or `importance` |
+| `limit` | 1–200, default 50 |
+
+```json
+{
+  "customer_id": "acme",
+  "window": { "since": "…", "until": "…", "basis": "last_session", "found": true, "label": "Since the last conversation (17 Sep 2026)" },
+  "summary": "Since the last conversation (17 Sep 2026): upgraded from Starter to Pro; a new problem; a problem resolved; said they may cancel; health moved from healthy to at risk.",
+  "changes": [{
+    "type": "subscription", "kind": "changed", "title": "Upgraded from Starter to Pro",
+    "before": "The customer is on the Starter plan.", "after": "The customer upgraded from the Starter plan to the Pro plan.",
+    "detected_at": "…", "evidence": ["mem_…", "mem_…"], "source": "memory",
+    "detail": { "plan": "pro", "previous_plan": "starter", "direction": "upgraded" }, "importance": 0.95
+  }, {
+    "type": "lifecycle", "kind": "moved", "title": "Engagement: adopting → at risk", "track": "engagement",
+    "reasons": ["3 unresolved problems", "activity down 47%"]
+  }],
+  "counts": { "subscription": 1, "problem": 2, "lifecycle": 1 },
+  "withheld": 0,
+  "then": { "snapshot_id": "snp_…", "state": { "plan": "starter", "health_band": "healthy", "tracks": { "engagement": "adopting" } }, "description": "healthy (82) · Starter plan · 0 open problems" },
+  "now":  { "live": true, "state": { "plan": "pro", "health_band": "at_risk" }, "description": "at risk (54) · Pro plan · 2 open problems" }
+}
+```
+
+Each change is read from the record that is authoritative for it: memories first seen in the
+window (problems opened and resolved, plan and preference changes with what they replaced,
+intents, strong feedback, facts and relationships), memory versions (a problem reported
+again, a person's correction), goal evidence, lifecycle stays on every track, the snapshots
+at each end (health bands, churn risk, trajectory), signals that started or stopped, and
+activity against the equal window before — compared only when the customer existed for all
+of it. A caller without clearance is not shown changes about memories they may not read;
+`withheld` counts them, and a *before* quoting a hidden memory reads `[withheld]`. When
+`last_session`/`last_run` has nothing to go back to, the window falls back to 30 days and
+`window.note` says so. Needs `memory:read`.
+
+### `GET /v1/customers/{customer_id}/compare?from=&to=`
+
+The customer at two moments side by side — plan, health, lifecycle and every track,
+problems, goals, channel, intents, signals — and every fact that differs, with `added` and
+`removed` for lists. `from`/`to` take the same forms as `until`; `to` defaults to now.
 
 ## Quality
 
@@ -250,24 +314,52 @@ the cause and a concrete fix:
 A part with nothing to measure yet has `score: null` and is left out of the overall score.
 Needs `memory:read`.
 
-## Retrieval evaluation
+## Memory evaluation
 
 | Endpoint | Purpose |
 | --- | --- |
 | `GET /v1/evals` / `POST /v1/evals` | list sets (with the latest run), create one |
 | `GET /v1/evals/{set_id}` / `DELETE` | a set with its cases and runs |
-| `POST /v1/evals/{set_id}/cases` | `{cases: [{customer_id, question, expected_memory_ids?, expected_phrases?}]}` |
+| `POST /v1/evals/{set_id}/cases` | up to 200 cases: questions or events (below) |
 | `DELETE /v1/evals/{set_id}/cases/{case_id}` | remove a case |
 | `POST /v1/evals/{set_id}/runs` | `{label?, k?, wait?}` — run the set; inline up to 100 cases |
 | `GET /v1/evals/{set_id}/runs` | runs, newest first |
-| `GET /v1/evals/runs/{run_id}` | a run with per-question results and the comparison |
+| `GET /v1/evals/runs/{run_id}` | a run with per-case results and the comparison |
+| `POST /v1/evals/{set_id}/regression` | `{settings, k?}` — the set as configured and under proposed settings |
+| `GET /v1/evals/scorecard` | memory quality in one place |
 | `GET /v1/evals/suggestions` | recent real questions and what came back — pick the right answer to make a case |
 
-A run reports Recall@k, Hit@k, MRR and citation hit rate, the retrieval settings it ran
-under, and `comparison` against the previous run. **`comparison.regressed` is true when any
-question that used to be answered no longer is** — the flag to fail a CI job on. Runs ask
-through the real answer path without writing to the query log or counting as usage.
-Writes need `memory:write`.
+Two kinds of case. A **retrieval** case is a question with its right answer:
+`{customer_id, question, expected_memory_ids?, expected_phrases?}`. An **extraction** case is
+an event with the memories it should — and must not — become, run through the real pipeline
+as a dry run (the same one as `/v1/events/preview`):
+
+```json
+{ "customer_id": "acme", "kind": "extraction", "question": "A fix closes the problem",
+  "event": { "event_type": "support_message", "data": { "message": "The payroll export works again, thanks." } },
+  "expect": [ { "contains": "payroll export", "action": "conflict" } ],
+  "forbid": [ { "type": "problem", "action": "create" } ] }
+```
+
+An expectation names any of `type`, `contains` (words, matched in any form), `entity`,
+`sensitivity` and `action` (what consolidation does: `create`, `merge`, `update`,
+`conflict`, `ignore`); `"expect_nothing": true` says the event should become no memory.
+Unknown fields are refused, so a typo cannot silently weaken a case.
+
+A run reports Recall@k, Hit@k, MRR and citation hit rate for questions, and for events
+`metrics.extraction`: `accuracy` (cases passing), `expected_recall`, `false_memory_rate`
+(cases that made a forbidden memory, or any memory when nothing was expected), and — for
+statements that were extracted at all — `type_accuracy`, `sensitivity_accuracy` and
+`consolidation_accuracy`. A failed expectation says why: `"near_miss": "typed fact, expected
+preference"`. **`comparison.regressed` is true when any case that used to pass no longer
+does** — the flag to fail a CI job on.
+
+A **regression** runs the set twice: as configured, and under `settings` validated exactly as
+a save would be and never saved. `newly_failing` names every case the change would break,
+`safe` is false when there is one, and the proposed run (`overrides`, `proposed: true`) is
+never the next run's baseline. The **scorecard** weights the latest run of every set by the
+cases it scored and adds the quality report's duplicate control, consistency and freshness.
+Runs never write to the query log or count as usage. Writes need `memory:write`.
 
 ## Reading
 
@@ -406,8 +498,10 @@ POST /v1/agent/check
 
 `decision` is the strictest reason: `deny` > `require_approval` > `allow`. Every reason is
 returned, not just the deciding one. `request` carries what rules read — `channel`,
-`amount`, `topic`, `plan`, or anything else (`request.<key>` in a project rule).
-`"dry_run": true` decides without recording or filing an approval.
+`amount`, `topic`, `plan`, `reply` (true when answering the customer's own message), or
+anything else (`request.<key>` in a project rule). `"dry_run": true` decides without
+recording or filing an approval. To act, prefer the gateway below: it decides the same way
+and records the action.
 
 Built-in rules (switch any off in the `guardrails` setting):
 
@@ -417,6 +511,7 @@ Built-in rules (switch any off in the `guardrails` setting):
 | `at_risk_blocks_selling` | deny selling to an at-risk customer |
 | `churn_intent_blocks_promotion` | deny marketing to a customer who said they may leave |
 | `channel_preference` | deny contact on a channel the customer does not prefer |
+| `respect_opt_out` | deny what the customer asked not to receive: calls, emails, texts, WhatsApp (by action or `request.channel`), selling after "no sales", marketing after "unsubscribe", any outreach after "do not contact" — except a `reply` to their own message |
 | `unresolved_problem_blocks_closing` | deny closing a ticket whose problem is open; approval when the topic is not given |
 | `money_requires_approval` | discounts, credits, refunds, waived fees |
 | `account_change_requires_approval` | cancel, downgrade, change plan, pause, delete |
@@ -427,12 +522,52 @@ Project rules, in the `guardrails` setting:
 { "disabled": [], "approval_ttl_hours": 24,
   "rules": [ { "name": "large_discounts", "actions": ["offer_discount"],
                "when": "request.amount > 200 and health.band == \"critical\"",
-               "decision": "deny", "message": "No discounts over 200 for critical accounts without the CS lead." } ] }
+               "decision": "deny", "message": "No discounts over 200 for critical accounts without the CS lead." },
+             { "name": "second_credit", "actions": ["issue_credit"],
+               "when": "actions.issue_credit.count_30d >= 1",
+               "decision": "require_approval", "message": "A second credit this month needs a person." } ],
+  "auto_approve": [ { "actions": ["process_refund"], "up_to": 50, "max_per_30_days": 3 } ] }
 ```
 
-Conditions are compiled on save (`422` naming the fact you meant). `GET /v1/agent/checks`
+`auto_approve` lifts the built-in `money_requires_approval` / `account_change_requires_approval`
+for the listed actions — within `up_to` (required for money actions) and while the customer's
+history is under `max_per_30_days`. A project rule that requires approval is more specific
+than a limit and is never lifted by one. Rules read the customer's **action history** as
+facts — `actions.<action or family>.count_7d | count_30d | amount_30d | days_since_last`
+(families: `selling`, `promotion`, `contact`, `closing`, `money`, `account`, `support`) —
+counted from actions the gateway allowed or agents reported done; with no history, counts
+and amounts read 0. Conditions are compiled on save (`422` naming the fact you meant). `GET /v1/agent/checks`
 lists recorded checks (`customer_id`, `decision`, `agent`, `session_id`);
 `GET /v1/agent/guardrails` returns the recognised actions and built-in rules.
+
+## Action gateway
+
+The one call an agent makes before it acts — decided like `/check`, and recorded as an
+action whose outcome becomes the customer's history.
+
+| Endpoint | Purpose |
+| --- | --- |
+| `POST /v1/agent/actions/request` | `{customer_id, action, request, idempotency_key?, session_id?, approval_id?}` → `201` with the action |
+| `GET /v1/agent/actions/{id}` | where it stands, and `next_step` |
+| `POST /v1/agent/actions/{id}/proceed` | after a person approved: the rules run again on today's facts and the approval is redeemed |
+| `POST /v1/agent/actions/{id}/complete` | `{"outcome": "done" \| "failed" \| "cancelled", "note"?, "external_ref"?}` |
+| `GET /v1/agent/actions` | filter by `customer_id`, `action`, `status`, `agent` |
+
+```json
+{ "id": "act_…", "action": "process_refund", "request": { "amount": 25 },
+  "status": "allowed", "decision": "allow",
+  "summary": "Approved automatically: a refund of 25 within the limit of 50 (1 of 3 this month), set by the project.",
+  "next_step": "Go ahead, then report the outcome with /complete.",
+  "reasons": [ … ], "approval": null, "check_id": "chk_…" }
+```
+
+`status` is `allowed` (go ahead, then `/complete`), `pending_approval` (a person was asked —
+don't act; `/proceed` once they decide), `denied`, and after that `done`, `failed`,
+`cancelled` (a waiting action can be abandoned) or `expired` (its approval lapsed). A person's
+*no* settles a waiting action to `denied` at once; a *yes* still needs `/proceed`, because
+the rules run again then. The same `idempotency_key` returns the same action (a different
+request under it is a `409`). Completing emits `agent.action_completed`. Merging customers
+moves their action history with them.
 
 ## Approvals
 
@@ -444,6 +579,11 @@ Retrying the same request returns the same approval.
 | `GET /v1/agent/approvals?status=pending` | the queue |
 | `GET /v1/agent/approvals/{id}` | poll while waiting, or subscribe to `agent.approval_decided` |
 | `POST /v1/agent/approvals/{id}/decision` | `{"decision": "approve" \| "reject", "note": "…"}` — needs `approvals:decide` |
+
+Each approval carries what a reviewer needs to decide: `evidence_memories` — the memories its
+reasons cite, in their own words, as the reviewer may read them (`withheld_evidence` counts
+the rest) — `customer` (health, plan, lifecycle, open problems as last recorded) and
+`action_id`, the gateway action waiting on it.
 
 Then redeem: check again with `"approval_id": "apr_…"` and the **same** action and request.
 The rules re-run on today's facts; an approval satisfies only `require_approval`, never a
@@ -460,6 +600,7 @@ Every answer and context build, as it was recorded.
 | `GET /v1/agent/runs` | filter by `customer_id`, `agent`, `session_id`, `kind` (`query`/`context`), `since`, `until` |
 | `GET /v1/agent/runs/{id}` | the run with its trace: each memory's rank, scores, strategies, citation |
 | `GET /v1/agent/runs/{id}/explain` | why it said that — in sentences |
+| `GET /v1/agent/runs/{id}/trace` | what it was given, what it was **not** given and why, and what it decided |
 
 ```json
 {
@@ -481,6 +622,39 @@ Every answer and context build, as it was recorded.
 A memory a reader may not see is shown by id and score with `"visible": false`, and an
 answer composed from one is `[withheld]`.
 
+### `GET /v1/agent/runs/{id}/trace`
+
+"Why did my agent do this?" — including the memories it never saw.
+
+```json
+{
+  "question": "Is the Shopify sync still failing?",
+  "decision": { "kind": "answer", "strategy": "status:latest", "confidence": 0.85, "reasoning": ["…"] },
+  "given": [
+    { "id": "mem_…", "rank": 1, "verdict": "cited", "why": "#1, cited by the answer — found by keyword, semantic, score 0.80.",
+      "content_then": "The Shopify sync works now.", "content_now": "The Shopify sync works now." },
+    { "id": "mem_…", "rank": 2, "verdict": "not_cited", "why": "#2, retrieved but not cited — the answer drew on other evidence (…)." }
+  ],
+  "ignored": [
+    { "id": "mem_…", "reason": "superseded", "content": "The Shopify sync fails during checkout.",
+      "why": "Superseded on 12 Sep 2026 by a newer memory: “The Shopify sync works now.” — which the agent was given (#1)." },
+    { "id": "mem_…", "reason": "type_cap", "position": 6, "why": "Ranked #6 (score 0.40), but 5 problem memories were already included." },
+    { "id": "mem_…", "reason": "withheld_profile", "visible": false, "content": "[withheld]",
+      "why": "The support-agent profile does not read feedback memories." }
+  ],
+  "cut": { "candidates": 14, "limit": 10, "per_type": 5 },
+  "recorded": true
+}
+```
+
+`verdict` is `cited`, `given` (in a briefing) or `not_cited`. `reason` is one of
+`below_cut`, `type_cap`, `token_budget`, `section_cap`, `duplicate`, `superseded`,
+`expired`, `withheld_restricted`, `withheld_profile`. Ranking reasons are recorded as
+retrieval ranks; superseded, expired and withheld memories that matched the question are
+found when the run is recorded and kept as ids. A reader who may not see one of them gets
+`[withheld]` and the reason — and an answer or reasoning drawn from one is withheld too.
+Runs recorded before this existed have `recorded: false`.
+
 ## MCP
 
 The Python SDK ships an MCP server: `pip install ai-memory`, then
@@ -492,7 +666,7 @@ ai-memory-mcp --transport http --port 8765                                      
 
 Tools: `ask_memory`, `search_memory`, `customer_360`, `customer_brief`, `customer_changes`,
 `customer_timeline`, `get_health`, `get_goals`, `get_recommendations`, `check_action`,
-`explain_answer`, `remember`. Over HTTP each caller sends their own key as
+`request_action`, `proceed_action`, `report_action`, `explain_answer`, `remember`. Over HTTP each caller sends their own key as
 `Authorization: Bearer mk_…`; the key's scopes, clearance and profile apply to every tool.
 
 ## Asking
@@ -594,6 +768,7 @@ Subscribe to changes rather than polling for them. Configure at
 | `signal.raised` | A strong risk signal appeared that was not in the previous snapshot |
 | `customer.state_changed` | The customer moved through the lifecycle — by a rule, or set by hand |
 | `agent.action_denied` | A guardrail check refused an action an agent proposed |
+| `agent.action_completed` | An agent reported an action from the gateway done, failed or cancelled |
 | `agent.approval_requested` | An agent needs a person to approve an action |
 | `agent.approval_decided` | A request was approved, rejected — or lapsed (`status: "expired"`) |
 

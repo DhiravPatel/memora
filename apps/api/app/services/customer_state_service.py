@@ -32,14 +32,37 @@ from database.repositories import (
     CustomerStateRepository,
 )
 from memory_engine.conditions import is_content_fact
-from memory_engine.facts import CustomerFacts
-from memory_engine.lifecycle import Lifecycle, LifecycleError, Step, compile_lifecycle
+from memory_engine.facts import DAYS_SUFFIX, LIFECYCLE_PREFIX, CustomerFacts
+from memory_engine.lifecycle import (
+    PRIMARY_TRACK,
+    Lifecycle,
+    LifecycleError,
+    Step,
+    Track,
+    compile_lifecycle,
+    compile_tracks,
+)
 from memory_engine.policy import WITHHELD
+from memory_engine.reasons import reasons as reasons_in_words
 from memory_engine.snapshots import changes as diff_changes
 from memory_engine.snapshots import fingerprint, indexed
 from webhooks import WebhookDispatcher, customer_state_changed
 
 logger = get_logger(__name__)
+
+
+@dataclass(slots=True)
+class TrackRefresh:
+    """What one track did in a refresh."""
+
+    track: str
+    state: str | None
+    steps: list[Step] = field(default_factory=list)
+    initial: bool = False
+
+    @property
+    def moved(self) -> bool:
+        return bool(self.steps) or self.initial
 
 
 @dataclass(slots=True)
@@ -49,14 +72,16 @@ class StateRefresh:
     steps: list[Step] = field(default_factory=list)
     snapshot: CustomerSnapshot | None = None
     initial: bool = False
+    # Every track that was evaluated, the primary included (§26 4.2).
+    tracks: dict[str, TrackRefresh] = field(default_factory=dict)
 
     @property
     def moved(self) -> bool:
-        return bool(self.steps) or self.initial
+        return any(track.moved for track in self.tracks.values()) or bool(self.steps) or self.initial
 
 
 def lifecycle_for(project: Project) -> Lifecycle | None:
-    """The project's machine, or ``None`` if it switched lifecycle tracking off.
+    """The project's primary machine, or ``None`` if it switched lifecycle tracking off.
 
     A stored machine that no longer compiles (written around the API) falls back to the
     default rather than stopping every customer's state from being tracked.
@@ -69,6 +94,43 @@ def lifecycle_for(project: Project) -> Lifecycle | None:
     except LifecycleError as exc:
         logger.error("lifecycle.invalid", project_id=project.id, error=str(exc))
         return compile_lifecycle(None)
+
+
+def tracks_for(project: Project, *, include_disabled: bool = False) -> dict[str, Track]:
+    """The project's extra tracks. One that no longer compiles is skipped and logged —
+    the others keep running."""
+    raw = (project.settings or {}).get("lifecycle_tracks") or {}
+    if not isinstance(raw, dict):
+        return {}
+    tracks: dict[str, Track] = {}
+    for name, spec in raw.items():
+        try:
+            compiled = compile_tracks({name: spec})
+        except LifecycleError as exc:
+            logger.error("lifecycle.track_invalid", project_id=project.id, track=name, error=str(exc))
+            continue
+        for key, track in compiled.items():
+            if track.enabled or include_disabled:
+                tracks[key] = track
+    return tracks
+
+
+def machines_for(project: Project) -> dict[str, Lifecycle]:
+    """Every machine to run, primary first — the order later tracks may read earlier ones."""
+    machines: dict[str, Lifecycle] = {}
+    primary = lifecycle_for(project)
+    if primary is not None:
+        machines[PRIMARY_TRACK] = primary
+    for name, track in tracks_for(project).items():
+        machines[name] = track.machine
+    return machines
+
+
+def track_label(project: Project, track: str) -> str:
+    if track == PRIMARY_TRACK:
+        return "Lifecycle"
+    found = tracks_for(project, include_disabled=True).get(track)
+    return found.label if found else track.replace("_", " ").title()
 
 
 class CustomerStateService:
@@ -92,28 +154,38 @@ class CustomerStateService:
         report: Any | None = None,
         emit: bool = True,
     ) -> StateRefresh:
-        current = await self.states.current(project_id=project.id, customer_id=customer.id)
+        currents = await self.states.currents(project_id=project.id, customer_id=customer.id)
         now = utcnow()
-        if current is not None and current.pinned and current.pinned_until and ensure_utc(current.pinned_until) <= now:
-            await self.states.release_pin(current)
+        for row in currents.values():
+            if row.pinned and row.pinned_until and ensure_utc(row.pinned_until) <= now:
+                await self.states.release_pin(row)
+        primary = currents.get(PRIMARY_TRACK)
 
         facts = await self.facts.for_customer(
             project=project,
             customer=customer,
             health=health,
             report=report,
-            state=current.state if current else None,
-            state_entered_at=current.entered_at if current else None,
-            state_pinned=bool(current and current.pinned),
+            state=primary.state if primary else None,
+            state_entered_at=primary.entered_at if primary else None,
+            state_pinned=bool(primary and primary.pinned),
+            tracks={name: (row.state, row.entered_at) for name, row in currents.items()},
         )
-        result = StateRefresh(facts=facts, state=current.state if current else None)
+        result = StateRefresh(facts=facts, state=primary.state if primary else None)
 
-        machine = lifecycle_for(project)
-        if machine is not None and not (current and current.pinned):
-            await self._advance(project, customer, machine, current, result, emit=emit)
+        for track, machine in machines_for(project).items():
+            current = currents.get(track)
+            outcome = TrackRefresh(track=track, state=current.state if current else None)
+            result.tracks[track] = outcome
+            if current is not None and current.pinned:
+                continue
+            await self._advance(project, customer, track, machine, current, result.facts, outcome, emit=emit)
+            if track == PRIMARY_TRACK:
+                result.state, result.steps, result.initial = outcome.state, outcome.steps, outcome.initial
 
+        moved = any(outcome.steps for outcome in result.tracks.values())
         result.snapshot = await self._snapshot(
-            project, customer, facts, reason="state_change" if result.steps else reason, event_id=event_id
+            project, customer, facts, reason="state_change" if moved else reason, event_id=event_id
         )
         return result
 
@@ -121,33 +193,37 @@ class CustomerStateService:
         self,
         project: Project,
         customer: Customer,
+        track: str,
         machine: Lifecycle,
         current: CustomerState | None,
-        result: StateRefresh,
+        facts: CustomerFacts,
+        outcome: TrackRefresh,
         *,
         emit: bool,
     ) -> None:
-        # A state the project's machine no longer has is treated as never placed.
+        # A state the machine no longer has is treated as never placed.
         known = current.state if current and current.state in machine.states else None
-        steps = machine.settle(known, result.facts)
+        steps = machine.settle(known, facts)
 
         if known is None:
             first = steps[0].previous if steps else machine.initial
             await self.states.enter(
                 project_id=project.id,
                 customer_id=customer.id,
+                track=track,
                 state=first or machine.initial,
                 source="initial",
-                reason="Placed in the initial state the first time the lifecycle saw this customer.",
+                reason="Placed in the initial state the first time this track saw the customer.",
             )
-            result.initial = True
-            result.state = first or machine.initial
-            self._set_state_facts(result.facts, result.state)
+            outcome.initial = True
+            outcome.state = first or machine.initial
+            self._set_state_facts(facts, track, outcome.state)
 
         for step in steps:
             row = await self.states.enter(
                 project_id=project.id,
                 customer_id=customer.id,
+                track=track,
                 state=step.target,
                 source="auto",
                 transition=step.transition.name,
@@ -155,11 +231,12 @@ class CustomerStateService:
                 evaluation=step.evaluation.as_dict(),
                 evidence=step.evaluation.evidence,
             )
-            result.state = step.target
-            self._set_state_facts(result.facts, step.target)
+            outcome.state = step.target
+            self._set_state_facts(facts, track, step.target)
             logger.info(
                 "lifecycle.transition",
                 customer_id=customer.id,
+                track=track,
                 previous=step.previous,
                 state=step.target,
                 transition=step.transition.name,
@@ -175,15 +252,21 @@ class CustomerStateService:
                         source="auto",
                         reason=row.reason,
                         evidence=row.evidence,
+                        track=track,
+                        reasons=reasons_in_words(step.evaluation),
                     )
                 )
-        result.steps = steps
+        outcome.steps = steps
 
     @staticmethod
-    def _set_state_facts(facts: CustomerFacts, state: str) -> None:
-        facts.values["state.current"] = state
-        facts.values["state.days_in_state"] = 0.0
-        facts.values["state.pinned"] = False
+    def _set_state_facts(facts: CustomerFacts, track: str, state: str) -> None:
+        """Later tracks in the same refresh read the state this one just produced."""
+        facts.values[f"{LIFECYCLE_PREFIX}{track}"] = state
+        facts.values[f"{LIFECYCLE_PREFIX}{track}{DAYS_SUFFIX}"] = 0.0
+        if track == PRIMARY_TRACK:
+            facts.values["state.current"] = state
+            facts.values["state.days_in_state"] = 0.0
+            facts.values["state.pinned"] = False
 
     async def _snapshot(
         self,
@@ -233,22 +316,22 @@ class CustomerStateService:
         pin: bool = True,
         pin_days: int | None = None,
         note: str | None = None,
+        track: str = PRIMARY_TRACK,
     ) -> CustomerState:
-        machine = lifecycle_for(project)
-        if machine is None:
-            raise ValidationError("Lifecycle tracking is switched off for this project.")
+        machine = self._machine(project, track)
         target = state.strip().lower()
         if target not in machine.states:
             raise ValidationError(
-                f"{state!r} is not a lifecycle state. Expected one of: {', '.join(machine.states)}."
+                f"{state!r} is not a state of the {track} track. Expected one of: {', '.join(machine.states)}."
             )
         if pin_days is not None and not 1 <= pin_days <= 365:
             raise ValidationError("pin_days must be between 1 and 365.")
 
-        current = await self.states.current(project_id=project.id, customer_id=customer.id)
+        current = await self.states.current(project_id=project.id, customer_id=customer.id, track=track)
         row = await self.states.enter(
             project_id=project.id,
             customer_id=customer.id,
+            track=track,
             state=target,
             source="manual",
             reason=note or "Set by hand.",
@@ -266,6 +349,7 @@ class CustomerStateService:
             resource_id=customer.id,
             metadata={
                 "event": "state_set",
+                "track": track,
                 "previous": current.state if current else None,
                 "state": target,
                 "pinned": pin,
@@ -282,16 +366,34 @@ class CustomerStateService:
                 source="manual",
                 reason=row.reason,
                 evidence=[],
+                track=track,
+                reasons=[note] if note else ["set by hand"],
             )
         )
         return row
 
+    def _machine(self, project: Project, track: str) -> Lifecycle:
+        machine = machines_for(project).get(track)
+        if machine is None:
+            if track == PRIMARY_TRACK:
+                raise ValidationError("Lifecycle tracking is switched off for this project.")
+            known = ", ".join(machines_for(project)) or "none"
+            raise ValidationError(f"{track!r} is not a lifecycle track of this project. Tracks: {known}.")
+        return machine
+
     async def release(
-        self, *, project: Project, customer: Customer, actor_type: str, actor_id: str | None
+        self,
+        *,
+        project: Project,
+        customer: Customer,
+        actor_type: str,
+        actor_id: str | None,
+        track: str = PRIMARY_TRACK,
     ) -> CustomerState:
-        current = await self.states.current(project_id=project.id, customer_id=customer.id)
+        self._machine(project, track)
+        current = await self.states.current(project_id=project.id, customer_id=customer.id, track=track)
         if current is None:
-            raise NotFoundError("This customer has no lifecycle state yet.")
+            raise NotFoundError(f"This customer has no {track} state yet.")
         if not current.pinned:
             return current
         await self.states.release_pin(current)
@@ -303,20 +405,28 @@ class CustomerStateService:
             project_id=project.id,
             resource_type="customer_state",
             resource_id=customer.id,
-            metadata={"event": "state_released", "state": current.state},
+            metadata={"event": "state_released", "track": track, "state": current.state},
         )
         return current
 
     # --------------------------------------------------------------------- reads
 
-    async def current(self, *, project: Project, customer: Customer) -> CustomerState | None:
-        return await self.states.current(project_id=project.id, customer_id=customer.id)
+    async def current(
+        self, *, project: Project, customer: Customer, track: str = PRIMARY_TRACK
+    ) -> CustomerState | None:
+        return await self.states.current(project_id=project.id, customer_id=customer.id, track=track)
 
     async def history(
-        self, *, project: Project, customer: Customer, limit: int = 50, offset: int = 0
+        self,
+        *,
+        project: Project,
+        customer: Customer,
+        track: str | None = PRIMARY_TRACK,
+        limit: int = 50,
+        offset: int = 0,
     ) -> tuple[list[CustomerState], int]:
         return await self.states.history(
-            project_id=project.id, customer_id=customer.id, limit=limit, offset=offset
+            project_id=project.id, customer_id=customer.id, track=track, limit=limit, offset=offset
         )
 
     async def snapshot_at(

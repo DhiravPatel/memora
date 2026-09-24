@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useState } from "react";
 
 import { ApprovalBadge, ReasonList, RequestSummary } from "@/components/agents/shared";
+import { MemoryTypeBadge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Select, Textarea } from "@/components/ui/input";
@@ -108,7 +109,47 @@ export function ApprovalsQueue({
                   {approval.agent && <span className="label">by {approval.agent}</span>}
                 </div>
                 <RequestSummary request={approval.request} />
+                {approval.customer && (
+                  <p className="text-xs text-muted-foreground">
+                    {approval.customer.name ?? approval.customer_id}
+                    {approval.customer.health_band
+                      ? ` · health ${approval.customer.health_band.replace(/_/g, " ")}${
+                          approval.customer.health_score !== null
+                            ? ` (${Math.round(approval.customer.health_score)})`
+                            : ""
+                        }`
+                      : ""}
+                    {approval.customer.plan ? ` · ${approval.customer.plan} plan` : ""}
+                    {approval.customer.state
+                      ? ` · ${approval.customer.state.replace(/_/g, " ")}`
+                      : ""}
+                    {approval.customer.open_problems !== null
+                      ? ` · ${approval.customer.open_problems} open problem${approval.customer.open_problems === 1 ? "" : "s"}`
+                      : ""}
+                  </p>
+                )}
                 <ReasonList reasons={approval.reasons} />
+                {!!(approval.evidence_memories?.length || approval.withheld_evidence) && (
+                  <div className="border-l-2 border-border pl-3">
+                    <p className="label mb-1">What the reasons rest on</p>
+                    <ul className="space-y-1">
+                      {approval.evidence_memories?.map((memory) => (
+                        <li key={memory.id} className="flex gap-2 text-xs leading-relaxed">
+                          {memory.type && <MemoryTypeBadge type={memory.type} />}
+                          <span className="text-foreground">“{memory.content}”</span>
+                          {memory.first_seen_at && (
+                            <span className="label shrink-0">
+                              {formatRelative(memory.first_seen_at)}
+                            </span>
+                          )}
+                        </li>
+                      ))}
+                    </ul>
+                    {!!approval.withheld_evidence && (
+                      <p className="label mt-1">+ {approval.withheld_evidence} you may not read</p>
+                    )}
+                  </div>
+                )}
                 <p className="label">
                   asked {formatRelative(approval.created_at)} ·{" "}
                   {approval.status === "pending"

@@ -21,7 +21,14 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.schemas.agent_policy import AgentCheckOut, ApprovalOut, ReasonOut
+from app.schemas.agent_policy import (
+    ActionOut,
+    AgentCheckOut,
+    ApprovalOut,
+    CustomerSummaryOut,
+    EvidenceMemoryOut,
+    ReasonOut,
+)
 from app.services.facts_service import FactsService
 from app.services.reader import Reader
 from app.services.settings_service import DEFAULT_APPROVAL_TTL_HOURS, effective
@@ -29,8 +36,9 @@ from common.enums import AuditAction
 from common.errors import AuthorizationError, ConflictError, NotFoundError, ValidationError
 from common.logging import get_logger
 from common.time import utcnow
-from database.models import AgentApproval, AgentCheck, AgentProfile, Customer, Project
+from database.models import AgentAction, AgentApproval, AgentCheck, AgentProfile, Customer, Project
 from database.repositories import (
+    AgentActionRepository,
     AgentApprovalRepository,
     AgentCheckRepository,
     AuditRepository,
@@ -38,6 +46,13 @@ from database.repositories import (
     CustomerSnapshotRepository,
 )
 from database.repositories.agent_policy import (
+    ACTION_ALLOWED,
+    ACTION_CANCELLED,
+    ACTION_DENIED,
+    ACTION_DONE,
+    ACTION_EXPIRED,
+    ACTION_FAILED,
+    ACTION_PENDING,
     APPROVED,
     EXPIRED,
     OPEN_STATUSES,
@@ -60,6 +75,7 @@ from memory_engine.guardrails import (
 from memory_engine.guardrails import check as run_rules
 from webhooks import (
     WebhookDispatcher,
+    agent_action_completed,
     agent_action_denied,
     agent_approval_decided,
     agent_approval_requested,
@@ -108,6 +124,7 @@ class GuardrailService:
         self.customers = CustomerRepository(session)
         self.snapshots = CustomerSnapshotRepository(session)
         self.audit = AuditRepository(session)
+        self.actions = AgentActionRepository(session)
 
     # ------------------------------------------------------------------ check
 
@@ -372,6 +389,11 @@ class GuardrailService:
         approval.decided_by = actor_id
         approval.decided_at = utcnow()
         await self.session.flush()
+        if not approve:
+            # A no settles the action waiting on it; a yes still needs the agent to proceed,
+            # because the rules are run again on the facts as they are then.
+            for record in await self.actions.pending_for_approvals(project.id, [approval.id]):
+                await self.actions.set_status(record, ACTION_DENIED, decision=DENY)
         await self.audit.record(
             project_id=project.id,
             organization_id=project.organization_id,
@@ -400,12 +422,216 @@ class GuardrailService:
             await WebhookDispatcher(self.session).emit(
                 agent_approval_decided(project_id=approval.project_id, customer=customer, approval=approval)
             )
+            # An action waiting on a lapsed approval lapses with it.
+            for record in await self.actions.pending_for_approvals(approval.project_id, [approval.id]):
+                await self.actions.set_status(record, ACTION_EXPIRED)
         return len(expired)
 
     async def _announce(self, project: Project, approval: AgentApproval) -> None:
         customer = await self.customers.get(approval.customer_id, project.id)
         await WebhookDispatcher(self.session).emit(
             agent_approval_decided(project_id=project.id, customer=customer, approval=approval)
+        )
+
+    # ---------------------------------------------------------------- gateway
+
+    async def request_action(
+        self,
+        *,
+        project: Project,
+        customer: Customer,
+        action: str,
+        request: dict[str, Any],
+        profile: AgentProfile | None = None,
+        agent: str | None = None,
+        api_key_id: str | None = None,
+        approval_id: str | None = None,
+        session_id: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> AgentAction:
+        """The single call an agent makes before acting (§26 4.5): decide, file an approval
+        if a person is needed, and record the action so its outcome becomes history."""
+        request = dict(request or {})
+        key = (idempotency_key or "").strip() or None
+        if key is not None:
+            existing = await self.actions.by_idempotency_key(project.id, key)
+            if existing is not None:
+                if (
+                    existing.customer_id != customer.id
+                    or existing.action != normalise_action(action)
+                    or canonical(existing.request) != canonical(request)
+                ):
+                    raise ConflictError(
+                        "That idempotency key was already used for a different action. Use a new key for a new action."
+                    )
+                return existing
+        outcome = await self.check(
+            project=project,
+            customer=customer,
+            action=action,
+            request=request,
+            profile=profile,
+            agent=agent,
+            api_key_id=api_key_id,
+            approval_id=approval_id,
+            session_id=session_id,
+        )
+        status = {ALLOW: ACTION_ALLOWED, REQUIRE_APPROVAL: ACTION_PENDING, DENY: ACTION_DENIED}[outcome.decision]
+        record = await self.actions.create(
+            project_id=project.id,
+            customer_id=customer.id,
+            action=outcome.action,
+            request=request,
+            amount=_amount(request),
+            status=status,
+            decision=outcome.decision,
+            check_id=outcome.check.id if outcome.check else None,
+            approval_id=outcome.approval.id if outcome.approval and status == ACTION_PENDING else None,
+            agent=outcome.agent,
+            api_key_id=api_key_id,
+            session_id=session_id,
+            idempotency_key=key,
+        )
+        logger.info("agent.action_requested", action_id=record.id, action=record.action, status=status)
+        return record
+
+    async def proceed_action(
+        self,
+        *,
+        project: Project,
+        action_id: str,
+        profile: AgentProfile | None = None,
+        api_key_id: str | None = None,
+    ) -> AgentAction:
+        """Go ahead with an action that was waiting for a person: once they approved, the
+        rules are run again on the facts as they are now and the approval is redeemed."""
+        record = await self._action(project, action_id, for_update=True)
+        if record.status != ACTION_PENDING:
+            return record  # already settled: proceeding again changes nothing
+        approval = await self.approvals.get(record.approval_id, project.id) if record.approval_id else None
+        if approval is None:
+            return await self.actions.set_status(record, ACTION_EXPIRED)
+        if _lapse(approval):
+            await self._announce(project, approval)
+        status = str(approval.status)
+        if status == PENDING:
+            return record
+        if status == REJECTED:
+            return await self.actions.set_status(record, ACTION_DENIED, decision=DENY)
+        if status in (EXPIRED, USED):
+            return await self.actions.set_status(record, ACTION_EXPIRED)
+        customer = await self.customers.get(record.customer_id, project.id)
+        assert customer is not None  # the action is cascade-deleted with its customer
+        outcome = await self.check(
+            project=project,
+            customer=customer,
+            action=record.action,
+            request=dict(record.request or {}),
+            profile=profile,
+            agent=record.agent,
+            api_key_id=api_key_id,
+            approval_id=approval.id,
+            session_id=record.session_id,
+        )
+        status = ACTION_ALLOWED if outcome.decision == ALLOW else ACTION_DENIED
+        return await self.actions.set_status(
+            record, status, decision=outcome.decision, check_id=outcome.check.id if outcome.check else record.check_id
+        )
+
+    async def complete_action(
+        self,
+        *,
+        project: Project,
+        action_id: str,
+        outcome: str,
+        note: str | None = None,
+        external_ref: str | None = None,
+    ) -> AgentAction:
+        """The agent reports back: it was done, it failed, or it was not attempted."""
+        record = await self._action(project, action_id, for_update=True)
+        target = {"done": ACTION_DONE, "failed": ACTION_FAILED, "cancelled": ACTION_CANCELLED}[outcome]
+        if record.status == target:
+            return record  # the same report twice is one report
+        allowed_from = {ACTION_ALLOWED} if target != ACTION_CANCELLED else {ACTION_ALLOWED, ACTION_PENDING}
+        if record.status not in allowed_from:
+            raise ConflictError(
+                f"This action is {record.status}; only an allowed action can be reported {outcome}"
+                + (" (or a waiting one cancelled)." if target == ACTION_CANCELLED else ".")
+            )
+        await self.actions.set_status(
+            record,
+            target,
+            outcome_note=(note or "").strip() or None,
+            external_ref=(external_ref or "").strip() or None,
+            completed_at=utcnow(),
+        )
+        customer = await self.customers.get(record.customer_id, project.id)
+        await WebhookDispatcher(self.session).emit(
+            agent_action_completed(project_id=project.id, customer=customer, action=record)
+        )
+        logger.info("agent.action_completed", action_id=record.id, action=record.action, outcome=target)
+        return record
+
+    async def _action(self, project: Project, action_id: str, *, for_update: bool = False) -> AgentAction:
+        record = await self.actions.get(action_id, project.id, for_update=for_update)
+        if record is None:
+            raise NotFoundError(f"Action '{action_id}' not found.")
+        return record
+
+    async def get_action(self, *, project: Project, action_id: str) -> ActionOut:
+        return await self.action_out(project, await self._action(project, action_id))
+
+    async def list_actions(
+        self,
+        *,
+        project: Project,
+        customer: Customer | None = None,
+        action: str | None = None,
+        status: str | None = None,
+        agent: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[list[ActionOut], int]:
+        rows, total = await self.actions.list(
+            project_id=project.id,
+            customer_id=customer.id if customer else None,
+            action=normalise_action(action) if action else None,
+            status=status,
+            agent=agent,
+            limit=limit,
+            offset=offset,
+        )
+        return [await self.action_out(project, row) for row in rows], total
+
+    async def action_out(self, project: Project, record: AgentAction) -> ActionOut:
+        check = await self.checks.get(record.check_id, project.id) if record.check_id else None
+        reasons = await self.reader.reasons(project.id, list(check.reasons or [])) if check else []
+        approval = await self.approvals.get(record.approval_id, project.id) if record.approval_id else None
+        external = await self._external_ids(project, {record.customer_id})
+        summary = summary_of(record.decision, reasons)
+        if record.status == ACTION_DENIED and approval is not None and str(approval.status) == REJECTED:
+            # The rules asked for a person and the person said no: that is the reason now.
+            summary = "A person rejected this request" + (f": {approval.note}" if approval.note else ".")
+        return ActionOut(
+            id=record.id,
+            customer_id=external.get(record.customer_id, record.customer_id),
+            action=record.action,
+            request=record.request or {},
+            status=record.status,
+            decision=record.decision,
+            summary=summary,
+            next_step=_next_step(record, approval),
+            reasons=[ReasonOut(**reason) for reason in reasons],
+            approval=await self.approval_out(project, approval) if approval else None,
+            check_id=record.check_id,
+            agent=record.agent,
+            session_id=record.session_id,
+            idempotency_key=record.idempotency_key,
+            outcome_note=record.outcome_note,
+            external_ref=record.external_ref,
+            created_at=record.created_at,
+            updated_at=record.updated_at,
+            completed_at=record.completed_at,
         )
 
     # ------------------------------------------------------------------ reads
@@ -474,11 +700,46 @@ class GuardrailService:
         return {customer.id: customer.external_id for customer in customers}
 
     async def approval_out(self, project: Project, approval: AgentApproval) -> ApprovalOut:
-        external = await self._external_ids(project, {approval.customer_id})
-        reasons = await self.reader.reasons(project.id, list(approval.reasons or []))
+        customer = await self.customers.get(approval.customer_id, project.id)
+        stored = list(approval.reasons or [])
+        reasons = await self.reader.reasons(project.id, stored)
+        # The words behind each reason, as this reviewer may read them (§26 4.5): deciding
+        # on "2 open problems" is guessing; deciding on the problems themselves is not.
+        cited = list(dict.fromkeys(ident for reason in stored for ident in reason.get("evidence") or []))
+        shown = list(dict.fromkeys(ident for reason in reasons for ident in reason.get("evidence") or []))
+        memories = {memory.id: memory for memory in await self.reader.memories.get_many(shown, project.id)}
+        evidence = [
+            EvidenceMemoryOut(
+                id=ident,
+                type=str(memories[ident].type),
+                content=memories[ident].content,
+                status=str(memories[ident].status),
+                first_seen_at=memories[ident].first_seen_at,
+            )
+            for ident in shown
+            if ident in memories
+        ]
+        withheld = len(set(cited) - set(shown))
+        snapshot = await self.snapshots.latest(project_id=project.id, customer_id=approval.customer_id)
+        summary = None
+        if snapshot is not None or customer is not None:
+            summary = CustomerSummaryOut(
+                name=customer.name if customer else None,
+                health_score=snapshot.health_score if snapshot else None,
+                health_band=snapshot.health_band if snapshot else None,
+                state=snapshot.state if snapshot else None,
+                # The plan column is read by every reader; a plan known only from a
+                # restricted memory is withheld from a reviewer without clearance.
+                plan=(snapshot.plan if self.reader.sees_everything or snapshot.redacted_facts is None else None)
+                if snapshot
+                else None,
+                open_problems=snapshot.open_problems if snapshot else None,
+                taken_at=snapshot.taken_at if snapshot else None,
+            )
+        waiting = await self.actions.pending_for_approvals(project.id, [approval.id])
         return ApprovalOut(
             id=approval.id,
-            customer_id=external.get(approval.customer_id, approval.customer_id),
+            customer_id=customer.external_id if customer else approval.customer_id,
             check_id=approval.check_id,
             agent=approval.agent,
             action=approval.action,
@@ -491,6 +752,10 @@ class GuardrailService:
             used_at=approval.used_at,
             expires_at=approval.expires_at,
             created_at=approval.created_at,
+            evidence_memories=evidence,
+            withheld_evidence=withheld,
+            customer=summary,
+            action_id=waiting[0].id if waiting else None,
         )
 
     async def outcome_out(self, project: Project, outcome: CheckOutcome) -> AgentCheckOut:
@@ -540,7 +805,7 @@ def summary_of(decision: str, reasons: list[dict[str, Any]]) -> str:
         if reason.get("decision") == decision and decision != ALLOW:
             return str(reason.get("explanation", ""))
     for reason in reasons:
-        if reason.get("rule") == "approved":
+        if reason.get("rule") in ("approved", "auto_approved"):
             return str(reason.get("explanation", ""))
     return "Allowed: no rule objects." if decision == ALLOW else "Not allowed."
 
@@ -559,3 +824,30 @@ def _lapse(approval: AgentApproval) -> bool:
         approval.status = EXPIRED
         return True
     return False
+
+
+def _amount(request: dict[str, Any]) -> float | None:
+    value = request.get("amount")
+    if isinstance(value, bool):
+        return None
+    try:
+        return float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _next_step(record: AgentAction, approval: AgentApproval | None) -> str:
+    """What the agent should do now, in one sentence."""
+    status = record.status
+    if status == ACTION_ALLOWED:
+        return "Go ahead, then report the outcome with /complete."
+    if status == ACTION_PENDING:
+        decided = str(approval.status) if approval is not None else None
+        if decided == APPROVED:
+            return "A person approved it: call /proceed to go ahead."
+        return "Wait for a person to decide, then call /proceed. Do not act yet."
+    if status == ACTION_DENIED:
+        return "Do not take this action."
+    if status == ACTION_EXPIRED:
+        return "The approval lapsed; request the action again if it is still needed."
+    return "Nothing more to do."

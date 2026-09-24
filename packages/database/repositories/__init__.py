@@ -1,6 +1,7 @@
 """Repositories: the only place that builds SQL."""
 
 from database.repositories.agent_policy import (
+    AgentActionRepository,
     AgentApprovalRepository,
     AgentCheckRepository,
     AgentProfileRepository,
@@ -39,6 +40,7 @@ from database.repositories.webhooks import (
 __all__ = [
     "MAX_ATTEMPTS",
     "RETRY_DELAYS_SECONDS",
+    "AgentActionRepository",
     "AgentApprovalRepository",
     "AgentCheckRepository",
     "AgentProfileRepository",

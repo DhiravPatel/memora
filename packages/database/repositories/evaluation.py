@@ -72,6 +72,9 @@ class EvalRepository(BaseRepository):
         expected_phrases: list[str],
         notes: str | None,
         source: str = "manual",
+        kind: str = "retrieval",
+        event: dict[str, Any] | None = None,
+        expectations: dict[str, Any] | None = None,
     ) -> EvalCase:
         row = EvalCase(
             id=new_id("evc"),
@@ -83,6 +86,9 @@ class EvalRepository(BaseRepository):
             expected_phrases=expected_phrases,
             notes=notes,
             source=source,
+            kind=kind,
+            event=event,
+            expectations=expectations,
             created_at=utcnow(),
         )
         self.session.add(row)
@@ -118,6 +124,7 @@ class EvalRepository(BaseRepository):
         settings: dict[str, Any],
         baseline_run_id: str | None,
         created_by: str | None,
+        overrides: dict[str, Any] | None = None,
     ) -> EvalRun:
         row = EvalRun(
             id=new_id("evr"),
@@ -128,6 +135,7 @@ class EvalRepository(BaseRepository):
             cleared=cleared,
             k=k,
             settings=settings,
+            overrides=overrides,
             baseline_run_id=baseline_run_id,
             created_by=created_by,
             created_at=utcnow(),
@@ -153,7 +161,9 @@ class EvalRepository(BaseRepository):
         return list(result.scalars())
 
     async def latest_succeeded(self, set_id: str, *, before: datetime | None = None) -> EvalRun | None:
-        conditions = [EvalRun.set_id == set_id, EvalRun.status == "succeeded"]
+        """The latest run under the project's own settings — a run under proposed settings
+        measured a what-if, and is never what the next run is compared with."""
+        conditions = [EvalRun.set_id == set_id, EvalRun.status == "succeeded", EvalRun.overrides.is_(None)]
         if before is not None:
             conditions.append(EvalRun.created_at < before)
         result = await self.session.execute(

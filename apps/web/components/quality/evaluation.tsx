@@ -3,6 +3,12 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 
+import {
+  AddExtractionCase,
+  ExtractionResultView,
+  RegressionPanel,
+  Scorecard,
+} from "@/components/quality/extraction";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -12,7 +18,15 @@ import { Table, TD, TH, THead, TR } from "@/components/ui/table";
 import { api } from "@/lib/api";
 import { formatRelative } from "@/lib/format";
 import { cn } from "@/lib/utils";
-import type { EvalRun, EvalRunSummary, EvalSet, EvalSetDetail, EvalSuggestion } from "@/lib/types";
+import type {
+  EvalCaseResult,
+  EvalRun,
+  EvalRunSummary,
+  EvalSet,
+  EvalSetDetail,
+  EvalSuggestion,
+  ExtractionCaseResult,
+} from "@/lib/types";
 
 const pct = (value: number | undefined) =>
   value === undefined ? "—" : `${Math.round(value * 100)}%`;
@@ -29,7 +43,7 @@ function Delta({ value, percent = true }: { value: number | undefined; percent?:
   );
 }
 
-/** Questions with known answers, and every run that scored retrieval against them. */
+/** Cases with known answers — questions and events — and every run that scored them. */
 export function EvaluationPanel({
   projectId,
   focusRun,
@@ -65,13 +79,14 @@ export function EvaluationPanel({
 
   return (
     <div className="space-y-6">
+      <Scorecard projectId={projectId} />
       <Card>
         <CardHeader>
           <CardTitle>Evaluation sets</CardTitle>
           <p className="mt-1 text-xs text-muted-foreground">
-            Questions whose right answers you know. A run asks every one through the real answer
-            path — recording nothing — and scores how often, and how high, the right memory comes
-            back.
+            Cases whose right answers you know. Questions are asked through the real answer path;
+            events go through the real pipeline as a dry run — recording nothing — and each run
+            scores what came back, and what would have been remembered.
           </p>
         </CardHeader>
         <CardContent className="space-y-3">
@@ -167,7 +182,9 @@ function SetDetail({
   if (detail.isLoading) return <LoadingRow />;
   if (detail.error) return <ErrorState error={detail.error} />;
   const data = detail.data!;
-  const shownRun = runId ?? data.runs.find((item) => item.status === "succeeded")?.id ?? null;
+  // A run under proposed settings measured a what-if; the default view is the real one.
+  const shownRun =
+    runId ?? data.runs.find((item) => item.status === "succeeded" && !item.proposed)?.id ?? null;
 
   return (
     <div className="space-y-6">
@@ -207,8 +224,11 @@ function SetDetail({
           {run.error && <ErrorState error={run.error} />}
           <CaseTable base={base} setId={setId} detail={data} />
           <AddCase base={base} setId={setId} />
+          <AddExtractionCase base={base} setId={setId} />
         </CardContent>
       </Card>
+
+      {data.cases > 0 && <RegressionPanel base={base} setId={setId} />}
 
       {data.runs.length > 0 && (
         <Card>
@@ -223,6 +243,7 @@ function SetDetail({
                 <TH className="text-right">Hit@1</TH>
                 <TH className="text-right">MRR</TH>
                 <TH className="text-right">Cited</TH>
+                <TH className="text-right">Extraction</TH>
                 <TH className="text-right">vs previous</TH>
               </TR>
             </THead>
@@ -257,7 +278,10 @@ function RunRow({
   return (
     <TR className={cn("cursor-pointer", active && "bg-accent/5")} onClick={onOpen}>
       <TD>
-        <p className="text-[12px] font-semibold">{run.label ?? "unlabelled"}</p>
+        <p className="text-[12px] font-semibold">
+          {run.label ?? "unlabelled"}
+          {run.proposed && <Badge className="ml-2">proposed settings</Badge>}
+        </p>
         <p className="label">
           {run.status} · {formatRelative(run.created_at)} · k={run.k}
         </p>
@@ -266,6 +290,9 @@ function RunRow({
       <TD className="numeric text-right text-[12px]">{pct(run.metrics.hit?.["@1"])}</TD>
       <TD className="numeric text-right text-[12px]">{run.metrics.mrr?.toFixed(2) ?? "—"}</TD>
       <TD className="numeric text-right text-[12px]">{pct(run.metrics.citation_hit_rate)}</TD>
+      <TD className="numeric text-right text-[12px]">
+        {run.metrics.extraction ? pct(run.metrics.extraction.accuracy ?? undefined) : "—"}
+      </TD>
       <TD className="text-right">
         {run.comparison ? (
           <span className="flex items-center justify-end gap-2">
@@ -292,7 +319,10 @@ function RunDetail({ base, runId }: { base: string; runId: string }) {
   return (
     <Card>
       <CardHeader>
-        <CardTitle>{data.label ?? "Run"} — question by question</CardTitle>
+        <CardTitle>
+          {data.label ?? "Run"} — case by case
+          {data.overrides ? " (proposed settings)" : ""}
+        </CardTitle>
         {data.comparison &&
         (data.comparison.newly_missed?.length || data.comparison.newly_found?.length) ? (
           <p className="mt-1 text-xs">
@@ -308,48 +338,55 @@ function RunDetail({ base, runId }: { base: string; runId: string }) {
         ) : null}
       </CardHeader>
       <CardContent className="space-y-2">
-        {data.results.map((result) => (
-          <details key={result.case_id} className="bg-surface-2 px-3 py-2">
-            <summary className="flex cursor-pointer flex-wrap items-center gap-3">
-              <Badge
-                className={
-                  result.first_rank === null
-                    ? "border-danger/70 bg-danger/10 text-danger"
-                    : result.first_rank === 1
-                      ? "border-success/70 bg-success/10 text-success"
-                      : ""
-                }
-              >
-                {result.first_rank === null ? "missed" : `rank ${result.first_rank}`}
-              </Badge>
-              <span className="flex-1 text-[12px]">{result.question}</span>
-              {result.cited_hit && <span className="label text-success">cited</span>}
-            </summary>
-            <div className="mt-2 space-y-2 text-[11px]">
-              <div>
-                <p className="label">Expected</p>
-                {result.expected.map((item) => (
-                  <p key={`${item.kind}-${item.target}`} className="font-mono">
-                    {item.kind}: {item.target} →{" "}
-                    {item.rank === null ? "not in the top " + data.k : `rank ${item.rank}`}
-                  </p>
-                ))}
-              </div>
-              <div>
-                <p className="label">What came back</p>
-                <ol className="space-y-px">
-                  {result.retrieved.map((memory, index) => (
-                    <li key={memory.id} className="flex gap-2">
-                      <span className="numeric w-5 text-muted-foreground">{index + 1}</span>
-                      <span className="flex-1">{memory.content}</span>
-                      <span className="label">{memory.strategies.join(", ")}</span>
-                    </li>
+        {data.results
+          .filter((result): result is ExtractionCaseResult => result.kind === "extraction")
+          .map((result) => (
+            <ExtractionResultView key={result.case_id} result={result} />
+          ))}
+        {data.results
+          .filter((result): result is EvalCaseResult => result.kind !== "extraction")
+          .map((result) => (
+            <details key={result.case_id} className="bg-surface-2 px-3 py-2">
+              <summary className="flex cursor-pointer flex-wrap items-center gap-3">
+                <Badge
+                  className={
+                    result.first_rank === null
+                      ? "border-danger/70 bg-danger/10 text-danger"
+                      : result.first_rank === 1
+                        ? "border-success/70 bg-success/10 text-success"
+                        : ""
+                  }
+                >
+                  {result.first_rank === null ? "missed" : `rank ${result.first_rank}`}
+                </Badge>
+                <span className="flex-1 text-[12px]">{result.question}</span>
+                {result.cited_hit && <span className="label text-success">cited</span>}
+              </summary>
+              <div className="mt-2 space-y-2 text-[11px]">
+                <div>
+                  <p className="label">Expected</p>
+                  {result.expected.map((item) => (
+                    <p key={`${item.kind}-${item.target}`} className="font-mono">
+                      {item.kind}: {item.target} →{" "}
+                      {item.rank === null ? "not in the top " + data.k : `rank ${item.rank}`}
+                    </p>
                   ))}
-                </ol>
+                </div>
+                <div>
+                  <p className="label">What came back</p>
+                  <ol className="space-y-px">
+                    {result.retrieved.map((memory, index) => (
+                      <li key={memory.id} className="flex gap-2">
+                        <span className="numeric w-5 text-muted-foreground">{index + 1}</span>
+                        <span className="flex-1">{memory.content}</span>
+                        <span className="label">{memory.strategies.join(", ")}</span>
+                      </li>
+                    ))}
+                  </ol>
+                </div>
               </div>
-            </div>
-          </details>
-        ))}
+            </details>
+          ))}
       </CardContent>
     </Card>
   );
@@ -384,13 +421,26 @@ function CaseTable({
       <tbody>
         {detail.case_list.map((item) => (
           <TR key={item.id}>
-            <TD className="text-[12px]">{item.question}</TD>
+            <TD className="text-[12px]">
+              {item.kind === "extraction" && <Badge className="mr-2">event</Badge>}
+              {item.question}
+            </TD>
             <TD className="font-mono text-[11px]">{item.customer_id}</TD>
             <TD className="text-[11px] text-muted-foreground">
-              {[
-                ...item.expected_phrases.map((phrase) => `“${phrase}”`),
-                ...item.expected_memory_ids,
-              ].join(", ")}
+              {item.kind === "extraction" && item.expectations
+                ? [
+                    ...item.expectations.expect.map(
+                      (entry) => `should: ${Object.values(entry).join(" · ")}`,
+                    ),
+                    ...item.expectations.forbid.map(
+                      (entry) => `must not: ${Object.values(entry).join(" · ")}`,
+                    ),
+                    ...(item.expectations.expect_nothing ? ["nothing remembered"] : []),
+                  ].join("; ")
+                : [
+                    ...item.expected_phrases.map((phrase) => `“${phrase}”`),
+                    ...item.expected_memory_ids,
+                  ].join(", ")}
             </TD>
             <TD>
               <Button

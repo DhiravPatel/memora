@@ -1,9 +1,18 @@
 /** Facts, conditions, the lifecycle and snapshots (§26 phase 1). */
 
 import type { HttpClient } from "../client.js";
-import type { ConditionResult, LifecycleState } from "../types.js";
+import type {
+  Change,
+  ConditionResult,
+  CustomerAt,
+  CustomerChanges,
+  CustomerComparison,
+  LifecycleState,
+} from "../types.js";
 
 interface RawState {
+  track?: string;
+  reasons?: string[];
   state: string;
   previous_state: string | null;
   entered_at: string;
@@ -17,6 +26,8 @@ interface RawState {
 
 function toState(raw: RawState): LifecycleState {
   return {
+    track: raw.track ?? "lifecycle",
+    reasons: raw.reasons ?? [],
     state: raw.state,
     previousState: raw.previous_state,
     enteredAt: raw.entered_at,
@@ -30,6 +41,37 @@ function toState(raw: RawState): LifecycleState {
 }
 
 const path = (customerId: string) => `/v1/customers/${encodeURIComponent(customerId)}`;
+
+function toChange(raw: any): Change {
+  return {
+    type: raw.type,
+    kind: raw.kind,
+    title: raw.title,
+    before: raw.before ?? null,
+    after: raw.after ?? null,
+    detectedAt: raw.detected_at,
+    evidence: raw.evidence ?? [],
+    source: raw.source,
+    track: raw.track ?? null,
+    reasons: raw.reasons ?? [],
+    detail: raw.detail ?? {},
+    importance: raw.importance ?? 0,
+  };
+}
+
+function toAt(raw: any): CustomerAt {
+  return {
+    at: raw.at,
+    live: raw.live,
+    snapshotId: raw.snapshot_id ?? null,
+    takenAt: raw.taken_at ?? null,
+    state: raw.state ?? null,
+    description: raw.description ?? null,
+  };
+}
+
+const iso = (value: Date | string | undefined) => (value instanceof Date ? value.toISOString() : value);
+
 
 export class State {
   constructor(private readonly http: HttpClient) {}
@@ -91,35 +133,50 @@ export class State {
     };
   }
 
-  /** The customer's lifecycle state, or null if they have not been placed yet. */
-  async current(customerId: string): Promise<LifecycleState | null> {
-    const raw = await this.http.request<{ current: RawState | null }>({
-      method: "GET",
-      path: `${path(customerId)}/state`,
-    });
-    return raw.current ? toState(raw.current) : null;
+  /** The customer's state on a track (the primary lifecycle by default), or null if they
+   *  have not been placed yet. */
+  async current(customerId: string, track = "lifecycle"): Promise<LifecycleState | null> {
+    return (await this.tracks(customerId))[track] ?? null;
   }
 
-  async history(customerId: string, limit = 50): Promise<LifecycleState[]> {
+  /** The customer's current state on every track, keyed by track name. */
+  async tracks(customerId: string): Promise<Record<string, LifecycleState | null>> {
+    const raw = await this.http.request<{
+      current: RawState | null;
+      tracks?: { track: string; current: RawState | null }[];
+    }>({ method: "GET", path: `${path(customerId)}/state` });
+    const tracks = raw.tracks?.length ? raw.tracks : [{ track: "lifecycle", current: raw.current }];
+    return Object.fromEntries(
+      tracks.map((item) => [item.track, item.current ? toState(item.current) : null]),
+    );
+  }
+
+  /** `track: "all"` interleaves every track by time. */
+  async history(
+    customerId: string,
+    options: { track?: string; limit?: number } = {},
+  ): Promise<LifecycleState[]> {
     const raw = await this.http.request<{ data: RawState[] }>({
       method: "GET",
       path: `${path(customerId)}/state/history`,
-      query: { limit },
+      query: { limit: options.limit ?? 50, track: options.track ?? "lifecycle" },
     });
     return raw.data.map(toState);
   }
 
-  /** Set the state by hand. Pinned by default, so the machine leaves it alone until released. */
+  /** Set the state on a track by hand. Pinned by default, so the machine leaves it alone
+   *  until released. */
   async set(
     customerId: string,
     state: string,
-    options: { pin?: boolean; pinDays?: number; note?: string } = {},
+    options: { track?: string; pin?: boolean; pinDays?: number; note?: string } = {},
   ): Promise<LifecycleState> {
     const raw = await this.http.request<RawState>({
       method: "PUT",
       path: `${path(customerId)}/state`,
       body: {
         state,
+        track: options.track ?? "lifecycle",
         pin: options.pin ?? true,
         pin_days: options.pinDays ?? null,
         note: options.note ?? null,
@@ -128,13 +185,19 @@ export class State {
     return toState(raw);
   }
 
-  async release(customerId: string): Promise<LifecycleState> {
+  async release(customerId: string, track = "lifecycle"): Promise<LifecycleState> {
     return toState(
       await this.http.request<RawState>({
         method: "DELETE",
         path: `${path(customerId)}/state/pin`,
+        query: { track },
       }),
     );
+  }
+
+  /** The shipped tracks (engagement, commercial), ready to add to `lifecycle_tracks`. */
+  templates(): Promise<{ name: string; label: string; states: string[]; initial: string }[]> {
+    return this.http.request({ method: "GET", path: "/v1/lifecycle/templates" });
   }
 
   refresh(
@@ -143,8 +206,14 @@ export class State {
     return this.http.request({ method: "POST", path: `${path(customerId)}/state/refresh` });
   }
 
-  /** The project's lifecycle machine and how many customers are in each state. */
-  lifecycle(): Promise<{ enabled: boolean; states: string[]; counts: Record<string, number> }> {
+  /** The project's machines — the primary lifecycle and every track — with how many
+   *  customers are in each state. */
+  lifecycle(): Promise<{
+    enabled: boolean;
+    states: string[];
+    counts: Record<string, number>;
+    tracks: { track: string; label: string; states: string[]; counts: Record<string, number> }[];
+  }> {
     return this.http.request({ method: "GET", path: "/v1/lifecycle" });
   }
 
@@ -159,6 +228,76 @@ export class State {
       query: { since: options.since, until: options.until, limit: options.limit ?? 50 },
     });
     return raw.data;
+  }
+
+  /** What changed about a customer since a moment, and what they looked like then and now.
+   *
+   * `since` is a span ("7d", "12h", "2w", "3mo"), a time, a snapshot id, or
+   * `"last_session"` — since the last conversation — or `"last_run"`.
+   *
+   * ```ts
+   * const { summary, changes } = await memora.state.changes("cus_1", { since: "last_session", agent: "support-bot" });
+   * ```
+   */
+  async changes(
+    customerId: string,
+    options: {
+      since?: Date | string;
+      until?: Date | string;
+      agent?: string;
+      types?: string[];
+      order?: "time" | "importance";
+      limit?: number;
+    } = {},
+  ): Promise<CustomerChanges> {
+    const raw = await this.http.request<any>({
+      method: "GET",
+      path: `${path(customerId)}/changes`,
+      query: {
+        since: iso(options.since),
+        until: iso(options.until),
+        agent: options.agent,
+        types: options.types?.join(","),
+        order: options.order ?? "time",
+        limit: options.limit ?? 50,
+      },
+    });
+    return {
+      customerId: raw.customer_id,
+      summary: raw.summary,
+      changes: (raw.changes ?? []).map(toChange),
+      window: {
+        since: raw.window.since,
+        until: raw.window.until,
+        basis: raw.window.basis,
+        value: raw.window.value ?? null,
+        found: raw.window.found,
+        note: raw.window.note ?? null,
+        label: raw.window.label,
+      },
+      counts: raw.counts ?? {},
+      total: raw.total,
+      truncated: raw.truncated,
+      withheld: raw.withheld ?? 0,
+      then: toAt(raw.then),
+      now: toAt(raw.now),
+    };
+  }
+
+  /** The customer at two moments side by side ("then vs now"), with every fact that differs. */
+  async compare(customerId: string, from: Date | string, to?: Date | string): Promise<CustomerComparison> {
+    const raw = await this.http.request<any>({
+      method: "GET",
+      path: `${path(customerId)}/compare`,
+      query: { from: iso(from), to: iso(to) },
+    });
+    return {
+      customerId: raw.customer_id,
+      then: toAt(raw.then),
+      now: toAt(raw.now),
+      differences: raw.differences ?? [],
+      summary: raw.summary,
+    };
   }
 
   /** What was known about a customer at a moment in the past. */

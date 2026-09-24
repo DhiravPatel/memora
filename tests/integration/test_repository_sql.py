@@ -102,12 +102,22 @@ async def test_semantic_search_uses_cosine_distance(session):
 
 
 async def test_keyword_search_uses_full_text_and_falls_back(session):
+    """A question matches on any of its meaningful words (web-search syntax needs all of
+    them, so "is the sync still failing?" missed a memory without "still")."""
     await MemoryRepository(session).search_keyword(
         project_id="prj_1", customer_id="cus_1", query="shopify integration", limit=10
     )
     full_text, fallback = session.statements[-2], session.statements[-1]
-    assert "websearch_to_tsquery" in full_text and "to_tsvector" in full_text
+    assert "to_tsquery(" in full_text and "websearch_to_tsquery" not in full_text
+    assert "to_tsvector" in full_text
     assert "lower(memories.content) LIKE" in fallback
+
+
+async def test_keyword_search_keeps_web_search_syntax_when_asked_for(session):
+    await MemoryRepository(session).search_keyword(
+        project_id="prj_1", customer_id="cus_1", query='"shopify sync" -billing', limit=10
+    )
+    assert "websearch_to_tsquery" in session.statements[-2]
 
 
 async def test_temporal_entity_and_relationship_searches_compile(session):

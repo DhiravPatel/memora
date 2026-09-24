@@ -16,7 +16,7 @@ import hashlib
 import json
 from typing import Any
 
-from memory_engine.facts import CustomerFacts
+from memory_engine.facts import DAYS_SUFFIX, LIFECYCLE_PREFIX, CustomerFacts
 
 # fact -> how to reduce it before comparing. ``None`` means compare as-is.
 MATERIAL: dict[str, Any] = {
@@ -43,11 +43,20 @@ MATERIAL: dict[str, Any] = {
 TRACKED = (*MATERIAL, "problems.entities", "signals.active")
 
 
+def _track_facts(values: dict[str, Any]) -> list[str]:
+    """Every lifecycle track's state fact (§26 4.2) — material, like `state.current`."""
+    return sorted(
+        name for name in values if name.startswith(LIFECYCLE_PREFIX) and not name.endswith(DAYS_SUFFIX)
+    )
+
+
 def fingerprint(facts: CustomerFacts) -> str:
     reduced = {}
     for name, reduce in MATERIAL.items():
         value = facts.get(name)
         reduced[name] = reduce(value) if reduce else value
+    for name in _track_facts(facts.values):
+        reduced[name] = facts.get(name)
     encoded = json.dumps(reduced, sort_keys=True, default=str)
     return hashlib.sha256(encoded.encode()).hexdigest()
 
@@ -56,7 +65,8 @@ def changes(previous: dict[str, Any] | None, current: CustomerFacts) -> list[dic
     """What moved, fact by fact. The first snapshot has no "before", and says so."""
     before_values = (previous or {}).get("values", {}) if previous else {}
     found: list[dict[str, Any]] = []
-    for name in TRACKED:
+    tracked = [*TRACKED, *sorted(set(_track_facts(before_values)) | set(_track_facts(current.values)))]
+    for name in tracked:
         after = current.get(name)
         before = before_values.get(name) if previous else None
         if previous is not None and _same(before, after):

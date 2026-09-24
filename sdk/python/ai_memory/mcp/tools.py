@@ -8,10 +8,8 @@ to ("that customer does not exist"), never as protocol errors that end the conve
 
 from __future__ import annotations
 
-import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
 from typing import Any
 
 MEMORY_TYPES = [
@@ -202,42 +200,39 @@ def customer_timeline(client: Any, args: dict[str, Any]) -> ToolResult:
     return ToolResult(text=_bullets(lines, "Nothing has happened yet."), data={"entries": entries})
 
 
-_RELATIVE = re.compile(r"^(\d+)\s*([dhw])$")
-
-
-def _since(value: Any) -> str | None:
-    if value in (None, ""):
-        return None
-    text = str(value).strip().lower()
-    match = _RELATIVE.match(text)
-    if match:
-        amount, unit = int(match.group(1)), match.group(2)
-        delta = {"h": timedelta(hours=amount), "d": timedelta(days=amount), "w": timedelta(weeks=amount)}[unit]
-        return (datetime.now(timezone.utc) - delta).isoformat()  # noqa: UP017 - the SDK supports 3.10
-    try:
-        return datetime.fromisoformat(text.replace("z", "+00:00")).isoformat()
-    except ValueError as exc:
-        raise ToolInputError("'since' is an ISO date or a span such as 7d, 12h or 2w.") from exc
-
-
 def customer_changes(client: Any, args: dict[str, Any]) -> ToolResult:
     customer = _required(args, "customer_id")
-    snapshots = client.snapshots(customer, since=_since(args.get("since") or "7d"), limit=_limit(args, 20, 100))
-    lines: list[str] = []
-    for snapshot in snapshots:
-        for change in snapshot.get("changes") or []:
-            before, after = change.get("before"), change.get("after")
-            if change.get("added") or change.get("removed"):
-                moved = ", ".join(
-                    [*(f"+{item}" for item in change.get("added") or []), *(f"-{item}" for item in change.get("removed") or [])]
-                )
-                lines.append(f"{str(snapshot.get('taken_at'))[:16]} {change.get('fact')}: {moved}")
-            else:
-                lines.append(f"{str(snapshot.get('taken_at'))[:16]} {change.get('fact')}: {before} → {after}")
-    return ToolResult(
-        text=_bullets(lines, "Nothing material changed in that period."),
-        data={"snapshots": snapshots},
+    since = str(args.get("since") or "7d").strip()
+    types = args.get("types")
+    if types is not None and not isinstance(types, list):
+        raise ToolInputError("'types' is a list, e.g. [\"problem\", \"subscription\"].")
+    changes = client.changes(
+        customer,
+        since=since,
+        agent=args.get("agent"),
+        types=types,
+        order="importance" if args.get("most_important_first") else "time",
+        limit=_limit(args, 20, 100),
     )
+    lines = []
+    for change in changes.changes:
+        line = f"{change.detected_at[:10]} [{change.type}] {change.title}"
+        if change.before and change.before not in change.title:
+            line += f" (was: {change.before})"
+        if change.reasons:
+            line += f" — because {'; '.join(change.reasons)}"
+        lines.append(line)
+    text = changes.summary
+    if lines:
+        text += "\n" + _bullets(lines, "")
+    then, now = changes.then.get("description"), changes.now.get("description")
+    if then and now:
+        text += f"\n\nThen: {then}\nNow: {now}"
+    if changes.withheld:
+        text += f"\n\n{changes.withheld} change(s) concern memories you may not read."
+    if changes.note:
+        text += f"\n\n{changes.note}"
+    return ToolResult(text=text, data=changes.raw)
 
 
 def get_health(client: Any, args: dict[str, Any]) -> ToolResult:
@@ -314,16 +309,102 @@ def check_action(client: Any, args: dict[str, Any]) -> ToolResult:
     )
 
 
-def explain_answer(client: Any, args: dict[str, Any]) -> ToolResult:
-    explanation = client.explain_run(_required(args, "run_id"))
+_MARKS = {"cited": "✓", "given": "✓", "not_cited": "○"}
+
+
+_VERDICTS = {"allowed": "ALLOWED", "pending_approval": "NEEDS APPROVAL", "denied": "DENIED"}
+
+
+def _action_result(action: Any, lead: str | None = None) -> ToolResult:
+    verdict = _VERDICTS.get(action.status, action.status.upper())
+    lines = [lead or f"{verdict}: {action.summary}"]
+    lines.extend(
+        f"- {reason.get('rule')} ({reason.get('decision')}): {reason.get('explanation')}"
+        for reason in action.reasons
+        if reason.get("decision") != "allow"
+    )
+    lines.append(f"action_id {action.id}. {action.next_step}")
     return ToolResult(
-        text="\n".join(explanation.narrative) or "No explanation was recorded for that run.",
+        text="\n".join(lines),
         data={
-            "run": {"id": explanation.run.id, "query": explanation.run.query, "answer": explanation.run.answer},
-            "memories": explanation.memories,
-            "held_back": explanation.held_back,
+            "action_id": action.id,
+            "status": action.status,
+            "decision": action.decision,
+            "summary": action.summary,
+            "next_step": action.next_step,
+            "reasons": action.reasons,
+            "approval": {"id": action.approval.id, "status": action.approval.status} if action.approval else None,
         },
     )
+
+
+def request_action(client: Any, args: dict[str, Any]) -> ToolResult:
+    request = args.get("request") or {}
+    if not isinstance(request, dict):
+        raise ToolInputError("'request' must be an object, e.g. {\"amount\": 25}.")
+    action = client.request_action(
+        _required(args, "customer_id"),
+        _required(args, "action"),
+        request,
+        idempotency_key=args.get("idempotency_key"),
+        session_id=args.get("session_id"),
+    )
+    return _action_result(action)
+
+
+def proceed_action(client: Any, args: dict[str, Any]) -> ToolResult:
+    action = client.proceed_action(_required(args, "action_id"))
+    if action.status == "pending_approval":
+        return _action_result(action, "STILL WAITING: no person has decided yet.")
+    return _action_result(action)
+
+
+def report_action(client: Any, args: dict[str, Any]) -> ToolResult:
+    outcome = args.get("outcome") or "done"
+    if outcome not in ("done", "failed", "cancelled"):
+        raise ToolInputError("'outcome' is done, failed or cancelled.")
+    action = client.complete_action(
+        _required(args, "action_id"), outcome, note=args.get("note"), external_ref=args.get("external_ref")
+    )
+    return ToolResult(
+        text=f"Recorded: {action.action} {action.status}.",
+        data={"action_id": action.id, "status": action.status},
+    )
+
+
+def explain_answer(client: Any, args: dict[str, Any]) -> ToolResult:
+    trace = client.run_trace(_required(args, "run_id"))
+    lines = list(trace.narrative)
+    if trace.given:
+        lines.append("Given:")
+        for item in trace.given:
+            words = item.get("content_then") or "(a memory you may not read)"
+            line = f"{_MARKS.get(item.get('verdict'), '·')} {item.get('why')} “{_clip(words)}”"
+            changed = item.get("changed_since") or []
+            if changed and item.get("content_now"):
+                line += f" — since changed, now reads “{_clip(item['content_now'])}”"
+            lines.append(line)
+    if trace.ignored:
+        lines.append("Not given:")
+        for item in trace.ignored:
+            words = item.get("content") if item.get("visible") and item.get("content") else "(a memory you may not read)"
+            lines.append(f"✗ “{_clip(words)}” — {item.get('why')}")
+    return ToolResult(
+        text="\n".join(lines) or "No explanation was recorded for that run.",
+        data={
+            "run": {"id": trace.run.id, "query": trace.run.query, "answer": trace.run.answer},
+            "given": trace.given,
+            "ignored": trace.ignored,
+            "decision": trace.decision,
+            "held_back": trace.held_back,
+            "recorded": trace.recorded,
+        },
+    )
+
+
+def _clip(text: str, limit: int = 80) -> str:
+    text = " ".join(str(text or "").split())
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
 
 
 def remember(client: Any, args: dict[str, Any]) -> ToolResult:
@@ -406,12 +487,29 @@ TOOLS: tuple[Tool, ...] = (
     Tool(
         "customer_changes",
         "What changed",
-        "What materially changed about a customer since a moment: health band, lifecycle state, plan, open problems, "
-        "goals, intents and signals. Use to catch up before contacting someone you last spoke to a while ago.",
+        "What changed about a customer since a moment — problems opened and resolved, plan and preference changes "
+        "with before and after, lifecycle moves with the reasons, health crossing a band, goals, intents, signals and "
+        "activity — plus what the customer looked like then and now. Use since=last_session to catch up on everything "
+        "since the last conversation before replying.",
         _schema(
             {
                 "customer_id": CUSTOMER_ID,
-                "since": {"type": "string", "description": "ISO date or a span such as 7d, 12h, 2w. Default 7d."},
+                "since": {
+                    "type": "string",
+                    "description": "A span (7d, 12h, 2w, 3mo), an ISO date, a snapshot id, last_session or last_run. Default 7d.",
+                },
+                "agent": {"type": "string", "description": "With last_session/last_run: only this agent's."},
+                "types": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": [
+                            "subscription", "lifecycle", "health", "risk", "trajectory", "problem", "intent",
+                            "preference", "goal", "feedback", "relationship", "fact", "memory", "signal", "activity",
+                        ],
+                    },
+                },
+                "most_important_first": {"type": "boolean", "default": False},
                 "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20},
             },
             ["customer_id"],
@@ -482,10 +580,65 @@ TOOLS: tuple[Tool, ...] = (
         read_only=False,
     ),
     Tool(
+        "request_action",
+        "Request an action",
+        "Ask to take an action for a customer and have it recorded — the approval gateway. Use this rather than "
+        "check_action when you are about to act: it applies the customer's opt-outs, the project's rules and its "
+        "automatic approval limits, and files a request for a person when one is needed. Returns ALLOWED (act, then "
+        "call report_action), NEEDS APPROVAL (do not act; call proceed_action later) or DENIED (never act).",
+        _schema(
+            {
+                "customer_id": CUSTOMER_ID,
+                "action": {
+                    "type": "string",
+                    "description": "e.g. process_refund, issue_credit, offer_discount, contact_customer, send_email, call_customer, offer_upgrade, close_ticket",
+                },
+                "request": {
+                    "type": "object",
+                    "description": "Details the rules read: amount, channel, topic, plan, reply (true when answering the customer's own message).",
+                    "additionalProperties": True,
+                },
+                "idempotency_key": {"type": "string", "description": "Your id for this action; retrying with it returns the same action."},
+                "session_id": {"type": "string"},
+            },
+            ["customer_id", "action"],
+        ),
+        request_action,
+        read_only=False,
+    ),
+    Tool(
+        "proceed_action",
+        "Proceed with an approved action",
+        "After request_action said NEEDS APPROVAL: check whether a person has decided and, if they approved, go ahead "
+        "(the rules are run again on today's facts). Returns ALLOWED, DENIED, or STILL WAITING.",
+        _schema({"action_id": {"type": "string"}}, ["action_id"]),
+        proceed_action,
+        read_only=False,
+    ),
+    Tool(
+        "report_action",
+        "Report an action's outcome",
+        "After taking an ALLOWED action, report what happened — done, failed or cancelled — so the customer's action "
+        "history (which later rules read, e.g. a monthly limit on credits) reflects what really happened.",
+        _schema(
+            {
+                "action_id": {"type": "string"},
+                "outcome": {"type": "string", "enum": ["done", "failed", "cancelled"], "default": "done"},
+                "note": {"type": "string"},
+                "external_ref": {"type": "string", "description": "Your system's id for what was done, e.g. a refund id."},
+            },
+            ["action_id"],
+        ),
+        report_action,
+        read_only=False,
+    ),
+    Tool(
         "explain_answer",
         "Explain an answer",
-        "Why an earlier answer or briefing said what it said: the memories it used as they were then and are now, "
-        "what was held back, and the customer's recorded state at that moment. Pass the run_id from ask_memory.",
+        "Why an earlier answer or briefing said what it said: the memories it was given (✓ cited, ○ retrieved but "
+        "not used) as they were then and are now, and the ones it was NOT given with the reason — ranked below the "
+        "cut, over the token budget, superseded by a newer memory, expired, restricted or outside its profile — plus "
+        "the decision and its confidence. Pass the run_id from ask_memory.",
         _schema({"run_id": {"type": "string"}}, ["run_id"]),
         explain_answer,
     ),

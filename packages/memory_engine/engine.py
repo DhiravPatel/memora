@@ -48,7 +48,7 @@ from database.repositories import (
     UsageRepository,
     VocabularyRepository,
 )
-from memory_engine import explain
+from memory_engine import decision_trace, explain
 from memory_engine.analytics import (
     ActivityWindow,
     Baseline,
@@ -370,6 +370,7 @@ class MemoryEngine:
                     sensitivity="restricted" if verdict.restricted else "normal",
                     restricted_by=verdict.reason,
                     extracted_by=candidate.rule or candidate.source or None,
+                    entities=list(candidate.entity_names or []),
                 )
             )
 
@@ -522,6 +523,7 @@ class MemoryEngine:
                     sensitivity=str(memory.sensitivity),
                     restricted_by=(memory.meta or {}).get("restricted_by"),
                     extracted_by=candidate.rule or candidate.source or None,
+                    entities=list(candidate.entity_names or []),
                 )
             )
 
@@ -997,6 +999,7 @@ class MemoryEngine:
             limit=limit,
             types=types,
             include_concepts=bool((project.settings or {}).get("concept_retrieval", True)),
+            keyword_any=bool((project.settings or {}).get("keyword_match_any", True)),
             learned_synonyms=await self.learned_synonyms(project),
         )
 
@@ -1087,6 +1090,7 @@ class MemoryEngine:
                     "reasoning": composed.reasoning,
                     "evidence": composed.evidence,
                     "confidence": round(composed.confidence, 3),
+                    **await self._considered(project, customer, query, retrieval, given=retrieval.memories),
                 },
             )
             await self.usage.increment(project_id=project.id, metric="ai_queries")
@@ -1171,11 +1175,43 @@ class MemoryEngine:
                 "token_count": context.token_count,
                 "token_budget": token_budget,
                 "truncated": context.truncated,
-                "dropped_by_budget": [item.memory.id for item in memories if item.memory.id not in included],
+                "dropped_by_budget": [ident for ident, why in context.left_out.items() if why == "token_budget"],
+                "left_out": context.left_out,
+                **await self._considered(project, customer, effective_query, retrieval, given=memories),
             },
         )
         await self.usage.increment(project_id=project.id, metric="context_requests")
         return context
+
+    async def _considered(
+        self,
+        project: Project,
+        customer: Customer,
+        query: str,
+        retrieval: RetrievalResult,
+        *,
+        given: Sequence[Any],
+    ) -> dict[str, Any]:
+        """What a run considered but did not give the agent (§26 4.4): the candidates
+        ranking passed over, and the memories the question matched that no agent could
+        have been given — superseded, expired, or hidden from this reader. Ids and reasons;
+        content is shaped for whoever reads the trace."""
+        handed = {item.memory.id for item in given}
+        inactive = await self.memories.inactive_for_customer(project_id=project.id, customer_id=customer.id)
+        hidden = await self.memories.hidden_for_customer(project_id=project.id, customer_id=customer.id)
+        return {
+            "passed_over": [item.explain() for item in retrieval.passed_over if item.item.memory.id not in handed],
+            "cut": {"limit": retrieval.limit, "per_type": retrieval.per_type, "candidates": retrieval.candidate_count},
+            "unseen": decision_trace.unseen(
+                query,
+                inactive=inactive,
+                hidden=hidden,
+                exclude=handed,
+                asked_types=[str(kind) for kind in retrieval.analysis.types or []],
+                cleared=self.cleared,
+                readable_types=self.memories.readable_types,
+            ),
+        }
 
     async def _record_run(
         self,

@@ -13,7 +13,7 @@ import { Table, TD, TH, THead, TR } from "@/components/ui/table";
 import { api } from "@/lib/api";
 import { formatDate, formatRelative } from "@/lib/format";
 import { cn } from "@/lib/utils";
-import type { AgentRunSummary, Page, RunExplanation } from "@/lib/types";
+import type { AgentRunSummary, Page, RunExplanation, RunTrace } from "@/lib/types";
 
 /** Every answer and briefing an agent asked for — and, opened, why it said what it said. */
 export function RunsExplorer({
@@ -234,6 +234,8 @@ export function RunExplanationCard({
               </Table>
             </div>
 
+            <DecisionTrace projectId={projectId} runId={runId} />
+
             <div className="grid gap-4 md:grid-cols-2">
               <div className="border border-border px-4 py-3">
                 <p className="label-strong">Held back</p>
@@ -296,5 +298,107 @@ export function RunExplanationCard({
         )}
       </CardContent>
     </Card>
+  );
+}
+
+const REASON_LABELS: Record<string, string> = {
+  below_cut: "below the cut",
+  type_cap: "capped by type",
+  token_budget: "token budget",
+  section_cap: "section full",
+  duplicate: "duplicate",
+  superseded: "superseded",
+  expired: "expired",
+  withheld_restricted: "restricted",
+  withheld_profile: "outside profile",
+};
+
+/** What the agent was *not* given, and why, and the decision it came to (§26 4.4). */
+function DecisionTrace({ projectId, runId }: { projectId: string; runId: string }) {
+  const trace = useQuery({
+    queryKey: ["agent-run-trace", projectId, runId],
+    queryFn: () => api<RunTrace>(`/v1/projects/${projectId}/agent/runs/${runId}/trace`),
+  });
+  const data = trace.data;
+  if (trace.isLoading) return <LoadingRow label="Loading the decision trace" />;
+  if (trace.error) return <ErrorState error={trace.error} />;
+  if (!data) return null;
+  const { decision } = data;
+  const verdicts = data.given.reduce<Record<string, number>>((counts, item) => {
+    counts[item.verdict] = (counts[item.verdict] ?? 0) + 1;
+    return counts;
+  }, {});
+  return (
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-center gap-2 border border-border bg-surface-2 px-4 py-3 text-xs">
+        <span className="label-strong">Decision</span>
+        {decision.kind === "answer" ? (
+          <>
+            <Badge>{(decision.strategy ?? "answer").replace(/_/g, " ")}</Badge>
+            {decision.confidence !== null && (
+              <span className="numeric">confidence {decision.confidence.toFixed(2)}</span>
+            )}
+            <span className="text-muted-foreground">
+              ✓ {verdicts.cited ?? 0} cited · ○ {verdicts.not_cited ?? 0} retrieved, not used
+            </span>
+          </>
+        ) : (
+          <span className="text-muted-foreground">
+            briefing of {data.given.length} memories · {decision.token_count ?? "—"} tokens
+            {decision.token_budget ? ` of ${decision.token_budget}` : ""}
+            {decision.truncated ? " · cut to fit" : ""}
+          </span>
+        )}
+        {data.cut.limit ? (
+          <span className="label ml-auto">
+            {data.cut.candidates ?? "?"} candidates · top {data.cut.limit} kept
+          </span>
+        ) : null}
+      </div>
+      <div>
+        <p className="label mb-2">Not given to the agent, and why</p>
+        {!data.recorded && (
+          <p className="mb-2 text-xs text-warning">
+            This run was recorded before traces kept what was considered; this list may be
+            incomplete.
+          </p>
+        )}
+        {data.ignored.length === 0 ? (
+          <p className="label">Nothing that matched the question was left out.</p>
+        ) : (
+          <ul className="space-y-2">
+            {data.ignored.map((item) => (
+              <li key={`${item.reason}-${item.id}`} className="flex gap-3 text-xs">
+                <span className="text-danger" aria-hidden>
+                  ✗
+                </span>
+                <div className="min-w-0 flex-1 space-y-1">
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <Badge
+                      className={cn(
+                        item.reason.startsWith("withheld") && "border-danger/40 text-danger",
+                        item.reason === "superseded" && "border-violet/60 text-violet",
+                      )}
+                    >
+                      {REASON_LABELS[item.reason] ?? item.reason}
+                    </Badge>
+                    {item.type && <MemoryTypeBadge type={item.type} />}
+                    <span className="label">{item.id}</span>
+                  </div>
+                  <p className="leading-relaxed text-foreground">
+                    {item.visible ? (
+                      (item.content ?? "—")
+                    ) : (
+                      <span className="label">withheld from you</span>
+                    )}
+                  </p>
+                  <p className="text-muted-foreground">{item.why}</p>
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </div>
   );
 }

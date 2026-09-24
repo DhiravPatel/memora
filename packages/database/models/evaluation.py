@@ -51,6 +51,13 @@ class EvalCase(Base):
     expected_phrases: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
     notes: Mapped[str | None] = mapped_column(Text)
     source: Mapped[str] = mapped_column(String(32), nullable=False, default="manual")
+    # "retrieval" asks a question; "extraction" (§26 4.3) sends an event through the
+    # pipeline without writing and checks the memories it would make.
+    kind: Mapped[str] = mapped_column(String(16), nullable=False, default="retrieval", server_default="retrieval")
+    # For extraction: {event_type, data, occurred_at?}.
+    event: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
+    # For extraction: {expect: [...], forbid: [...], expect_nothing: bool}.
+    expectations: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
@@ -74,6 +81,10 @@ class EvalRun(Base):
     k: Mapped[int] = mapped_column(nullable=False, default=10)
     # The retrieval settings in force, so a result can be attributed to a configuration.
     settings: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    # Settings a regression run was measured under instead of the project's (§26 4.3) —
+    # proposed, never saved. Such a run is never a baseline. SQL NULL, not JSON null, when
+    # absent: the baseline query filters on IS NULL.
+    overrides: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
     metrics: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
     results: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False, default=list)
     comparison: Mapped[dict[str, Any] | None] = mapped_column(JSONB)

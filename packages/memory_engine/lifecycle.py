@@ -112,6 +112,147 @@ DEFAULT_LIFECYCLE: dict[str, Any] = {
 }
 
 
+# The machine above is the *primary* track: its state is `state.current`, and it is what
+# every surface shows first. Projects may run more tracks beside it (§26 4.2) — one machine
+# cannot say both how engaged a customer is and where they are commercially.
+PRIMARY_TRACK = "lifecycle"
+MAX_TRACKS = 6
+
+ENGAGEMENT_TEMPLATE: dict[str, Any] = {
+    "label": "Engagement",
+    "description": "How deeply the customer uses the product, from first use to power user — and back.",
+    "states": ["new", "activated", "adopting", "power_user", "at_risk", "churned"],
+    "initial": "new",
+    "transitions": [
+        {
+            "name": "churned",
+            "from": ["new", "activated", "adopting", "power_user", "at_risk"],
+            "to": "churned",
+            "when": (
+                'subscription.direction == "cancelled" or customer.metadata.status == "churned" '
+                "or activity.last_event_days_ago >= 90"
+            ),
+        },
+        {
+            "name": "reactivated",
+            "from": ["churned"],
+            "to": "adopting",
+            "when": "activity.last_event_days_ago <= 7 and activity.events_recent >= 5",
+        },
+        {
+            "name": "at_risk",
+            "from": ["activated", "adopting", "power_user"],
+            "to": "at_risk",
+            "when": (
+                'health.band in ["at_risk", "critical"] or signals.churn_risk >= 0.6 '
+                "or problems.open_count >= 3 "
+                'or (activity.trend == "declining" and activity.change_pct <= -40) '
+                'or feedback.negative_trend == "rising"'
+            ),
+        },
+        {
+            # Stricter to leave than to enter, like the primary machine: no flapping.
+            "name": "recovered",
+            "from": ["at_risk"],
+            "to": "adopting",
+            "when": (
+                'health.band in ["healthy", "watch"] and signals.churn_risk < 0.4 '
+                'and problems.open_count < 2 and activity.trend != "declining"'
+            ),
+        },
+        {
+            "name": "activated",
+            "from": ["new"],
+            "to": "activated",
+            "when": "activity.distinct_features >= 1 or activity.events_recent >= 3",
+        },
+        {
+            "name": "adopting",
+            "from": ["activated"],
+            "to": "adopting",
+            "when": "activity.distinct_features >= 3 or (activity.events_recent >= 10 and customer.age_days >= 7)",
+        },
+        {
+            "name": "power_user",
+            "from": ["adopting"],
+            "to": "power_user",
+            "when": 'activity.distinct_features >= 6 and activity.events_recent >= 25 and health.band == "healthy"',
+        },
+        {
+            "name": "cooled",
+            "from": ["power_user"],
+            "to": "adopting",
+            "when": 'activity.trend == "declining" and activity.change_pct <= -30',
+        },
+    ],
+}
+
+COMMERCIAL_TEMPLATE: dict[str, Any] = {
+    "label": "Commercial",
+    "description": "Where the customer is in the buying relationship, from trial to renewal.",
+    "states": ["trial", "paying", "expanding", "renewing", "churned"],
+    "initial": "trial",
+    "transitions": [
+        {
+            "name": "churned",
+            "from": ["trial", "paying", "expanding", "renewing"],
+            "to": "churned",
+            "when": 'subscription.direction == "cancelled" or customer.metadata.status == "churned"',
+        },
+        {
+            "name": "won_back",
+            "from": ["churned"],
+            "to": "paying",
+            "when": (
+                'subscription.direction in ["started", "upgraded", "renewed"] '
+                "and subscription.changed_days_ago <= 30"
+            ),
+        },
+        {
+            "name": "converted",
+            "from": ["trial"],
+            "to": "paying",
+            "when": 'subscription.plan is set and not (subscription.plan in ["trial", "free"])',
+        },
+        {
+            "name": "renewing",
+            "from": ["paying", "expanding"],
+            "to": "renewing",
+            "when": 'intents.kinds contains "renewal" or customer.metadata.renewal_days <= 60',
+        },
+        {
+            "name": "renewed",
+            "from": ["renewing"],
+            "to": "paying",
+            "when": 'subscription.direction == "renewed" and subscription.changed_days_ago <= 30',
+        },
+        {
+            "name": "expanding",
+            "from": ["paying"],
+            "to": "expanding",
+            "when": (
+                '(subscription.direction == "upgraded" and subscription.changed_days_ago <= 60) '
+                'or intents.kinds contains "expansion" or signals.expansion_score >= 0.6'
+            ),
+        },
+        {
+            "name": "settled",
+            "from": ["expanding"],
+            "to": "paying",
+            "when": (
+                'intents.kinds does not contain "expansion" and signals.expansion_score < 0.3 '
+                "and lifecycle.commercial.days_in_state >= 60"
+            ),
+        },
+    ],
+}
+
+TRACK_TEMPLATES: dict[str, dict[str, Any]] = {
+    "engagement": ENGAGEMENT_TEMPLATE,
+    "commercial": COMMERCIAL_TEMPLATE,
+}
+
+
 class LifecycleError(ValueError):
     """A machine that cannot be compiled — refused when written, never at evaluation."""
 
@@ -259,3 +400,61 @@ def compile_lifecycle(raw: dict[str, Any] | None) -> Lifecycle:
         transitions.append(Transition(name=name, sources=frozenset(sources), target=target, condition=condition))
 
     return Lifecycle(states=tuple(cleaned), initial=initial, transitions=tuple(transitions))
+
+
+@dataclass(slots=True)
+class Track:
+    """A named machine beside the primary one."""
+
+    name: str
+    label: str
+    machine: Lifecycle
+    enabled: bool = True
+    description: str | None = None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "label": self.label,
+            "description": self.description,
+            **self.machine.as_dict(),
+        }
+
+
+def _track_name(raw: Any) -> str:
+    name = str(raw or "").strip().lower().replace(" ", "_").replace("-", "_")
+    if not name or not name[0].isalpha() or not name.replace("_", "").isalnum() or len(name) > 40:
+        raise LifecycleError(f"{raw!r} is not a valid track name — lowercase letters, digits and '_'.")
+    if name == PRIMARY_TRACK:
+        raise LifecycleError(f"{PRIMARY_TRACK!r} is the primary track; edit it under 'lifecycle'.")
+    return name
+
+
+def compile_tracks(raw: dict[str, Any] | None) -> dict[str, Track]:
+    """Validate every extra track. Unlike the primary machine there is no default: a track
+    exists because a project defined it, or took a template."""
+    if not raw:
+        return {}
+    if not isinstance(raw, dict):
+        raise LifecycleError("Lifecycle tracks must be an object of track name to machine.")
+    if len(raw) > MAX_TRACKS:
+        raise LifecycleError(f"At most {MAX_TRACKS} tracks beside the primary lifecycle.")
+    tracks: dict[str, Track] = {}
+    for key, spec in raw.items():
+        name = _track_name(key)
+        if name in tracks:
+            raise LifecycleError(f"Two tracks are named {name!r}.")
+        if not isinstance(spec, dict) or not spec.get("states"):
+            raise LifecycleError(f"Track {name!r} needs states, an initial state and transitions.")
+        try:
+            machine = compile_lifecycle(spec)
+        except LifecycleError as exc:
+            raise LifecycleError(f"Track {name!r}: {exc}") from exc
+        tracks[name] = Track(
+            name=name,
+            label=str(spec.get("label") or name.replace("_", " ").title())[:60],
+            machine=machine,
+            enabled=spec.get("enabled", True) is not False,
+            description=(str(spec["description"])[:300] if spec.get("description") else None),
+        )
+    return tracks

@@ -27,6 +27,17 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from memory_engine.actions import (
+    ACCOUNT,
+    ACTION_CATALOG,
+    ACTION_CHANNELS,
+    CLOSING,
+    CONTACT,
+    MONEY,
+    PROMOTION,
+    SELLING,
+    normalise_action,
+)
 from memory_engine.conditions import (
     Condition,
     ConditionError,
@@ -34,43 +45,38 @@ from memory_engine.conditions import (
     sanitize_evaluation,
 )
 from memory_engine.facts import CustomerFacts
+from memory_engine.reasons import sentence
 from nlp.tokenize import root, surface_words
 
 ALLOW, REQUIRE_APPROVAL, DENY = "allow", "require_approval", "deny"
 _RANK = {ALLOW: 0, REQUIRE_APPROVAL: 1, DENY: 2}
 
-# Action families the built-in rules recognise. Any other action name is accepted — it is
-# simply judged by the profile and the project's own rules.
-SELLING = frozenset({"offer_upgrade", "offer_expansion", "upsell", "cross_sell", "offer_add_on"})
-PROMOTION = frozenset({"send_marketing", "send_promotion", "request_review", "request_referral"})
-CONTACT = frozenset({"contact_customer", "send_message", "send_email", "call_customer", *PROMOTION})
-CLOSING = frozenset({"close_ticket", "mark_resolved", "resolve_ticket"})
-MONEY = frozenset({"offer_discount", "issue_credit", "process_refund", "waive_fee"})
-ACCOUNT = frozenset({"cancel_subscription", "downgrade_plan", "change_plan", "delete_account", "pause_subscription"})
-
-ACTION_CATALOG: dict[str, str] = {
-    **dict.fromkeys(sorted(SELLING), "selling"),
-    **dict.fromkeys(sorted(PROMOTION), "promotion"),
-    **dict.fromkeys(sorted(CONTACT - PROMOTION), "contact"),
-    **dict.fromkeys(sorted(CLOSING), "closing"),
-    **dict.fromkeys(sorted(MONEY), "money"),
-    **dict.fromkeys(sorted(ACCOUNT), "account"),
-    "escalate": "support",
-    "create_ticket": "support",
-    "schedule_call": "contact",
-}
-
+# Action families the built-in rules recognise (memory_engine.actions). Any other action
+# name is accepted — it is simply judged by the profile and the project's own rules.
 BUILTIN_RULES: dict[str, str] = {
     "open_problem_blocks_selling": "Do not sell to a customer with an unresolved problem.",
     "at_risk_blocks_selling": "Do not sell to a customer who is at risk.",
     "churn_intent_blocks_promotion": "Do not market to a customer who has said they may leave.",
     "channel_preference": "Contact a customer only on the channel they prefer.",
+    "respect_opt_out": "Honour what customers asked for: no calls, no emails, no sales outreach, no marketing.",
     "unresolved_problem_blocks_closing": "Do not close a ticket whose problem is still open.",
     "money_requires_approval": "Discounts, credits and refunds need a person.",
     "account_change_requires_approval": "Cancelling, downgrading or deleting needs a person.",
 }
 
 MAX_PROJECT_RULES = 30
+MAX_AUTO_APPROVALS = 20
+# The built-in approval requirements a project's limits can lift. Its own rules are more
+# specific than a limit, and stay.
+LIFTABLE = frozenset({"money_requires_approval", "account_change_requires_approval"})
+
+# Channels as customers and agents write them.
+_CHANNEL_ALIASES = {
+    "call": "phone", "calls": "phone", "telephone": "phone", "voice": "phone", "phone": "phone",
+    "mail": "email", "e_mail": "email", "email": "email",
+    "text": "sms", "texts": "sms", "sms": "sms",
+    "whatsapp": "whatsapp", "whats_app": "whatsapp",
+}
 
 # How the money actions read in a sentence.
 _MONEY_PHRASES = {
@@ -152,13 +158,34 @@ class ProjectRule:
         }
 
 
+@dataclass(slots=True, frozen=True)
+class AutoApproval:
+    """A project's standing yes: "refunds up to 50 need nobody", optionally "…but no more
+    than three a month" — past which a person decides again."""
+
+    actions: frozenset[str]
+    up_to: float | None = None
+    max_per_30_days: int | None = None
+
+    def covers(self, action: str) -> bool:
+        return action in self.actions
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"actions": sorted(self.actions), "up_to": self.up_to, "max_per_30_days": self.max_per_30_days}
+
+
 @dataclass(slots=True)
 class Guardrails:
     disabled: frozenset[str] = frozenset()
     rules: tuple[ProjectRule, ...] = ()
+    auto_approve: tuple[AutoApproval, ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
-        return {"disabled": sorted(self.disabled), "rules": [rule.as_dict() for rule in self.rules]}
+        return {
+            "disabled": sorted(self.disabled),
+            "rules": [rule.as_dict() for rule in self.rules],
+            "auto_approve": [limit.as_dict() for limit in self.auto_approve],
+        }
 
 
 @dataclass(slots=True, frozen=True)
@@ -168,10 +195,6 @@ class Profile:
     name: str
     allowed_actions: frozenset[str] = frozenset()
     denied_actions: frozenset[str] = frozenset()
-
-
-def normalise_action(action: str) -> str:
-    return action.strip().lower().replace("-", "_").replace(" ", "_")
 
 
 def compile_guardrails(raw: dict[str, Any] | None) -> Guardrails:
@@ -218,7 +241,45 @@ def compile_guardrails(raw: dict[str, Any] | None) -> Guardrails:
             raise GuardrailError(f"Rule {name!r}: {exc}") from exc
         message = str(entry.get("message") or "").strip() or f"Blocked by the project rule {name!r}."
         rules.append(ProjectRule(name, frozenset(actions), condition, decision, message))
-    return Guardrails(disabled=frozenset(disabled), rules=tuple(rules))
+    return Guardrails(
+        disabled=frozenset(disabled), rules=tuple(rules), auto_approve=_auto_approvals(raw.get("auto_approve"))
+    )
+
+
+def _auto_approvals(raw: Any) -> tuple[AutoApproval, ...]:
+    if not raw:
+        return ()
+    if not isinstance(raw, list):
+        raise GuardrailError("'auto_approve' must be a list of limits.")
+    if len(raw) > MAX_AUTO_APPROVALS:
+        raise GuardrailError(f"At most {MAX_AUTO_APPROVALS} automatic approval limits.")
+    limits: list[AutoApproval] = []
+    for index, entry in enumerate(raw, start=1):
+        if not isinstance(entry, dict):
+            raise GuardrailError(f"Limit {index} must be an object.")
+        actions_raw = entry.get("actions") or []
+        if isinstance(actions_raw, str):
+            actions_raw = [actions_raw]
+        actions = {normalise_action(str(item)) for item in actions_raw}
+        if not actions:
+            raise GuardrailError(f"Limit {index} names no actions.")
+        liftable = MONEY | ACCOUNT
+        wrong = actions - liftable
+        if wrong:
+            raise GuardrailError(
+                f"Limit {index}: {', '.join(sorted(wrong))} never needs approval by default, so there is "
+                f"nothing to lift. Limits apply to: {', '.join(sorted(liftable))}."
+            )
+        up_to = entry.get("up_to")
+        if up_to is not None and (isinstance(up_to, bool) or not isinstance(up_to, (int, float)) or up_to <= 0):
+            raise GuardrailError(f"Limit {index}: 'up_to' must be a positive number.")
+        if actions & MONEY and up_to is None:
+            raise GuardrailError(f"Limit {index}: money actions need an 'up_to' amount.")
+        cap = entry.get("max_per_30_days")
+        if cap is not None and (isinstance(cap, bool) or not isinstance(cap, int) or cap < 1):
+            raise GuardrailError(f"Limit {index}: 'max_per_30_days' must be a whole number of at least 1.")
+        limits.append(AutoApproval(frozenset(actions), float(up_to) if up_to is not None else None, cap))
+    return tuple(limits)
 
 
 def request_facts(action: str, request: dict[str, Any]) -> dict[str, Any]:
@@ -230,6 +291,9 @@ def request_facts(action: str, request: dict[str, Any]) -> dict[str, Any]:
         "request.amount": _number(extra.pop("amount", None)),
         "request.topic": surface_words(str(extra.pop("topic"))) if extra.get("topic") else None,
         "request.plan": str(extra.pop("plan")).strip().lower() if extra.get("plan") else None,
+        # Answering the customer's own message is not outreach: "do not contact us" does not
+        # forbid replying to them.
+        "request.reply": bool(extra.pop("reply", False)),
         "request.extra": extra,
     }
     return values
@@ -286,9 +350,66 @@ def check(
                 )
             )
 
+    reasons = _apply_limits(action, facts, guardrails.auto_approve, reasons)
     decision = max((reason.decision for reason in reasons), key=_RANK.get, default=ALLOW)
     reasons.sort(key=lambda reason: -_RANK[reason.decision])
     return Verdict(decision=decision, reasons=reasons)
+
+
+def _apply_limits(
+    action: str, facts: CustomerFacts, limits: Sequence[AutoApproval], reasons: list[Reason]
+) -> list[Reason]:
+    """Lift a built-in approval requirement the project has said yes to in advance — within
+    its amount, and while the customer's history is under its monthly count."""
+    limit = next((item for item in limits if item.covers(action)), None)
+    if limit is None:
+        return reasons
+    amount = facts.get("request.amount")
+    taken = int(facts.get(f"actions.{action}.count_30d") or 0)
+    what = _MONEY_PHRASES.get(action, action.replace("_", " ").capitalize())
+    out: list[Reason] = []
+    for reason in reasons:
+        if reason.rule not in LIFTABLE or reason.decision != REQUIRE_APPROVAL:
+            out.append(reason)
+            continue
+        within = limit.up_to is None or (isinstance(amount, (int, float)) and amount <= limit.up_to)
+        if not within:
+            shown = f"{amount:g}" if isinstance(amount, (int, float)) else "an unstated amount"
+            out.append(
+                Reason(
+                    rule=reason.rule,
+                    source=reason.source,
+                    decision=REQUIRE_APPROVAL,
+                    explanation=f"{what} of {shown} is over the project's automatic limit of {limit.up_to:g}; a person should approve it.",
+                )
+            )
+            continue
+        if limit.max_per_30_days is not None and taken >= limit.max_per_30_days:
+            out.append(
+                Reason(
+                    rule=reason.rule,
+                    source=reason.source,
+                    decision=REQUIRE_APPROVAL,
+                    explanation=(
+                        f"{what} is within the automatic limit, but {_plural(taken, action.replace('_', ' '))} "
+                        f"in the last 30 days already reach its monthly cap of {limit.max_per_30_days}; a person should approve it."
+                    ),
+                )
+            )
+            continue
+        bound = f" within the limit of {limit.up_to:g}" if limit.up_to is not None else ""
+        count = (
+            f" ({taken + 1} of {limit.max_per_30_days} this month)" if limit.max_per_30_days is not None else ""
+        )
+        out.append(
+            Reason(
+                rule="auto_approved",
+                source="builtin",
+                decision=ALLOW,
+                explanation=f"Approved automatically: {what.lower()}{f' of {amount:g}' if isinstance(amount, (int, float)) else ''}{bound}{count}, set by the project.",
+            )
+        )
+    return out
 
 
 def _profile(action: str, profile: Profile) -> Iterable[Reason]:
@@ -348,6 +469,9 @@ def _builtins(action: str, facts: CustomerFacts, visible: CustomerFacts, disable
             explanation="The customer has said they may leave; do not promote to them.",
             evidence=visible.evidence_for("intents.kinds", "cancellation"),
         )
+
+    if on("respect_opt_out"):
+        yield from _opt_outs(action, facts, visible)
 
     wanted = facts.get("request.channel")
     preferred = facts.get("preferences.channel")
@@ -411,6 +535,45 @@ def _builtins(action: str, facts: CustomerFacts, visible: CustomerFacts, disable
             source="builtin",
             decision=REQUIRE_APPROVAL,
             explanation=f"{action.replace('_', ' ').capitalize()} changes the customer's account; a person should confirm.",
+        )
+
+
+def _canonical_channel(value: Any) -> str | None:
+    if not value:
+        return None
+    key = str(value).strip().lower().replace("-", "_").replace(" ", "_")
+    return _CHANNEL_ALIASES.get(key, key)
+
+
+def _opt_outs(action: str, facts: CustomerFacts, visible: CustomerFacts) -> Iterable[Reason]:
+    """What the customer asked for, applied: "don't call me" stops a call, "no sales calls"
+    stops selling, "unsubscribe me" stops marketing, "don't contact us" stops outreach —
+    though not a reply to a message they sent."""
+    opted = {str(kind) for kind in facts.get("preferences.opt_outs") or []}
+    if not opted:
+        return
+    channel = _canonical_channel(facts.get("request.channel")) or ACTION_CHANNELS.get(action)
+    reply = bool(facts.get("request.reply"))
+    blocked: list[str] = []
+    if "contact" in opted and action in CONTACT and not reply:
+        blocked.append("contact")
+    if "marketing" in opted and action in PROMOTION:
+        blocked.append("marketing")
+    if "sales" in opted and action in SELLING:
+        blocked.append("sales")
+    if channel in opted and channel in ("phone", "email", "sms", "whatsapp") and (action in CONTACT or action in SELLING):
+        blocked.append(channel)
+    shown = {str(kind) for kind in visible.get("preferences.opt_outs") or []}
+    for kind in blocked:
+        words = sentence("preferences.opt_outs", [kind]) or "asked not to be contacted this way"
+        withheld = "The customer's contact preferences do not allow this."
+        yield Reason(
+            rule="respect_opt_out",
+            source="builtin",
+            decision=DENY,
+            explanation=f"The customer {words}." if kind in shown else withheld,
+            evidence=visible.evidence_for("preferences.opt_outs", kind),
+            redacted_explanation=withheld,
         )
 
 

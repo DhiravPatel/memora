@@ -1,8 +1,9 @@
-"""Retrieval evaluation (project API key).
+"""Memory evaluation (project API key).
 
-Sets of questions whose right answers are known, and runs that measure how often — and how
-high — retrieval returns them. Reads need `memory:read`; creating sets, cases and runs
-needs `memory:write`.
+Sets of cases whose right answers are known — questions retrieval should answer, and events
+extraction should turn into the right memories — runs that measure them, regressions that
+measure a settings change before it is saved, and the scorecard. Reads need `memory:read`;
+creating sets, cases and runs needs `memory:write`.
 """
 
 from __future__ import annotations
@@ -21,6 +22,8 @@ from app.schemas.evaluation import (
     EvalSetIn,
     EvalSetOut,
     EvalSuggestion,
+    RegressionIn,
+    RegressionOut,
 )
 from app.services import evaluation_views as views
 from app.services.evaluation_service import EvaluationService
@@ -53,6 +56,14 @@ async def eval_suggestions(
 ) -> list[EvalSuggestion]:
     """Recent real questions and what retrieval returned — pick the right answer to make a case."""
     return await views.suggestions(session, project=project, limit=limit, cleared=cleared)
+
+
+@router.get("/scorecard")
+async def eval_scorecard(project: ApiProject, session: DBSession, cleared: Clearance) -> dict:
+    """Memory quality in one place: retrieval recall, MRR and citation accuracy; extraction
+    accuracy, false-memory rate and type, sensitivity and consolidation accuracy — from the
+    latest run of every set — with duplicate control and consistency from the quality report."""
+    return await views.scorecard(session, project=project, cleared=cleared)
 
 
 @router.get("/runs/{run_id}", response_model=EvalRunOut)
@@ -109,5 +120,21 @@ async def start_eval_run(
     """Run the set. With `wait` (default) and at most 100 cases the result comes back here;
     otherwise the run is queued and `GET /v1/evals/runs/{id}` reports on it."""
     return await views.start_run(
+        session, project=project, set_id=set_id, payload=payload, cleared=cleared, actor_id=None, embedder=embedder
+    )
+
+
+@router.post("/{set_id}/regression", response_model=RegressionOut, dependencies=WRITE)
+async def eval_regression(
+    set_id: str,
+    payload: RegressionIn,
+    project: ApiProject,
+    session: DBSession,
+    cleared: Clearance,
+    embedder: EmbedderDep,
+) -> RegressionOut:
+    """Before changing a setting: run the set as configured and under the proposed settings
+    (validated like a save, never saved) and list every case the change would break."""
+    return await views.regression(
         session, project=project, set_id=set_id, payload=payload, cleared=cleared, actor_id=None, embedder=embedder
     )

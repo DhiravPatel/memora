@@ -47,3 +47,28 @@ database_required = pytest.mark.skipif(
     not requires_database(),
     reason="Set TEST_DATABASE_URL to run database-backed tests.",
 )
+
+
+def run_worker(event_id: str) -> dict:
+    """The worker's ``process_event`` for one event, inline, on a fresh loop with its own
+    engine — the real pipeline for e2e tests that go through ``POST /v1/events``."""
+    import anyio
+
+    import database.session as db
+    from worker.tasks.process_event import process_event
+
+    saved = (db._engine, db._session_factory)
+    db._engine, db._session_factory = None, None
+    result: dict = {}
+
+    async def run() -> None:
+        try:
+            result.update(await process_event({}, event_id))
+        finally:
+            await db.dispose_engine()
+
+    try:
+        anyio.run(run)
+    finally:
+        db._engine, db._session_factory = saved
+    return result

@@ -10,7 +10,7 @@ from app.core.queue import enqueue
 from app.core.security import api_key_prefix, generate_api_key, hash_api_key
 from app.schemas.projects import ProjectOut, ProjectWithKey
 from app.services.serializers import project_out
-from app.services.settings_service import effective
+from app.services.settings_service import effective, new_project_settings
 from app.services.settings_service import validate as validate_settings
 from common.enums import ApiKeyScope, AuditAction
 from common.errors import ConflictError, NotFoundError
@@ -48,7 +48,8 @@ class ProjectService:
             name=name.strip(),
             api_key_hash=hash_api_key(api_key),
             api_key_prefix=api_key_prefix(api_key),
-            settings=settings,
+            # New projects start with the engagement and commercial tracks (§26 4.2).
+            settings=new_project_settings(settings),
         )
         # The first key is a real, listable, revocable key rather than a hidden column.
         await self.keys.create(

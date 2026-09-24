@@ -24,6 +24,7 @@ import { formatDate } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { GuardrailsEditor } from "@/components/settings/guardrails-editor";
 import { LifecycleEditor } from "@/components/settings/lifecycle-editor";
+import { TracksEditor } from "@/components/settings/tracks-editor";
 import type {
   GuardrailSettings,
   LearnedTerm,
@@ -31,6 +32,7 @@ import type {
   ProjectSettings,
   RestrictionRule,
   SettingField,
+  TrackSettings,
   Vocabulary,
 } from "@/lib/types";
 
@@ -470,6 +472,19 @@ function Control({
             onChange={onChange}
           />
         }
+      >
+        {reset}
+      </Field>
+    );
+  }
+
+  if (field.kind === "lifecycle_tracks") {
+    return (
+      <Field
+        label={field.label}
+        help={field.help}
+        changed={changed}
+        hint={<TracksEditor value={(value ?? {}) as TrackSettings} onChange={onChange} />}
       >
         {reset}
       </Field>

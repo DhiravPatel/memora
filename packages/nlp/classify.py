@@ -8,6 +8,7 @@ see which phrase caused it and fix the lexicon.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 from common.enums import MemoryType
@@ -78,17 +79,59 @@ class Classification:
         }
 
 
-def _cue_is_negated(lemma_sentence: str, cue: str) -> bool:
-    """True when a negation sits immediately before the cue ("no problem", "not an issue")."""
-    position = lemma_sentence.find(cue)
-    if position <= 0:
-        return False
-    window = lemma_sentence[max(0, position - 24) : position]
-    return any(f" {negation} " in f" {window} " for negation in NEGATIONS)
+# Where one statement ends and the next begins, for negation. "QuickBooks will not
+# connect, it keeps rejecting the credentials" is two complaints; the "not" of the first
+# must not read as denying the second.
+_CLAUSE_BREAK = re.compile(r"[,;:!?.]+|\s(?:but|however|although|though|whereas)\s", re.IGNORECASE)
+
+# An event type's prior below this only reinforces evidence the sentence already carries
+# for that type. A message in a support thread is not a problem report because of where it
+# was sent: "the campaign went out this morning" is news, not a complaint.
+WEAK_PRIOR = 0.5
+
+
+# A fix that has not happened yet is not a resolution: "until SSO is fixed", "once it is
+# resolved", "please get this sorted", "it needs to be fixed". Lemmatised forms.
+_UNRESOLVED_MARKERS = frozenset(
+    lemmatized_text(word)
+    for word in ("until", "unless", "once", "if", "when", "need", "should", "please", "must", "hope", "wait", "expect", "able")
+)
+
+
+def _resolution_in(clauses: list[str]) -> bool:
+    """Whether a clause reports something fixed, with no marker before the cue saying the
+    fix is still to come."""
+    for clause in clauses:
+        for _, cue in _LEMMA_RESOLUTION:
+            position = clause.find(f" {cue} ")
+            if position < 0:
+                continue
+            if set(clause[:position].split()) & _UNRESOLVED_MARKERS:
+                continue
+            return True
+    return False
+
+
+def _clauses(sentence: str) -> list[str]:
+    parts = [part for part in _CLAUSE_BREAK.split(sentence) if part and part.strip()]
+    return [f" {lemmatized_text(part)} " for part in parts]
+
+
+def _cue_is_negated(clauses: list[str], cue: str) -> bool:
+    """True when a negation sits shortly before the cue *in the same clause* ("no problem",
+    "not an issue")."""
+    for clause in clauses:
+        position = clause.find(f" {cue} ")
+        if position < 0:
+            continue
+        window = clause[max(0, position - 24) : position + 1]
+        return any(f" {negation} " in f" {window} " for negation in NEGATIONS)
+    return False
 
 
 def classify(sentence: str, *, event_type: str = "", prior_weight: float = 1.0) -> Classification:
     lemma_sentence = f" {lemmatized_text(sentence)} "
+    clauses = _clauses(sentence)
     sentiment = analyze(sentence)
     scores: dict[MemoryType, float] = {}
     matched: list[str] = []
@@ -102,7 +145,7 @@ def classify(sentence: str, *, event_type: str = "", prior_weight: float = 1.0) 
             # Word-boundary match only: a substring match makes "rating" fire on "migrate".
             if f" {lemma_cue} " not in lemma_sentence:
                 continue
-            if _cue_is_negated(lemma_sentence, lemma_cue):
+            if _cue_is_negated(clauses, lemma_cue):
                 negated.append(phrase)
                 # "no problem" is the opposite of a problem report.
                 if memory_type is MemoryType.PROBLEM:
@@ -129,11 +172,10 @@ def classify(sentence: str, *, event_type: str = "", prior_weight: float = 1.0) 
     prior = EVENT_TYPE_PRIORS.get(event_type.strip().lower())
     if prior is not None:
         prior_type, weight = prior
-        scores[prior_type] = scores.get(prior_type, 0.0) + weight * prior_weight
+        if weight * prior_weight >= WEAK_PRIOR or scores.get(prior_type, 0.0) > 0:
+            scores[prior_type] = scores.get(prior_type, 0.0) + weight * prior_weight
 
-    resolved = any(
-        f" {lemma_cue} " in lemma_sentence for _, lemma_cue in _LEMMA_RESOLUTION
-    ) and not sentiment.is_negative
+    resolved = _resolution_in(clauses) and not sentiment.is_negative
     if resolved or problem_denied:
         # An explicit denial or a "it works now" outweighs the event type's prior.
         scores[MemoryType.PROBLEM] = scores.get(MemoryType.PROBLEM, 0.0) * 0.3

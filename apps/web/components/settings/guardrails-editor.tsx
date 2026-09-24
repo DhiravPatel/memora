@@ -6,9 +6,10 @@ import { Button } from "@/components/ui/button";
 import { Input, Label, Select } from "@/components/ui/input";
 import { useSession } from "@/hooks/use-session";
 import { cn } from "@/lib/utils";
-import type { GuardrailRule, GuardrailSettings } from "@/lib/types";
+import type { AutoApprovalLimit, GuardrailRule, GuardrailSettings } from "@/lib/types";
 
-/** Agent guardrails as a form: the built-in rules, the project's own, and the approval window.
+/** Agent guardrails as a form: the built-in rules, automatic approval limits, the project's
+ *  own rules, and the approval window.
  *
  * Project rules are conditions over customer facts plus the proposed action's `request.*`
  * facts, checked against the catalog as they are typed; the server compiles every one again
@@ -32,6 +33,14 @@ export function GuardrailsEditor({
 
   function update(patch: Partial<GuardrailSettings>) {
     onChange({ ...value, ...patch });
+  }
+
+  function setLimit(index: number, patch: Partial<AutoApprovalLimit>) {
+    update({
+      auto_approve: (value.auto_approve ?? []).map((limit, position) =>
+        position === index ? { ...limit, ...patch } : limit,
+      ),
+    });
   }
 
   function setRule(index: number, patch: Partial<GuardrailRule>) {
@@ -81,6 +90,101 @@ export function GuardrailsEditor({
             );
           })}
         </div>
+      </div>
+
+      <div className="space-y-2">
+        <p className="label">
+          Automatic approval — money and account actions within these limits need nobody
+        </p>
+        {(value.auto_approve ?? []).map((limit, index) => (
+          <div
+            key={index}
+            className="flex flex-wrap items-end gap-2 border border-border bg-surface-2 p-3"
+          >
+            <div className="min-w-[14rem] flex-1">
+              <Label>Actions (comma-separated)</Label>
+              <Input
+                list="guardrail-limit-actions"
+                value={limit.actions.join(", ")}
+                placeholder="process_refund"
+                onChange={(event) =>
+                  setLimit(index, {
+                    actions: event.target.value
+                      .split(",")
+                      .map((item) => item.trim())
+                      .filter(Boolean),
+                  })
+                }
+                className="h-8 text-[11px]"
+              />
+            </div>
+            <div>
+              <Label>Up to amount</Label>
+              <Input
+                type="number"
+                min={0}
+                value={limit.up_to ?? ""}
+                placeholder="50"
+                onChange={(event) =>
+                  setLimit(index, {
+                    up_to: event.target.value === "" ? null : Number(event.target.value),
+                  })
+                }
+                className="h-8 w-28 text-[11px]"
+              />
+            </div>
+            <div>
+              <Label>At most per 30 days</Label>
+              <Input
+                type="number"
+                min={1}
+                value={limit.max_per_30_days ?? ""}
+                placeholder="no cap"
+                onChange={(event) =>
+                  setLimit(index, {
+                    max_per_30_days: event.target.value === "" ? null : Number(event.target.value),
+                  })
+                }
+                className="h-8 w-28 text-[11px]"
+              />
+            </div>
+            <Button
+              size="sm"
+              variant="ghost"
+              title="Remove limit"
+              onClick={() =>
+                update({
+                  auto_approve: (value.auto_approve ?? []).filter(
+                    (_, position) => position !== index,
+                  ),
+                })
+              }
+            >
+              ✕
+            </Button>
+          </div>
+        ))}
+        <datalist id="guardrail-limit-actions">
+          {catalog.data?.actions
+            .filter((item) => item.family === "money" || item.family === "account")
+            .map((item) => (
+              <option key={item.action} value={item.action} />
+            ))}
+        </datalist>
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() =>
+            update({
+              auto_approve: [
+                ...(value.auto_approve ?? []),
+                { actions: ["process_refund"], up_to: 50, max_per_30_days: null },
+              ],
+            })
+          }
+        >
+          Add limit
+        </Button>
       </div>
 
       <div className="w-56">

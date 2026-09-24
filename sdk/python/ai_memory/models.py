@@ -72,7 +72,11 @@ class ConditionResult:
 
 @dataclass(slots=True)
 class LifecycleState:
-    """Where a customer is in the project's lifecycle, and why."""
+    """Where a customer is on a lifecycle track, and why.
+
+    ``reasons`` are the decisive clauses in words — "3 unresolved problems", "activity down
+    47%" — ready to show a person; ``reason`` is the precise trace.
+    """
 
     state: str
     previous_state: str | None = None
@@ -83,10 +87,14 @@ class LifecycleState:
     evidence: list[str] = field(default_factory=list)
     pinned: bool = False
     pinned_until: str | None = None
+    track: str = "lifecycle"
+    reasons: list[str] = field(default_factory=list)
 
     @classmethod
     def from_api(cls, data: dict[str, Any]) -> LifecycleState:
         return cls(
+            track=data.get("track", "lifecycle"),
+            reasons=list(data.get("reasons") or []),
             state=data.get("state", ""),
             previous_state=data.get("previous_state"),
             entered_at=data.get("entered_at"),
@@ -97,6 +105,89 @@ class LifecycleState:
             pinned=bool(data.get("pinned", False)),
             pinned_until=data.get("pinned_until"),
         )
+
+
+@dataclass(slots=True)
+class Change:
+    """One thing that changed about a customer: before, after, when, and the evidence."""
+
+    type: str
+    kind: str
+    title: str
+    detected_at: str
+    before: str | None = None
+    after: str | None = None
+    evidence: list[str] = field(default_factory=list)
+    source: str = "memory"
+    track: str | None = None
+    reasons: list[str] = field(default_factory=list)
+    detail: dict[str, Any] = field(default_factory=dict)
+    importance: float = 0.0
+
+    @classmethod
+    def from_api(cls, data: dict[str, Any]) -> Change:
+        return cls(
+            type=data.get("type", ""),
+            kind=data.get("kind", ""),
+            title=data.get("title", ""),
+            detected_at=data.get("detected_at", ""),
+            before=data.get("before"),
+            after=data.get("after"),
+            evidence=list(data.get("evidence") or []),
+            source=data.get("source", "memory"),
+            track=data.get("track"),
+            reasons=list(data.get("reasons") or []),
+            detail=dict(data.get("detail") or {}),
+            importance=float(data.get("importance") or 0.0),
+        )
+
+
+@dataclass(slots=True)
+class CustomerChanges:
+    """What changed about a customer in a window, and what they looked like then and now.
+
+    ``summary`` is one sentence to read before a call; ``changes`` are newest first (or
+    most important first, with ``order="importance"``); ``then`` and ``now`` are the
+    customer at each end — plan, health, lifecycle and tracks, problems, goals, channel.
+    """
+
+    customer_id: str
+    summary: str
+    changes: list[Change]
+    since: str
+    until: str
+    basis: str
+    label: str
+    then: dict[str, Any]
+    now: dict[str, Any]
+    counts: dict[str, int] = field(default_factory=dict)
+    withheld: int = 0
+    truncated: bool = False
+    note: str | None = None
+    raw: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_api(cls, data: dict[str, Any]) -> CustomerChanges:
+        window = data.get("window") or {}
+        return cls(
+            customer_id=data.get("customer_id", ""),
+            summary=data.get("summary", ""),
+            changes=[Change.from_api(item) for item in data.get("changes") or []],
+            since=window.get("since", ""),
+            until=window.get("until", ""),
+            basis=window.get("basis", ""),
+            label=window.get("label", ""),
+            note=window.get("note"),
+            then=dict(data.get("then") or {}),
+            now=dict(data.get("now") or {}),
+            counts=dict(data.get("counts") or {}),
+            withheld=int(data.get("withheld") or 0),
+            truncated=bool(data.get("truncated", False)),
+            raw=data,
+        )
+
+    def of_type(self, *types: str) -> list[Change]:
+        return [change for change in self.changes if change.type in types]
 
 
 @dataclass(slots=True)
@@ -693,6 +784,12 @@ class Approval:
     used_at: str | None = None
     expires_at: str | None = None
     created_at: str | None = None
+    # What a reviewer reads before deciding (§26 4.5): the cited memories in their own words,
+    # how many they may not read, the customer as last recorded, and the waiting action.
+    evidence_memories: list[dict[str, Any]] = field(default_factory=list)
+    withheld_evidence: int = 0
+    customer: dict[str, Any] | None = None
+    action_id: str | None = None
 
     @property
     def is_pending(self) -> bool:
@@ -718,6 +815,77 @@ class Approval:
             used_at=data.get("used_at"),
             expires_at=data.get("expires_at"),
             created_at=data.get("created_at"),
+            evidence_memories=list(data.get("evidence_memories") or []),
+            withheld_evidence=int(data.get("withheld_evidence") or 0),
+            customer=data.get("customer"),
+            action_id=data.get("action_id"),
+        )
+
+
+@dataclass(slots=True)
+class AgentAction:
+    """An action through the gateway (§26 4.5): requested, then ``allowed``,
+    ``pending_approval`` or ``denied``; an allowed one ends ``done``, ``failed`` or
+    ``cancelled`` when reported back. :attr:`next_step` says what to do now."""
+
+    id: str
+    customer_id: str
+    action: str
+    status: str
+    decision: str
+    summary: str
+    next_step: str
+    request: dict[str, Any] = field(default_factory=dict)
+    reasons: list[dict[str, Any]] = field(default_factory=list)
+    approval: Approval | None = None
+    check_id: str | None = None
+    agent: str | None = None
+    idempotency_key: str | None = None
+    outcome_note: str | None = None
+    external_ref: str | None = None
+    created_at: str | None = None
+    completed_at: str | None = None
+
+    def __bool__(self) -> bool:
+        return self.allowed
+
+    @property
+    def allowed(self) -> bool:
+        return self.status == "allowed"
+
+    @property
+    def denied(self) -> bool:
+        return self.status == "denied"
+
+    @property
+    def waiting(self) -> bool:
+        return self.status == "pending_approval"
+
+    @property
+    def evidence(self) -> list[str]:
+        return list(dict.fromkeys(ident for reason in self.reasons for ident in reason.get("evidence") or []))
+
+    @classmethod
+    def from_api(cls, data: dict[str, Any]) -> AgentAction:
+        approval = data.get("approval")
+        return cls(
+            id=data["id"],
+            customer_id=data.get("customer_id", ""),
+            action=data.get("action", ""),
+            status=data.get("status", ""),
+            decision=data.get("decision", ""),
+            summary=data.get("summary", ""),
+            next_step=data.get("next_step", ""),
+            request=dict(data.get("request") or {}),
+            reasons=list(data.get("reasons") or []),
+            approval=Approval.from_api(approval) if approval else None,
+            check_id=data.get("check_id"),
+            agent=data.get("agent"),
+            idempotency_key=data.get("idempotency_key"),
+            outcome_note=data.get("outcome_note"),
+            external_ref=data.get("external_ref"),
+            created_at=data.get("created_at"),
+            completed_at=data.get("completed_at"),
         )
 
 
@@ -849,6 +1017,62 @@ class RunExplanation:
             held_back=dict(data.get("held_back") or {}),
             state_then=data.get("state_then"),
             checks=[ActionCheck.from_api(item) for item in data.get("checks") or []],
+        )
+
+
+@dataclass(slots=True)
+class RunTrace:
+    """Why did my agent do this? What it was given — ``cited``, ``given`` (in a context) or
+    ``not_cited`` — what it was **not** given and why (``below_cut``, ``type_cap``,
+    ``token_budget``, ``section_cap``, ``duplicate``, ``superseded``, ``expired``,
+    ``withheld_restricted``, ``withheld_profile``), and the decision it came to.
+
+        trace = client.run_trace(result.run_id)
+        for item in trace.ignored_because("superseded"):
+            print(item["why"])  # "Superseded on 12 Sep 2026 by a newer memory: … — which the agent was given (#1)."
+    """
+
+    run: AgentRun
+    question: str
+    given: list[dict[str, Any]] = field(default_factory=list)
+    ignored: list[dict[str, Any]] = field(default_factory=list)
+    decision: dict[str, Any] = field(default_factory=dict)
+    narrative: list[str] = field(default_factory=list)
+    cut: dict[str, Any] = field(default_factory=dict)
+    held_back: dict[str, Any] = field(default_factory=dict)
+    state_then: dict[str, Any] | None = None
+    checks: list[ActionCheck] = field(default_factory=list)
+    recorded: bool = True
+
+    @property
+    def text(self) -> str:
+        return "\n".join(self.narrative)
+
+    @property
+    def cited(self) -> list[dict[str, Any]]:
+        return [item for item in self.given if item.get("verdict") == "cited"]
+
+    @property
+    def confidence(self) -> float | None:
+        return self.decision.get("confidence")
+
+    def ignored_because(self, *reasons: str) -> list[dict[str, Any]]:
+        return [item for item in self.ignored if item.get("reason") in reasons]
+
+    @classmethod
+    def from_api(cls, data: dict[str, Any]) -> RunTrace:
+        return cls(
+            run=AgentRun.from_api(data["run"]),
+            question=data.get("question", ""),
+            given=list(data.get("given") or []),
+            ignored=list(data.get("ignored") or []),
+            decision=dict(data.get("decision") or {}),
+            narrative=list(data.get("narrative") or []),
+            cut=dict(data.get("cut") or {}),
+            held_back=dict(data.get("held_back") or {}),
+            state_then=data.get("state_then"),
+            checks=[ActionCheck.from_api(item) for item in data.get("checks") or []],
+            recorded=bool(data.get("recorded", True)),
         )
 
 

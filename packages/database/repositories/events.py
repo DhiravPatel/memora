@@ -160,6 +160,30 @@ class EventRepository(BaseRepository):
         )
         return {customer_id: int(count) for customer_id, count in result}
 
+    async def first_occurred_at(self, *, project_id: str, customer_id: str) -> datetime | None:
+        """When a customer's first event happened."""
+        return await self.session.scalar(
+            select(func.min(Event.occurred_at)).where(
+                Event.project_id == project_id, Event.customer_id == customer_id
+            )
+        )
+
+    async def count_between(
+        self, *, project_id: str, customer_id: str, since: datetime, until: datetime
+    ) -> int:
+        """Events a customer produced in ``[since, until)``, by when they happened."""
+        total = await self.session.scalar(
+            select(func.count())
+            .select_from(Event)
+            .where(
+                Event.project_id == project_id,
+                Event.customer_id == customer_id,
+                Event.occurred_at >= since,
+                Event.occurred_at < until,
+            )
+        )
+        return int(total or 0)
+
     async def window_counts_by_customer(
         self,
         *,

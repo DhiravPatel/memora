@@ -26,8 +26,13 @@ export default function CustomersPage() {
 function Customers() {
   const { projectId } = useSession();
   const [search, setSearch] = useState("");
-  // `?state=at_risk` arrives from the Overview's lifecycle card.
-  const [state, setState] = useState(useSearchParams().get("state") ?? "");
+  // `?state=at_risk&track=engagement` arrives from the Overview's lifecycle card. The filter
+  // holds "track:state" so one select covers every track.
+  const params = useSearchParams();
+  const [filter, setFilter] = useState(
+    params.get("state") ? `${params.get("track") ?? "lifecycle"}:${params.get("state")}` : "",
+  );
+  const [track, state] = filter ? (filter.split(":") as [string, string]) : ["lifecycle", ""];
 
   const lifecycle = useQuery({
     queryKey: ["lifecycle", projectId],
@@ -36,11 +41,11 @@ function Customers() {
   });
 
   const customers = useQuery({
-    queryKey: ["customers", projectId, search, state],
+    queryKey: ["customers", projectId, search, filter],
     queryFn: () =>
       state
         ? api<Page<Customer>>(`/v1/projects/${projectId}/lifecycle/customers`, {
-            query: { state, limit: 100 },
+            query: { state, track, limit: 100 },
           })
         : api<Page<Customer>>(`/v1/projects/${projectId}/customers`, {
             query: { search, limit: 100 },
@@ -56,25 +61,40 @@ function Customers() {
         description="Search by id, email or name, then open a profile to see everything the memory holds."
         actions={
           <>
-            {lifecycle.data?.enabled && (
+            {(lifecycle.data?.enabled || lifecycle.data?.tracks?.length) && (
               <Select
-                value={state}
-                onChange={(event) => setState(event.target.value)}
-                className="w-44"
+                value={filter}
+                onChange={(event) => setFilter(event.target.value)}
+                className="w-56"
               >
                 <option value="">Any lifecycle state</option>
-                {(lifecycle.data.states ?? []).map((item) => (
-                  <option key={item} value={item}>
-                    {item.replace(/_/g, " ")} · {lifecycle.data?.counts[item] ?? 0}
-                  </option>
-                ))}
+                {lifecycle.data?.enabled && (
+                  <optgroup label="Lifecycle">
+                    {(lifecycle.data.states ?? []).map((item) => (
+                      <option key={item} value={`lifecycle:${item}`}>
+                        {item.replace(/_/g, " ")} · {lifecycle.data?.counts[item] ?? 0}
+                      </option>
+                    ))}
+                  </optgroup>
+                )}
+                {(lifecycle.data?.tracks ?? [])
+                  .filter((item) => item.enabled)
+                  .map((item) => (
+                    <optgroup key={item.track} label={item.label}>
+                      {item.states.map((name) => (
+                        <option key={name} value={`${item.track}:${name}`}>
+                          {name.replace(/_/g, " ")} · {item.counts[name] ?? 0}
+                        </option>
+                      ))}
+                    </optgroup>
+                  ))}
               </Select>
             )}
             <Input
               placeholder="SEARCH…"
               className="w-64 uppercase tracking-label"
               value={search}
-              disabled={Boolean(state)}
+              disabled={Boolean(filter)}
               onChange={(event) => setSearch(event.target.value)}
             />
           </>
@@ -83,8 +103,9 @@ function Customers() {
 
       {state && (
         <p className="label">
-          Showing customers currently <StateBadge state={state} /> ·{" "}
-          <button className="hover:text-accent" onClick={() => setState("")}>
+          Showing customers currently <StateBadge state={state} />
+          {track !== "lifecycle" && ` on the ${track.replace(/_/g, " ")} track`} ·{" "}
+          <button className="hover:text-accent" onClick={() => setFilter("")}>
             clear
           </button>
         </p>

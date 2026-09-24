@@ -20,6 +20,7 @@ from app.schemas.admin import (
     CustomerMergeRequest,
     CustomerMergeResult,
 )
+from app.schemas.changes import ChangesOut, CompareOut
 from app.schemas.common import DeletionResult, Page
 from app.schemas.customers import (
     Customer360,
@@ -41,6 +42,7 @@ from app.schemas.state import (
     StateSetIn,
 )
 from app.services import state_views
+from app.services.changes_service import ChangesService
 from app.services.customer360_service import SECTIONS, Customer360Service
 from app.services.customer_service import CustomerService
 from app.services.customer_state_service import CustomerStateService
@@ -331,12 +333,13 @@ async def get_customer_state_history(
     project: ApiProject,
     session: DBSession,
     cleared: Clearance,
+    track: str = Query(default="lifecycle", max_length=40, description='A track name, or "all"'),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
 ) -> Page[CustomerStateOut]:
-    """Every state the customer has been in, newest first, each with its reason."""
+    """Every state the customer has been in on a track, newest first, each with its reasons."""
     return await state_views.state_history(
-        session, project=project, customer=customer, cleared=cleared, limit=limit, offset=offset
+        session, project=project, customer=customer, cleared=cleared, limit=limit, offset=offset, track=track
     )
 
 
@@ -344,7 +347,8 @@ async def get_customer_state_history(
 async def set_customer_state(
     payload: StateSetIn, customer: ApiCustomer, project: ApiProject, session: DBSession
 ) -> CustomerStateOut:
-    """Set the state by hand. Pinned by default: the machine leaves it alone until released."""
+    """Set the state on a track by hand. Pinned by default: the machine leaves it alone
+    until released."""
     row = await CustomerStateService(session).set_state(
         project=project,
         customer=customer,
@@ -352,6 +356,7 @@ async def set_customer_state(
         pin=payload.pin,
         pin_days=payload.pin_days,
         note=payload.note,
+        track=payload.track,
         actor_type="api_key",
         actor_id=project.id,
     )
@@ -360,11 +365,14 @@ async def set_customer_state(
 
 @router.delete("/{customer_id}/state/pin", response_model=CustomerStateOut, dependencies=WRITE)
 async def release_customer_state(
-    customer: ApiCustomer, project: ApiProject, session: DBSession
+    customer: ApiCustomer,
+    project: ApiProject,
+    session: DBSession,
+    track: str = Query(default="lifecycle", max_length=40),
 ) -> CustomerStateOut:
-    """Hand the customer back to the machine."""
+    """Hand the customer back to the machine on a track."""
     row = await CustomerStateService(session).release(
-        project=project, customer=customer, actor_type="api_key", actor_id=project.id
+        project=project, customer=customer, actor_type="api_key", actor_id=project.id, track=track
     )
     return state_views.state_out(row, sanitize=False)
 
@@ -425,6 +433,55 @@ async def get_customer_snapshot(
 ) -> SnapshotOut:
     return await state_views.snapshot_detail(
         session, project=project, customer=customer, snapshot_id=snapshot_id, cleared=cleared
+    )
+
+
+# ------------------------------------------------------------- what changed
+
+
+def _types(types: str | None) -> set[str] | None:
+    return {name.strip().lower() for name in types.split(",") if name.strip()} if types else None
+
+
+@router.get("/{customer_id}/changes", response_model=ChangesOut, dependencies=MEMORY_READ)
+async def get_customer_changes(
+    customer: ApiCustomer,
+    project: ApiProject,
+    session: DBSession,
+    cleared: Clearance,
+    since: str | None = Query(
+        default=None,
+        max_length=64,
+        description="A span (7d, 12h, 2w, 3mo), an ISO time, a snapshot id, `last_session` or `last_run`. Default 30d.",
+    ),
+    until: str | None = Query(default=None, max_length=64, description="An ISO time, a span back from now, or a snapshot id. Default now."),
+    agent: str | None = Query(default=None, max_length=120, description="With last_session/last_run: only this agent's."),
+    types: str | None = Query(default=None, max_length=300, description="Comma-separated change types to keep."),
+    order: str = Query(default="time", pattern="^(time|importance)$"),
+    limit: int = Query(default=50, ge=1, le=200),
+) -> ChangesOut:
+    """What changed about this customer in a window — problems opened and resolved, plan and
+    preference changes with before and after, lifecycle moves with reasons, health crossing
+    a band, goals, intents, signals and activity — and what they looked like then and now."""
+    service = ChangesService(session, cleared=cleared)
+    window = await service.window(project=project, customer=customer, since=since, until=until, agent=agent)
+    return await service.changes(
+        project=project, customer=customer, window=window, types=_types(types), order=order, limit=limit
+    )
+
+
+@router.get("/{customer_id}/compare", response_model=CompareOut, dependencies=MEMORY_READ)
+async def compare_customer(
+    customer: ApiCustomer,
+    project: ApiProject,
+    session: DBSession,
+    cleared: Clearance,
+    start: str = Query(alias="from", max_length=64, description="An ISO time, a span back from now, or a snapshot id."),
+    end: str | None = Query(default=None, alias="to", max_length=64, description="Default now."),
+) -> CompareOut:
+    """The customer then and now, side by side, with every fact that differs."""
+    return await ChangesService(session, cleared=cleared).compare(
+        project=project, customer=customer, start=start, end=end
     )
 
 

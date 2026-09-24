@@ -399,6 +399,7 @@ export interface SettingField {
     | "text"
     | "policies"
     | "lifecycle"
+    | "lifecycle_tracks"
     | "guardrails";
   default: unknown;
   help: string;
@@ -680,6 +681,10 @@ export interface CustomerFacts {
 
 export interface CustomerStateRecord {
   id: string;
+  /** The lifecycle track this stay belongs to; "lifecycle" is the primary. */
+  track: string;
+  /** The decisive clauses in words — "3 unresolved problems", "activity down 47%". */
+  reasons: string[];
   state: string;
   previous_state: string | null;
   entered_at: string;
@@ -694,11 +699,21 @@ export interface CustomerStateRecord {
   evaluation: Partial<ConditionEvaluation>;
 }
 
+export interface TrackState {
+  track: string;
+  label: string;
+  primary: boolean;
+  current: CustomerStateRecord | null;
+  states: string[];
+}
+
 export interface CurrentState {
   customer_id: string;
   enabled: boolean;
   current: CustomerStateRecord | null;
   states: string[];
+  /** Every lifecycle track, the primary first (§26 4.2). */
+  tracks: TrackState[];
 }
 
 export interface LifecycleTransition {
@@ -715,10 +730,35 @@ export interface LifecycleDefinition {
   transitions: LifecycleTransition[];
 }
 
-export interface LifecycleOverview extends Partial<LifecycleDefinition> {
+export interface TrackDefinition extends LifecycleDefinition {
+  track: string;
+  label: string;
+  description: string | null;
   enabled: boolean;
   counts: Record<string, number>;
 }
+
+export interface LifecycleOverview extends Partial<LifecycleDefinition> {
+  enabled: boolean;
+  counts: Record<string, number>;
+  tracks: TrackDefinition[];
+}
+
+export interface TrackTemplate extends LifecycleDefinition {
+  name: string;
+  label: string;
+  description: string | null;
+}
+
+/** `lifecycle_tracks` as stored in settings: track name → machine. */
+export type TrackSettings = Record<
+  string,
+  LifecycleDefinition & {
+    label?: string;
+    description?: string | null;
+    enabled?: boolean;
+  }
+>;
 
 export interface StateRefresh {
   customer_id: string;
@@ -726,6 +766,14 @@ export interface StateRefresh {
   moved: boolean;
   transitions: { from: string | null; to: string; transition: string }[];
   snapshot_id: string | null;
+  tracks: Record<
+    string,
+    {
+      state: string | null;
+      moved: boolean;
+      transitions: { from: string | null; to: string }[];
+    }
+  >;
 }
 
 // -------------------------------------------------------------- snapshots (§26 1.2)
@@ -812,7 +860,11 @@ export interface QualityReport {
       near_miss_creates: number;
       near_miss_rate: number | null;
       conflict_rate: number | null;
-      near_miss_examples: { content: string; closest_content: string; similarity: number }[];
+      near_miss_examples: {
+        content: string;
+        closest_content: string;
+        similarity: number;
+      }[];
     };
     memories: {
       active: number;
@@ -837,7 +889,10 @@ export interface QualityReport {
       citation_hit_rate: number | null;
       regressed: boolean;
     } | null;
-    settings: { min_event_importance: number; consolidation_similarity: number };
+    settings: {
+      min_event_importance: number;
+      consolidation_similarity: number;
+    };
   };
   diagnostics: QualityDiagnostic[];
   computed_at: string;
@@ -851,6 +906,7 @@ export interface EvalRunSummary {
   status: "queued" | "running" | "succeeded" | "failed";
   label: string | null;
   k: number;
+  proposed?: boolean;
   metrics: {
     cases?: number;
     scored?: number;
@@ -859,6 +915,7 @@ export interface EvalRunSummary {
     mrr?: number;
     citation_hit_rate?: number;
     misses?: string[];
+    extraction?: ExtractionMetrics;
   };
   comparison: {
     recall?: Record<string, number>;
@@ -868,14 +925,73 @@ export interface EvalRunSummary {
     newly_missed?: string[];
     newly_found?: string[];
     regressed?: boolean;
+    extraction?: {
+      accuracy: number;
+      false_memory_rate: number;
+      newly_failing: string[];
+      newly_passing: string[];
+    };
   } | null;
   error: string | null;
   created_at: string;
   finished_at: string | null;
 }
 
+export interface ExtractionMetrics {
+  cases: number;
+  scored: number;
+  errors: number;
+  passed: number;
+  accuracy: number | null;
+  expected_recall: number | null;
+  false_memory_rate: number | null;
+  type_accuracy: number | null;
+  sensitivity_accuracy: number | null;
+  consolidation_accuracy: number | null;
+  failing: string[];
+}
+
+export interface Expectation {
+  type?: string;
+  contains?: string;
+  entity?: string;
+  sensitivity?: string;
+  action?: string;
+}
+
+export interface PlannedMemory {
+  content: string;
+  type: string;
+  action: string;
+  sensitivity: string;
+  entities: string[];
+  rule: string | null;
+  extracted_by: string | null;
+}
+
+export interface ExtractionCaseResult {
+  case_id: string;
+  kind: "extraction";
+  label: string;
+  passed: boolean;
+  error: string | null;
+  stop_reason: string | null;
+  expect_nothing: boolean;
+  planned: PlannedMemory[];
+  expected: {
+    expectation: Expectation;
+    described: string;
+    matched: boolean;
+    memory_index: number | null;
+    near_miss: string | null;
+  }[];
+  forbidden: { expectation: Expectation; described: string; violated_by: number[] }[];
+  unexpected: number[];
+}
+
 export interface EvalCaseResult {
   case_id: string;
+  kind?: "retrieval";
   question: string;
   error: string | null;
   first_rank: number | null;
@@ -887,22 +1003,74 @@ export interface EvalCaseResult {
     memory_id: string | null;
     cited: boolean;
   }[];
-  retrieved: { id: string; content: string; score: number; strategies: string[]; cited: boolean }[];
+  retrieved: {
+    id: string;
+    content: string;
+    score: number;
+    strategies: string[];
+    cited: boolean;
+  }[];
   answer: string | null;
 }
 
 export interface EvalRun extends EvalRunSummary {
   settings: Record<string, unknown>;
-  results: EvalCaseResult[];
+  results: (EvalCaseResult | ExtractionCaseResult)[];
   baseline_run_id: string | null;
+  overrides: Record<string, unknown> | null;
+}
+
+export interface EvalRegression {
+  safe: boolean;
+  summary: string;
+  newly_failing: { case_id: string; kind: string; label: string }[];
+  newly_passing: { case_id: string; kind: string; label: string }[];
+  current: EvalRun;
+  proposed: EvalRun;
+}
+
+export interface EvalScorecard {
+  retrieval: {
+    questions: number;
+    recall_at_5: number | null;
+    hit_at_1: number | null;
+    mrr: number | null;
+    citation_accuracy: number | null;
+  };
+  extraction: {
+    cases: number;
+    accuracy: number | null;
+    expected_recall: number | null;
+    false_memory_rate: number | null;
+    type_accuracy: number | null;
+    sensitivity_accuracy: number | null;
+    consolidation_accuracy: number | null;
+  };
+  memory: {
+    duplicate_control: number | null;
+    consistency: number | null;
+    freshness: number | null;
+    quality_score: number | null;
+  };
+  sets: {
+    id: string;
+    name: string;
+    run_id: string | null;
+    finished_at: string | null;
+    regressed: boolean;
+  }[];
+  gaps: string[];
 }
 
 export interface EvalCase {
   id: string;
   customer_id: string;
+  kind?: "retrieval" | "extraction";
   question: string;
   expected_memory_ids: string[];
   expected_phrases: string[];
+  event?: { event_type: string; data: Record<string, unknown>; occurred_at?: string } | null;
+  expectations?: { expect: Expectation[]; forbid: Expectation[]; expect_nothing: boolean } | null;
   notes: string | null;
   source: string;
   created_at: string;
@@ -959,6 +1127,49 @@ export interface Approval {
   used_at: string | null;
   expires_at: string;
   created_at: string;
+  evidence_memories?: {
+    id: string;
+    type: string | null;
+    content: string | null;
+    status: string | null;
+    first_seen_at: string | null;
+  }[];
+  withheld_evidence?: number;
+  customer?: {
+    name: string | null;
+    health_score: number | null;
+    health_band: string | null;
+    state: string | null;
+    plan: string | null;
+    open_problems: number | null;
+    taken_at: string | null;
+  } | null;
+  action_id?: string | null;
+}
+
+export type ActionStatus =
+  "allowed" | "pending_approval" | "denied" | "done" | "failed" | "cancelled" | "expired";
+
+export interface AgentActionRecord {
+  id: string;
+  customer_id: string;
+  action: string;
+  request: Record<string, unknown>;
+  status: ActionStatus;
+  decision: Decision;
+  summary: string;
+  next_step: string;
+  reasons: GuardrailReason[];
+  approval: Approval | null;
+  check_id: string | null;
+  agent: string | null;
+  session_id: string | null;
+  idempotency_key: string | null;
+  outcome_note: string | null;
+  external_ref: string | null;
+  created_at: string;
+  updated_at: string;
+  completed_at: string | null;
 }
 
 export interface AgentCheck {
@@ -1006,9 +1217,16 @@ export interface GuardrailRule {
   message: string;
 }
 
+export interface AutoApprovalLimit {
+  actions: string[];
+  up_to: number | null;
+  max_per_30_days: number | null;
+}
+
 export interface GuardrailSettings {
   disabled: string[];
   rules: GuardrailRule[];
+  auto_approve?: AutoApprovalLimit[];
   approval_ttl_hours: number;
 }
 
@@ -1066,4 +1284,93 @@ export interface RunExplanation {
   };
   state_then: Snapshot | null;
   checks: AgentCheck[];
+}
+
+// ------------------------------------------------------------ decision trace (§26 4.4)
+
+export interface TraceGiven extends RunMemory {
+  verdict: "cited" | "given" | "not_cited";
+  why: string;
+}
+
+export interface TraceIgnored {
+  id: string;
+  type: string | null;
+  reason: string;
+  why: string;
+  visible: boolean;
+  content: string | null;
+  score: number | null;
+  position: number | null;
+  match: number | null;
+  superseded_by: string | null;
+  replacement_rank: number | null;
+}
+
+export interface RunTrace {
+  run: AgentRunSummary;
+  question: string;
+  narrative: string[];
+  given: TraceGiven[];
+  ignored: TraceIgnored[];
+  decision: {
+    kind: "answer" | "context";
+    answer: string | null;
+    strategy: string | null;
+    confidence: number | null;
+    reasoning: string[];
+    evidence: string[];
+    token_count: number | null;
+    token_budget: number | null;
+    truncated: boolean | null;
+  };
+  cut: { limit?: number; per_type?: number; candidates?: number };
+  recorded: boolean;
+}
+
+// ------------------------------------------------------------- what changed (§26 4.1)
+
+export interface Change {
+  type: string;
+  kind: string;
+  title: string;
+  before: string | null;
+  after: string | null;
+  detected_at: string;
+  evidence: string[];
+  source: string;
+  track: string | null;
+  reasons: string[];
+  detail: Record<string, unknown>;
+  importance: number;
+}
+
+export interface CustomerAt {
+  at: string;
+  live: boolean;
+  snapshot_id: string | null;
+  taken_at: string | null;
+  state: Record<string, unknown> | null;
+  description: string | null;
+}
+
+export interface CustomerChanges {
+  customer_id: string;
+  window: {
+    since: string;
+    until: string;
+    basis: string;
+    value: string | null;
+    found: boolean;
+    note: string | null;
+    label: string;
+  };
+  summary: string;
+  changes: Change[];
+  counts: Record<string, number>;
+  total: number;
+  truncated: boolean;
+  withheld: number;
+  then: CustomerAt;
+  now: CustomerAt;
 }

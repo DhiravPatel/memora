@@ -38,14 +38,29 @@ if view.is_at_risk:
 if memory.evaluate_condition("cus_123", 'problems.entities contains "billing"'):
     hold_the_upsell()
 print(memory.lifecycle_state("cus_123").state)      # e.g. "at_risk", with .reason
+print(memory.lifecycle_state("cus_123", track="engagement").reasons)  # ["3 unresolved problems", …]
 
-# Is retrieval any good? Measure it, and fail CI on a regression
+# What changed since the last conversation — typed changes, then and now
+changes = memory.changes("cus_123", since="last_session", agent="support-bot")
+print(changes.summary)   # "Since the last conversation (17 Sep 2026): upgraded from Starter to Pro; …"
+for change in changes.of_type("problem", "subscription"):
+    print(change.title, change.before, "→", change.after)
+
+# Is memory any good? Measure retrieval and extraction, and fail CI on a regression
 run = memory.run_eval(set_id, label="after vocabulary change")
 assert not run["comparison"]["regressed"], run["comparison"]["newly_missed"]
+# Before saving a setting: what would it break?
+check = memory.eval_regression(set_id, {"consolidation_similarity": 0.4})
+assert check["safe"], check["newly_failing"]
 
 # Ask what it means
 result = memory.query("cus_123", "Why is this customer unhappy?", include_trace=True)
 print(result.answer, result.source_event_ids)
+
+# Why did my agent do this? — including what it was not given
+trace = memory.run_trace(result.run_id)
+for item in trace.ignored_because("superseded", "withheld_profile"):
+    print("✗", item["why"])
 
 # Give an agent context before it replies
 context = memory.context("cus_123", task="support_response", as_text=True)
@@ -92,6 +107,25 @@ with MemoryAgent(memory, "cus_123", agent="support-bot", conversation_id=ticket.
         log.info("no discount: %s", refused.check.summary)
 ```
 
+To *act*, go through the **gateway**: it decides like `check_action`, applies the customer's
+opt-outs and the project's automatic limits, and records the action — so its outcome becomes
+the customer's history (`actions.*` facts), which later rules and limits read. `perform`
+does the whole round trip:
+
+```python
+with MemoryAgent(memory, "cus_123", agent="billing-bot") as agent:
+    # Requests it, waits up to 2 minutes for a person if one is needed, runs the lambda only
+    # once allowed, and reports "done" — or "failed" with the error, which is re-raised.
+    agent.perform("issue_credit", lambda: billing.credit("cus_123", 20), amount=20, wait=120)
+
+action = memory.request_action("cus_123", "process_refund", {"amount": 25}, idempotency_key=ticket.id)
+if action.allowed:
+    refund_id = billing.refund(25)
+    memory.complete_action(action.id, "done", external_ref=refund_id)
+elif action.waiting:
+    action = memory.wait_for_action(action.id, timeout=300)   # proceeds once a person approves
+```
+
 A key bound to an **agent profile** reads only the profile's memory types everywhere and is
 held to its actions; `memory.my_profile()` says which. Pass `agent_name="billing-bot"` to
 `MemoryClient` to label an unbound key's runs.
@@ -107,7 +141,7 @@ ai-memory-mcp --transport http --port 8765     # hosted: each caller sends its o
 
 Tools: `ask_memory`, `search_memory`, `customer_360`, `customer_brief`, `customer_changes`,
 `customer_timeline`, `get_health`, `get_goals`, `get_recommendations`, `check_action`,
-`explain_answer`, `remember`. The key's scopes, clearance and agent profile apply to all of
+`request_action`, `proceed_action`, `report_action`, `explain_answer`, `remember`. The key's scopes, clearance and agent profile apply to all of
 them. Standard library only — nothing beyond `httpx`.
 
 The API key identifies exactly one project and must stay server-side.

@@ -4,6 +4,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useState } from "react";
 
+import { ActionsLog } from "@/components/agents/actions";
 import { ApprovalsQueue } from "@/components/agents/approvals";
 import { ChecksLog } from "@/components/agents/checks";
 import { ProfilesManager } from "@/components/agents/profiles";
@@ -17,7 +18,15 @@ import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import type { AgentActivity } from "@/lib/types";
 
-const TABS = ["Approvals", "Checks", "Runs", "Sessions", "Profiles", "Simulate"] as const;
+const TABS = [
+  "Approvals",
+  "Actions",
+  "Checks",
+  "Runs",
+  "Sessions",
+  "Profiles",
+  "Simulate",
+] as const;
 type Tab = (typeof TABS)[number];
 
 export default function AgentsPage() {
@@ -100,6 +109,7 @@ function Agents() {
       </div>
 
       {tab === "Approvals" && <ApprovalsQueue projectId={projectId} />}
+      {tab === "Actions" && <ActionsLog projectId={projectId} />}
       {tab === "Checks" && <ChecksLog projectId={projectId} />}
       {tab === "Runs" && <RunsExplorer projectId={projectId} initialRun={runParam} />}
       {tab === "Sessions" && <SessionsList projectId={projectId} />}

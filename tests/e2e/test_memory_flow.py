@@ -265,3 +265,91 @@ async def test_inferred_types_widen_recall_instead_of_filtering(session, project
         "shopify" in item.memory.content.lower() for item in retrieval.memories
     )
     assert "type" in retrieval.strategies_used
+
+
+async def test_a_fix_reported_later_closes_the_problem(session, project, engine):
+    """"It works again" is typed a fact, but it is *about* a problem: it supersedes it."""
+    customers = CustomerRepository(session)
+    memories = MemoryRepository(session)
+    customer = await customers.upsert(project_id=project.id, external_id="cus_fix", name="Fix")
+
+    reported = await ingest(
+        session, project, customer, "support_message", {"message": "The payroll export fails every night."}, days_ago=5
+    )
+    await engine.process_event(event=reported, project=project)
+    again = await ingest(
+        session, project, customer, "support_message", {"message": "The payroll export failed again last night."}, days_ago=4
+    )
+    await engine.process_event(event=again, project=project)
+    problems, _ = await memories.list(project_id=project.id, customer_id=customer.id, type="problem")
+    assert len(problems) == 1
+
+    fixed = await ingest(
+        session, project, customer, "support_message", {"message": "The payroll export works again, thanks for fixing it."}, days_ago=1
+    )
+    await engine.process_event(event=fixed, project=project)
+
+    open_problems, _ = await memories.list(project_id=project.id, customer_id=customer.id, type="problem")
+    assert open_problems == [], "the problem it resolves is no longer open"
+    everything, _ = await memories.list(project_id=project.id, customer_id=customer.id, status=None)
+    problem = next(memory for memory in everything if str(memory.type) == "problem")
+    resolution = next(memory for memory in everything if memory.id == problem.superseded_by)
+    assert str(problem.status) == "superseded"
+    assert resolution.meta["resolved"] is True
+    assert resolution.meta["supersedes"] == problem.id
+    assert resolution.meta["conflict"]["rule"] == "problem_resolved"
+
+
+async def test_a_fix_reported_before_the_latest_report_does_not_close_it(session, project, engine):
+    customers = CustomerRepository(session)
+    memories = MemoryRepository(session)
+    customer = await customers.upsert(project_id=project.id, external_id="cus_refail", name="Refail")
+
+    reported = await ingest(
+        session, project, customer, "support_message", {"message": "The Shopify sync fails during checkout."}, days_ago=1
+    )
+    await engine.process_event(event=reported, project=project)
+    # Arrives late, but happened before the report above: it cannot have fixed it.
+    stale_fix = await ingest(
+        session, project, customer, "support_message", {"message": "The Shopify sync works now."}, days_ago=3
+    )
+    await engine.process_event(event=stale_fix, project=project)
+
+    open_problems, _ = await memories.list(project_id=project.id, customer_id=customer.id, type="problem")
+    assert len(open_problems) == 1
+
+
+async def test_a_fix_that_names_nothing_closes_the_only_recent_problem(session, project, engine):
+    customers = CustomerRepository(session)
+    memories = MemoryRepository(session)
+    customer = await customers.upsert(project_id=project.id, external_id="cus_bare", name="Bare")
+    reported = await ingest(
+        session, project, customer, "integration_failed", {"integration": "QuickBooks", "error": "Invalid credentials"}, days_ago=3
+    )
+    await engine.process_event(event=reported, project=project)
+    thanks = await ingest(
+        session, project, customer, "support_message", {"message": "It works now, thanks for fixing it so quickly."}, days_ago=1
+    )
+    await engine.process_event(event=thanks, project=project)
+
+    open_problems, _ = await memories.list(project_id=project.id, customer_id=customer.id, type="problem")
+    assert open_problems == []
+    everything, _ = await memories.list(project_id=project.id, customer_id=customer.id, status=None)
+    resolution = next(memory for memory in everything if (memory.meta or {}).get("supersedes"))
+    assert resolution.meta["conflict"]["rule"] == "problem_resolved_only_open"
+
+
+async def test_a_fix_that_names_nothing_closes_nothing_when_it_could_be_either(session, project, engine):
+    customers = CustomerRepository(session)
+    memories = MemoryRepository(session)
+    customer = await customers.upsert(project_id=project.id, external_id="cus_either", name="Either")
+    for days_ago, message in ((4, "The CSV importer times out on large files."), (3, "SSO login loops back to the start page.")):
+        event = await ingest(session, project, customer, "support_message", {"message": message}, days_ago=days_ago)
+        await engine.process_event(event=event, project=project)
+    thanks = await ingest(
+        session, project, customer, "support_message", {"message": "All good now, thank you so much!"}, days_ago=1
+    )
+    await engine.process_event(event=thanks, project=project)
+
+    open_problems, _ = await memories.list(project_id=project.id, customer_id=customer.id, type="problem")
+    assert len(open_problems) == 2

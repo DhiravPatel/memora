@@ -10,7 +10,7 @@ from datetime import datetime
 
 from fastapi import APIRouter, Query
 
-from app.api.customers import _sections
+from app.api.customers import _sections, _types
 from app.core.dependencies import (
     Clearance,
     CurrentUserDep,
@@ -21,6 +21,7 @@ from app.core.dependencies import (
 )
 from app.core.queue import enqueue
 from app.schemas.agents import SessionOut
+from app.schemas.changes import ChangesOut, CompareOut
 from app.schemas.common import DeletionResult, Message, Page
 from app.schemas.customers import Customer360, CustomerOut, CustomerTimeline
 from app.schemas.evaluation import (
@@ -32,6 +33,8 @@ from app.schemas.evaluation import (
     EvalSetIn,
     EvalSetOut,
     EvalSuggestion,
+    RegressionIn,
+    RegressionOut,
 )
 from app.schemas.events import EventExplanationOut, EventOut, EventPreviewIn
 from app.schemas.goals import GoalOut, GoalSummaryOut, GoalUpdate
@@ -79,9 +82,11 @@ from app.schemas.state import (
     SnapshotSummaryOut,
     StateRefreshOut,
     StateSetIn,
+    TrackTemplateOut,
 )
 from app.services import evaluation_views, state_views
 from app.services.agent_service import AgentService
+from app.services.changes_service import ChangesService
 from app.services.customer360_service import Customer360Service
 from app.services.customer_state_service import CustomerStateService
 from app.services.deletion_service import DeletionService
@@ -808,17 +813,23 @@ async def dashboard_lifecycle(project: UserProject, session: DBSession) -> Lifec
     return await state_views.lifecycle(session, project=project)
 
 
+@router.get("/lifecycle/templates", response_model=list[TrackTemplateOut])
+async def dashboard_lifecycle_templates(project: UserProject) -> list[TrackTemplateOut]:
+    return state_views.templates()
+
+
 @router.get("/lifecycle/customers", response_model=Page[CustomerOut])
 async def dashboard_customers_in_state(
     project: UserProject,
     session: DBSession,
     state: str = Query(min_length=1, max_length=64),
+    track: str = Query(default="lifecycle", max_length=40),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
 ) -> Page[CustomerOut]:
     from app.api.lifecycle import customers_in_state
 
-    return await customers_in_state(project, session, state=state, limit=limit, offset=offset)
+    return await customers_in_state(project, session, state=state, track=track, limit=limit, offset=offset)
 
 
 @router.get("/customers/{customer_id}/state", response_model=CurrentStateOut)
@@ -835,12 +846,13 @@ async def dashboard_customer_state_history(
     project: UserProject,
     session: DBSession,
     cleared: Clearance,
+    track: str = Query(default="lifecycle", max_length=40),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
 ) -> Page[CustomerStateOut]:
     customer = await _resolve_customer(session, project.id, customer_id)
     return await state_views.state_history(
-        session, project=project, customer=customer, cleared=cleared, limit=limit, offset=offset
+        session, project=project, customer=customer, cleared=cleared, limit=limit, offset=offset, track=track
     )
 
 
@@ -861,6 +873,7 @@ async def dashboard_set_customer_state(
         pin=payload.pin,
         pin_days=payload.pin_days,
         note=payload.note,
+        track=payload.track,
         actor_type="user",
         actor_id=current_user.user.id,
     )
@@ -869,12 +882,16 @@ async def dashboard_set_customer_state(
 
 @router.delete("/customers/{customer_id}/state/pin", response_model=CustomerStateOut)
 async def dashboard_release_customer_state(
-    customer_id: str, project: UserProject, session: DBSession, current_user: CurrentUserDep
+    customer_id: str,
+    project: UserProject,
+    session: DBSession,
+    current_user: CurrentUserDep,
+    track: str = Query(default="lifecycle", max_length=40),
 ) -> CustomerStateOut:
     current_user.require(UserRole.MEMBER)
     customer = await _resolve_customer(session, project.id, customer_id)
     row = await CustomerStateService(session).release(
-        project=project, customer=customer, actor_type="user", actor_id=current_user.user.id
+        project=project, customer=customer, actor_type="user", actor_id=current_user.user.id, track=track
     )
     return state_views.state_out(row, sanitize=False)
 
@@ -939,6 +956,45 @@ async def dashboard_customer_snapshot(
     )
 
 
+# ------------------------------------------------------------------ what changed
+
+
+@router.get("/customers/{customer_id}/changes", response_model=ChangesOut)
+async def dashboard_customer_changes(
+    customer_id: str,
+    project: UserProject,
+    session: DBSession,
+    cleared: Clearance,
+    since: str | None = Query(default=None, max_length=64),
+    until: str | None = Query(default=None, max_length=64),
+    agent: str | None = Query(default=None, max_length=120),
+    types: str | None = Query(default=None, max_length=300),
+    order: str = Query(default="time", pattern="^(time|importance)$"),
+    limit: int = Query(default=50, ge=1, le=200),
+) -> ChangesOut:
+    customer = await _resolve_customer(session, project.id, customer_id)
+    service = ChangesService(session, cleared=cleared)
+    window = await service.window(project=project, customer=customer, since=since, until=until, agent=agent)
+    return await service.changes(
+        project=project, customer=customer, window=window, types=_types(types), order=order, limit=limit
+    )
+
+
+@router.get("/customers/{customer_id}/compare", response_model=CompareOut)
+async def dashboard_compare_customer(
+    customer_id: str,
+    project: UserProject,
+    session: DBSession,
+    cleared: Clearance,
+    start: str = Query(alias="from", max_length=64),
+    end: str | None = Query(default=None, alias="to", max_length=64),
+) -> CompareOut:
+    customer = await _resolve_customer(session, project.id, customer_id)
+    return await ChangesService(session, cleared=cleared).compare(
+        project=project, customer=customer, start=start, end=end
+    )
+
+
 # -------------------------------------------------------------------- evaluation
 
 
@@ -965,6 +1021,11 @@ async def dashboard_eval_suggestions(
     limit: int = Query(default=20, ge=1, le=100),
 ) -> list[EvalSuggestion]:
     return await evaluation_views.suggestions(session, project=project, limit=limit, cleared=cleared)
+
+
+@router.get("/evals/scorecard")
+async def dashboard_eval_scorecard(project: UserProject, session: DBSession, cleared: Clearance) -> dict:
+    return await evaluation_views.scorecard(session, project=project, cleared=cleared)
 
 
 @router.get("/evals/runs/{run_id}", response_model=EvalRunOut)
@@ -1028,6 +1089,28 @@ async def dashboard_start_eval_run(
 ) -> EvalRunOut:
     current_user.require(UserRole.MEMBER)
     return await evaluation_views.start_run(
+        session,
+        project=project,
+        set_id=set_id,
+        payload=payload,
+        cleared=cleared,
+        actor_id=current_user.user.id,
+        embedder=embedder,
+    )
+
+
+@router.post("/evals/{set_id}/regression", response_model=RegressionOut)
+async def dashboard_eval_regression(
+    set_id: str,
+    payload: RegressionIn,
+    project: UserProject,
+    session: DBSession,
+    cleared: Clearance,
+    embedder: EmbedderDep,
+    current_user: CurrentUserDep,
+) -> RegressionOut:
+    current_user.require(UserRole.MEMBER)
+    return await evaluation_views.regression(
         session,
         project=project,
         set_id=set_id,

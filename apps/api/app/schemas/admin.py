@@ -213,6 +213,7 @@ WEBHOOK_EVENT_DESCRIPTIONS: dict[str, str] = {
     WebhookEvent.AGENT_ACTION_DENIED.value: "A guardrail check refused an action an agent proposed",
     WebhookEvent.AGENT_APPROVAL_REQUESTED.value: "An agent needs a person to approve an action",
     WebhookEvent.AGENT_APPROVAL_DECIDED.value: "An approval request was approved, rejected or expired",
+    WebhookEvent.AGENT_ACTION_COMPLETED.value: "An agent reported an action from the gateway done, failed or cancelled",
 }
 
 
@@ -239,3 +240,6 @@ class CustomerMergeResult(BaseModel):
     events_moved: int
     memories_moved: int
     links_moved: int
+    goals_moved: int = 0
+    sessions_moved: int = 0
+    agent_actions_moved: int = 0

@@ -24,9 +24,10 @@ from common.enums import (
 from common.logging import get_logger
 from common.metrics import memories_created, memories_updated
 from common.text import content_hash
+from common.time import days_between, ensure_utc
 from database.models import Memory
 from database.repositories import MemoryRepository
-from memory_engine.consolidation.conflict import ConflictSide, resolve
+from memory_engine.consolidation.conflict import ConflictOutcome, ConflictSide, resolve
 from memory_engine.consolidation.rules import (
     AUTO_MERGE_SIMILARITY,
     DEFAULT_THRESHOLD,
@@ -34,13 +35,35 @@ from memory_engine.consolidation.rules import (
     Decision,
     MemorySnapshot,
     decide,
+    shared_entities,
+    topic_overlap,
 )
 from memory_engine.consolidation.similarity import combined_similarity
 from memory_engine.policy import Policy
 from memory_engine.schemas import ExtractedMemory, NormalizedEvent
 from memory_engine.temporal.decay import expiry_for
+from nlp.tokenize import content_words, lemmatize
 
 logger = get_logger(__name__)
+
+# How much a "it works now" statement must share with a problem to be about it — the same
+# bar the contradiction rule sets for a problem reported as resolved.
+RESOLUTION_OVERLAP = 0.2
+# "It works now, thanks!" names nothing. It is taken to resolve the one problem reported in
+# this many days before it — and only when there is exactly one: with two it could be
+# either, and closing the wrong one is worse than closing neither.
+BARE_RESOLUTION_DAYS = 14
+# Words a resolution uses whatever it resolves: what is left after them is its topic.
+_RESOLUTION_WORDS = frozenset(
+    lemmatize(word)
+    for word in (
+        "it", "works", "working", "worked", "work", "now", "again", "thanks", "thank", "thx", "cheers",
+        "fixed", "fixing", "fix", "sorted", "sort", "resolved", "resolve", "solved", "solve", "all", "good",
+        "great", "fine", "perfect", "much", "quick", "quickly", "finally", "today", "everything", "back",
+        "normal", "up", "running", "run", "support", "team", "help", "helping", "appreciate", "awesome",
+        "brilliant", "issue", "problem", "seems", "looks", "so", "very", "really", "guys", "you",
+    )
+)
 
 
 @dataclass(slots=True)
@@ -138,7 +161,15 @@ class MemoryConsolidator:
                 signals={"rule": "exact_duplicate"},
             )
 
-        # 2. Closest existing memory for this customer.
+        # 2. "It works now" closes the problem it is about. The extractor types such a
+        #    statement a fact — it is not a problem report — so the same-type neighbours
+        #    below would never find the problem it resolves.
+        if candidate.attributes.get("resolved") and candidate.type != MemoryType.PROBLEM:
+            resolution = await self._resolved_problem(candidate=candidate, event=event, vector=vector)
+            if resolution is not None:
+                return resolution
+
+        # 3. Closest existing memory for this customer.
         rows = await repo.candidates_for_consolidation(
             project_id=event.project_id,
             customer_id=event.customer_id,
@@ -156,7 +187,7 @@ class MemoryConsolidator:
                 signals={"rule": "no_neighbour"},
             )
 
-        # 3. Pure rule-based decision.
+        # 4. Pure rule-based decision.
         decision = decide(
             existing=self._snapshot(best_memory),
             candidate=self._candidate_snapshot(candidate, event),
@@ -171,6 +202,87 @@ class MemoryConsolidator:
             signals=dict(decision.signals),
             decision=decision,
         )
+
+    async def _resolved_problem(
+        self, *, candidate: ExtractedMemory, event: NormalizedEvent, vector: list[float] | None
+    ) -> ConsolidationPlan | None:
+        """The open problem a resolution statement is about, as a conflict to resolve.
+
+        Only a problem last reported *before* the statement: one reported again afterwards
+        is still happening, whatever an earlier "fixed" said.
+        """
+        rows = await self.repository.candidates_for_consolidation(
+            project_id=event.project_id,
+            customer_id=event.customer_id,
+            type=MemoryType.PROBLEM,
+            vector=vector,
+            limit=self.neighbours,
+        )
+        best: tuple[Memory, float, float, list[str]] | None = None
+        for memory, vector_similarity in rows:
+            if memory.status != MemoryStatus.ACTIVE or (memory.meta or {}).get("resolved"):
+                continue
+            if ensure_utc(memory.last_seen_at) > ensure_utc(event.occurred_at):
+                continue
+            overlap = topic_overlap(memory.content, candidate.content)
+            common = shared_entities(list((memory.meta or {}).get("entity_names") or []), list(candidate.entity_names))
+            if overlap < RESOLUTION_OVERLAP and not common:
+                continue
+            score = combined_similarity(vector_similarity, memory.content, candidate.content)
+            if best is None or score > best[1]:
+                best = (memory, score, overlap, common)
+        rule = "problem_resolved"
+        if best is None and not self._topic_of(candidate.content):
+            recent = await self._recently_reported(event)
+            if len(recent) == 1:
+                best, rule = (recent[0], 0.0, 0.0, []), "problem_resolved_only_open"
+        if best is None:
+            return None
+        memory, similarity, overlap, common = best
+        reason = (
+            "A later statement reports this problem resolved."
+            if rule == "problem_resolved"
+            else "A later statement reports a fix without naming it, and this was the only problem reported recently."
+        )
+        signals = {"rule": rule, "lexical_overlap": round(overlap, 4), "shared_entities": common}
+        return ConsolidationPlan(
+            action=ConsolidationAction.CONFLICT,
+            target=memory,
+            reason=reason,
+            similarity=similarity,
+            signals=signals,
+            decision=Decision(
+                action=ConsolidationAction.CONFLICT,
+                content=candidate.content,
+                confidence=candidate.confidence,
+                reason=reason,
+                similarity=similarity,
+                signals=signals,
+            ),
+        )
+
+    @staticmethod
+    def _topic_of(content: str) -> list[str]:
+        return [word for word in content_words(content) if word not in _RESOLUTION_WORDS]
+
+    async def _recently_reported(self, event: NormalizedEvent) -> list[Memory]:
+        """Open problems last reported shortly before ``event`` — the candidates a
+        resolution that names nothing could be about."""
+        problems, _ = await self.repository.list(
+            project_id=event.project_id,
+            customer_id=event.customer_id,
+            type=MemoryType.PROBLEM,
+            status=MemoryStatus.ACTIVE,
+            limit=20,
+        )
+        occurred = ensure_utc(event.occurred_at)
+        return [
+            memory
+            for memory in problems
+            if not (memory.meta or {}).get("resolved")
+            and ensure_utc(memory.last_seen_at) <= occurred
+            and days_between(memory.last_seen_at, occurred) <= BARE_RESOLUTION_DAYS
+        ]
 
     async def consolidate(
         self,
@@ -305,7 +417,34 @@ class MemoryConsolidator:
         importance: float,
     ) -> ConsolidationOutcome:
         """Score both sides; the loser is superseded, never deleted."""
-        outcome = resolve(
+        if (
+            candidate.attributes.get("resolved")
+            and str(existing.type) == MemoryType.PROBLEM.value
+            and ensure_utc(event.occurred_at) >= ensure_utc(existing.last_seen_at)
+        ):
+            # A fix reported after the last report closes the problem however often it was
+            # reported: frequency is evidence that it happened, not that it still does.
+            outcome = ConflictOutcome(
+                winner="candidate",
+                candidate_score=1.0,
+                existing_score=0.0,
+                factors={"resolution": {"reported_after_last_occurrence": 1.0}},
+            )
+        else:
+            outcome = self._score(existing, candidate, event)
+        signals = {
+            **decision.signals,
+            "conflict_scores": {
+                "candidate": outcome.candidate_score,
+                "existing": outcome.existing_score,
+            },
+            "conflict_factors": outcome.factors,
+        }
+        return await self._settle(decision, existing, candidate, event, importance, outcome, signals)
+
+    @staticmethod
+    def _score(existing: Memory, candidate: ExtractedMemory, event: NormalizedEvent) -> ConflictOutcome:
+        return resolve(
             existing=ConflictSide(
                 content=existing.content,
                 confidence=float(existing.confidence),
@@ -321,15 +460,17 @@ class MemoryConsolidator:
                 source="event",
             ),
         )
-        signals = {
-            **decision.signals,
-            "conflict_scores": {
-                "candidate": outcome.candidate_score,
-                "existing": outcome.existing_score,
-            },
-            "conflict_factors": outcome.factors,
-        }
 
+    async def _settle(
+        self,
+        decision: Decision,
+        existing: Memory,
+        candidate: ExtractedMemory,
+        event: NormalizedEvent,
+        importance: float,
+        outcome: ConflictOutcome,
+        signals: dict[str, Any],
+    ) -> ConsolidationOutcome:
         if not outcome.candidate_wins:
             # Record that the contradiction was seen and rejected: silence would hide it.
             await self.repository.add_version(

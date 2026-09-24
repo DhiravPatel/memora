@@ -31,11 +31,15 @@ from app.schemas.state import (
     SnapshotOut,
     SnapshotSummaryOut,
     StateRefreshOut,
+    TrackDefinitionOut,
+    TrackStateOut,
+    TrackTemplateOut,
 )
 from app.services.customer_state_service import (
     CustomerStateService,
     lifecycle_for,
     snapshot_view,
+    tracks_for,
 )
 from app.services.facts_service import FactsService
 from common.errors import NotFoundError, ValidationError
@@ -53,6 +57,8 @@ from memory_engine.conditions import (
     sanitize_evaluation,
 )
 from memory_engine.facts import METADATA_PREFIX
+from memory_engine.lifecycle import PRIMARY_TRACK, TRACK_TEMPLATES, compile_tracks
+from memory_engine.reasons import reasons as reasons_in_words
 
 EXAMPLES = [
     'health.score < 60 and problems.entities contains "shopify"',
@@ -128,7 +134,7 @@ async def customer_facts(
 # ------------------------------------------------------------------ lifecycle
 
 
-async def _sanitizing(session: AsyncSession, project: Project, customer: Customer, cleared: bool) -> bool:
+async def sanitizing(session: AsyncSession, project: Project, customer: Customer, cleared: bool) -> bool:
     """Whether stored traces must hide actual values from this reader.
 
     Only where restriction can apply: a project with no restriction policy cannot have a
@@ -155,8 +161,18 @@ def state_out(row: CustomerState, *, sanitize: bool) -> CustomerStateOut:
         evaluation = sanitize_evaluation(evaluation)
         if row.transition:
             reason = f"{row.transition}: {evaluation.get('explanation', '')}"
+    # Rendered from the evaluation as the reader may see it, never stored: a sanitised
+    # trace yields reasons without the values it withheld.
+    if evaluation:
+        reasons = reasons_in_words(evaluation)
+    elif row.source == "manual":
+        reasons = [row.reason] if row.reason else ["set by hand"]
+    else:
+        reasons = []
     return CustomerStateOut(
         id=row.id,
+        track=getattr(row, "track", PRIMARY_TRACK) or PRIMARY_TRACK,
+        reasons=reasons,
         state=row.state,
         previous_state=row.previous_state,
         entered_at=row.entered_at,
@@ -176,13 +192,36 @@ async def current_state(
     session: AsyncSession, *, project: Project, customer: Customer, cleared: bool
 ) -> CurrentStateOut:
     machine = lifecycle_for(project)
-    row = await CustomerStateRepository(session).current(project_id=project.id, customer_id=customer.id)
-    sanitize = await _sanitizing(session, project, customer, cleared)
+    currents = await CustomerStateRepository(session).currents(project_id=project.id, customer_id=customer.id)
+    sanitize = await sanitizing(session, project, customer, cleared)
+    row = currents.get(PRIMARY_TRACK)
+    tracks = []
+    if machine is not None:
+        tracks.append(
+            TrackStateOut(
+                track=PRIMARY_TRACK,
+                label="Lifecycle",
+                primary=True,
+                current=state_out(row, sanitize=sanitize) if row else None,
+                states=list(machine.states),
+            )
+        )
+    for name, track in tracks_for(project).items():
+        current = currents.get(name)
+        tracks.append(
+            TrackStateOut(
+                track=name,
+                label=track.label,
+                current=state_out(current, sanitize=sanitize) if current else None,
+                states=list(track.machine.states),
+            )
+        )
     return CurrentStateOut(
         customer_id=customer.external_id,
         enabled=machine is not None,
         current=state_out(row, sanitize=sanitize) if row else None,
         states=list(machine.states) if machine else [],
+        tracks=tracks,
     )
 
 
@@ -194,11 +233,17 @@ async def state_history(
     cleared: bool,
     limit: int,
     offset: int,
+    track: str | None = PRIMARY_TRACK,
 ) -> Page[CustomerStateOut]:
+    """``track="all"`` interleaves every track by time."""
     rows, total = await CustomerStateRepository(session).history(
-        project_id=project.id, customer_id=customer.id, limit=limit, offset=offset
+        project_id=project.id,
+        customer_id=customer.id,
+        track=None if track in (None, "all") else track,
+        limit=limit,
+        offset=offset,
     )
-    sanitize = await _sanitizing(session, project, customer, cleared)
+    sanitize = await sanitizing(session, project, customer, cleared)
     return Page[CustomerStateOut](
         data=[state_out(row, sanitize=sanitize) for row in rows],
         total=total,
@@ -222,21 +267,74 @@ async def refresh_state(
             for step in refreshed.steps
         ],
         snapshot_id=refreshed.snapshot.id if refreshed.snapshot else None,
+        tracks={
+            name: {
+                "state": outcome.state,
+                "moved": outcome.moved,
+                "transitions": [
+                    {"from": step.previous, "to": step.target, "transition": step.transition.name}
+                    for step in outcome.steps
+                ],
+            }
+            for name, outcome in refreshed.tracks.items()
+        },
     )
 
 
 async def lifecycle(session: AsyncSession, *, project: Project) -> LifecycleOut:
     machine = lifecycle_for(project)
+    repository = CustomerStateRepository(session)
+    tracks = []
+    for name, track in tracks_for(project, include_disabled=True).items():
+        counts = await repository.counts_by_state(project.id, track=name) if track.enabled else {}
+        tracks.append(
+            TrackDefinitionOut(
+                track=name,
+                label=track.label,
+                description=track.description,
+                enabled=track.enabled,
+                states=list(track.machine.states),
+                initial=track.machine.initial,
+                transitions=[transition.as_dict() for transition in track.machine.transitions],
+                counts={state: counts.get(state, 0) for state in track.machine.states},
+            )
+        )
     if machine is None:
-        return LifecycleOut(enabled=False)
-    counts = await CustomerStateRepository(session).counts_by_state(project.id)
+        return LifecycleOut(enabled=False, tracks=tracks)
+    counts = await repository.counts_by_state(project.id)
     return LifecycleOut(
         enabled=True,
         states=list(machine.states),
         initial=machine.initial,
         transitions=[transition.as_dict() for transition in machine.transitions],
         counts={state: counts.get(state, 0) for state in machine.states},
+        tracks=tracks,
     )
+
+
+def templates() -> list[TrackTemplateOut]:
+    """The shipped tracks, ready to add to `lifecycle_tracks`."""
+    compiled = compile_tracks(TRACK_TEMPLATES)
+    return [
+        TrackTemplateOut(
+            name=name,
+            label=track.label,
+            description=track.description,
+            states=list(track.machine.states),
+            initial=track.machine.initial,
+            transitions=[transition.as_dict() for transition in track.machine.transitions],
+        )
+        for name, track in compiled.items()
+    ]
+
+
+def machine_states(project: Project, track: str) -> list[str] | None:
+    """The states of a track, or ``None`` if the project has no such (enabled) track."""
+    if track == PRIMARY_TRACK:
+        machine = lifecycle_for(project)
+        return list(machine.states) if machine else None
+    found = tracks_for(project).get(track)
+    return list(found.machine.states) if found else None
 
 
 # ------------------------------------------------------------------ snapshots

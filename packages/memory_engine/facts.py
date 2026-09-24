@@ -31,12 +31,30 @@ from nlp.entities import channels_mentioned
 from nlp.intents import KINDS as INTENT_KINDS
 from nlp.intents import intent_kinds
 from nlp.lexicon import PLANS
+from nlp.optouts import KINDS as OPT_OUT_KINDS
+from nlp.optouts import opt_outs
 from nlp.tokenize import root, surface_words, tokenize
 
 METADATA_PREFIX = "customer.metadata."
 # The action an agent proposes, for guardrail rules: `request.amount > 500`. Present only in
 # a guardrail check's fact document; anywhere else these facts are unknown.
 REQUEST_PREFIX = "request."
+# One fact per lifecycle track (§26 4.2): `lifecycle.engagement == "at_risk"`, and
+# `lifecycle.engagement.days_in_state`. Tracks are project-defined, so like metadata these
+# need no registering; the primary track is also `state.current`.
+LIFECYCLE_PREFIX = "lifecycle."
+DAYS_SUFFIX = ".days_in_state"
+# How far back "recent" reaches for trends — the same window the signals use.
+RECENT_DAYS = 14
+# The customer's action history (§26 4.5), per action and per family:
+# `actions.issue_credit.count_30d`, `actions.money.amount_30d`, `actions.contact.count_7d`,
+# `actions.offer_upgrade.days_since_last`. Counts and amounts read 0 with no history, so a
+# rule like `actions.issue_credit.count_30d >= 2` is false — not unknown — for a customer
+# never credited.
+ACTIONS_PREFIX = "actions."
+ACTION_METRICS = ("count_7d", "count_30d", "amount_30d", "days_since_last")
+ZERO_ACTION_METRICS = ("count_7d", "count_30d", "amount_30d")
+ACTION_HISTORY_DAYS = 90
 
 # The types a fact can have, and what each means to the condition language.
 #   number  — comparable (<, >, between)
@@ -126,6 +144,12 @@ CATALOG: dict[str, FactSpec] = {
         _spec("preferences.channel", "string", "Preferred contact channel, lowercase — the newest preference naming one"),
         _spec("preferences.channels", "list", "Every contact channel any preference names"),
         _spec("preferences.terms", "terms", "Words used in stated preferences"),
+        _spec(
+            "preferences.opt_outs",
+            "list",
+            "What the customer asked not to receive: contact, phone, email, sms, whatsapp, sales, marketing",
+            values=OPT_OUT_KINDS,
+        ),
         # ----------------------------------------------------------- intents
         _spec("intents.kinds", "list", "What the customer intends", values=INTENT_KINDS),
         _spec("intents.latest_kind", "enum", "The most recent intent", values=INTENT_KINDS),
@@ -135,10 +159,24 @@ CATALOG: dict[str, FactSpec] = {
         _spec("activity.events_recent", "number", "Events in the recent signal window (14 days)"),
         _spec("activity.events_prior", "number", "Events in the 14 days before that"),
         _spec("activity.trend", "enum", "How activity is moving", values=("growing", "steady", "declining", "silent")),
+        _spec(
+            "activity.change_pct",
+            "number",
+            "Recent events against the 14 days before, in percent — -47 is activity down 47%",
+            unit="%",
+        ),
         _spec("activity.distinct_features", "number", "Distinct product features the customer has used"),
         # ---------------------------------------------------------- feedback
         _spec("feedback.count", "number", "Feedback memories"),
         _spec("feedback.negative_count", "number", "Feedback memories with negative sentiment"),
+        _spec("feedback.recent_negative_count", "number", "Negative feedback first seen in the last 14 days"),
+        _spec("feedback.prior_negative_count", "number", "Negative feedback first seen in the 14 days before that"),
+        _spec(
+            "feedback.negative_trend",
+            "enum",
+            "Whether negative feedback is increasing",
+            values=("rising", "steady", "falling"),
+        ),
         # ---------------------------------------------------------- memories
         # --------------------------------------------------- the proposed action
         _spec("request.action", "string", "In a guardrail check: the action the agent proposes"),
@@ -177,6 +215,8 @@ class CustomerFacts:
     hidden_ids: frozenset[str] = frozenset()
 
     def get(self, name: str) -> Any:
+        if name.startswith(ACTIONS_PREFIX) and name not in self.values and name.endswith(ZERO_ACTION_METRICS):
+            return 0
         if name.startswith(REQUEST_PREFIX) and name not in self.values:
             # Beyond the catalogued request facts, any key the caller sent is addressable.
             extra = self.values.get("request.extra") or {}
@@ -283,7 +323,9 @@ class CustomerFacts:
 
 
 # Families computed over everything by design and shown whole to every reader.
-_AGGREGATE_FAMILIES = frozenset({"customer", "health", "signals", "state", "activity", "memories", "request"})
+_AGGREGATE_FAMILIES = frozenset(
+    {"customer", "health", "signals", "state", "activity", "memories", "request", "lifecycle", "actions"}
+)
 
 
 def _ids_for(index: dict[str, list[str]], kind: str, item: Any) -> list[str]:
@@ -310,6 +352,11 @@ class FactInputs:
     state: str | None = None
     state_entered_at: datetime | None = None
     state_pinned: bool = False
+    # Every lifecycle track's current stay: name -> (state, entered_at).
+    tracks: dict[str, tuple[str | None, datetime | None]] = field(default_factory=dict)
+    # Actions agents were cleared to take or reported done, (action, when, amount), over
+    # the last ACTION_HISTORY_DAYS.
+    actions: Sequence[tuple[str, datetime, float | None]] = ()
     # Ids of this customer's restricted memories, so goals born from one are known too.
     restricted_memory_ids: frozenset[str] = frozenset()
 
@@ -409,12 +456,55 @@ def _entities_of(memory: Any) -> list[str]:
     return sorted({str(name).strip().lower() for name in names if str(name).strip()})
 
 
-def _is_negative(memory: Any) -> bool:
+def _age_days(memory: Any, now: datetime) -> float | None:
+    """Days since a memory was first seen — when the customer first said it."""
+    return _days_since(getattr(memory, "first_seen_at", None), now)
+
+
+def polarity(memory: Any) -> float:
+    """The sentiment recorded on a memory when it was extracted, -1..1; 0 when none was."""
     sentiment = _meta(memory).get("sentiment") or {}
     try:
-        return float(sentiment.get("polarity", 0.0)) < -0.1
+        return float(sentiment.get("polarity", 0.0))
     except (TypeError, ValueError):
-        return False
+        return 0.0
+
+
+def _action_facts(values: dict[str, Any], history: Sequence[tuple[str, datetime, float | None]], now: datetime) -> None:
+    """Counts, amounts and recency per action and per family, from what agents did."""
+    from memory_engine.actions import families_of  # no import cycle: actions imports nothing
+
+    groups: dict[str, list[tuple[float, float | None]]] = {}
+    for action, at, amount in history:
+        age = _days_since(at, now)
+        if age is None:
+            continue
+        for key in (action, *families_of(action)):
+            groups.setdefault(key, []).append((age, amount))
+    for key, rows in sorted(groups.items()):
+        values[f"{ACTIONS_PREFIX}{key}.count_7d"] = sum(1 for age, _ in rows if age <= 7)
+        values[f"{ACTIONS_PREFIX}{key}.count_30d"] = sum(1 for age, _ in rows if age <= 30)
+        values[f"{ACTIONS_PREFIX}{key}.amount_30d"] = round(
+            sum(float(amount) for age, amount in rows if age <= 30 and amount is not None), 2
+        )
+        values[f"{ACTIONS_PREFIX}{key}.days_since_last"] = round(min(age for age, _ in rows), 2)
+
+
+def _is_negative(memory: Any) -> bool:
+    return polarity(memory) < -0.1
+
+
+is_negative = _is_negative
+plans_named = _plans_from
+
+
+def plan_of(memory: Any) -> tuple[str | None, str | None]:
+    """The plan a subscription memory leaves the customer on, and the direction of the
+    change it records — read exactly as ``subscription.plan`` and ``.direction`` are."""
+    meta = _meta(memory)
+    plan = meta.get("plan") or _plan_from(memory.content)
+    direction = meta.get("direction") or _direction_from(memory.content)
+    return (str(plan).lower() if plan else None, str(direction) if direction else None)
 
 
 def build_facts(inputs: FactInputs) -> CustomerFacts:
@@ -479,6 +569,11 @@ def build_facts(inputs: FactInputs) -> CustomerFacts:
     values["state.current"] = inputs.state
     values["state.days_in_state"] = _days_since(inputs.state_entered_at, now)
     values["state.pinned"] = bool(inputs.state_pinned)
+    for track, (track_state, entered_at) in inputs.tracks.items():
+        values[f"{LIFECYCLE_PREFIX}{track}"] = track_state
+        values[f"{LIFECYCLE_PREFIX}{track}{DAYS_SUFFIX}"] = _days_since(entered_at, now)
+
+    _action_facts(values, inputs.actions, now)
 
     grouped = inputs.memories_by_type
 
@@ -556,6 +651,14 @@ def build_facts(inputs: FactInputs) -> CustomerFacts:
                 preferred, preferred_id = key, memory.id
     values["preferences.channel"] = preferred
     values["preferences.channels"] = sorted(channel_index)
+    # Opt-outs live in preferences and in feedback ("stop calling us" is often a complaint).
+    opt_out_index: dict[str, list[str]] = {}
+    for memory in [*newest_first, *grouped.get("feedback", [])]:
+        for kind in opt_outs(memory.content):
+            opt_out_index.setdefault(kind, []).append(memory.id)
+    values["preferences.opt_outs"] = [kind for kind in OPT_OUT_KINDS if kind in opt_out_index]
+    by_value["preferences.opt_outs"] = opt_out_index
+    evidence["preferences.opt_outs"] = list(dict.fromkeys(i for ids in opt_out_index.values() for i in ids))[:10]
     values["preferences.terms"] = _words(memory.content for memory in preferences)
     evidence["preferences.channel"] = [preferred_id] if preferred_id else []
     by_value["preferences.channels"] = channel_index
@@ -593,6 +696,10 @@ def build_facts(inputs: FactInputs) -> CustomerFacts:
     recent = values.get("activity.events_recent")
     prior = values.get("activity.events_prior")
     values["activity.trend"] = _trend(recent, prior, values["activity.last_event_days_ago"])
+    # A percentage of nothing is not a number: with no prior activity the change is unknown.
+    values["activity.change_pct"] = (
+        round((int(recent or 0) - int(prior)) / int(prior) * 100, 1) if prior else None
+    )
 
     # ------------------------------------------------------------- feedback
     feedback = grouped.get("feedback", [])
@@ -600,6 +707,21 @@ def build_facts(inputs: FactInputs) -> CustomerFacts:
     values["feedback.count"] = len(feedback)
     values["feedback.negative_count"] = len(negative)
     evidence["feedback.negative_count"] = [memory.id for memory in negative][:10]
+    recent_negative = [m for m in negative if _age_days(m, now) is not None and _age_days(m, now) <= RECENT_DAYS]
+    prior_negative = [
+        m for m in negative if _age_days(m, now) is not None and RECENT_DAYS < _age_days(m, now) <= 2 * RECENT_DAYS
+    ]
+    values["feedback.recent_negative_count"] = len(recent_negative)
+    values["feedback.prior_negative_count"] = len(prior_negative)
+    values["feedback.negative_trend"] = (
+        "rising"
+        if len(recent_negative) > len(prior_negative) and len(recent_negative) >= 2
+        else "falling"
+        if len(recent_negative) < len(prior_negative)
+        else "steady"
+    )
+    evidence["feedback.recent_negative_count"] = [memory.id for memory in recent_negative][:10]
+    evidence["feedback.negative_trend"] = [memory.id for memory in recent_negative][:10]
 
     # ------------------------------------------------------------- memories
     values["memories.count"] = int(inputs.memory_count)

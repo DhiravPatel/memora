@@ -22,6 +22,9 @@ from fastapi import APIRouter, Depends, Query, Request
 
 from app.core.dependencies import ApiProject, Clearance, DBSession, Engine, require_scope
 from app.schemas.agent_policy import (
+    ActionCompleteIn,
+    ActionOut,
+    ActionRequestIn,
     AgentCheckIn,
     AgentCheckOut,
     AgentProfileIn,
@@ -33,6 +36,7 @@ from app.schemas.agent_policy import (
     RunExplanationOut,
     RunOut,
     RunSummaryOut,
+    RunTraceOut,
 )
 from app.schemas.agents import (
     SessionClose,
@@ -50,7 +54,7 @@ from app.services.reader import Reader
 from app.services.run_service import RunService, session_for
 from app.services.serializers import session_context_out, session_out, turn_out
 from common.enums import AgentSessionStatus, ApiKeyScope, TurnRole
-from common.errors import AuthorizationError, NotFoundError
+from common.errors import AuthorizationError, NotFoundError, ValidationError
 from common.time import ensure_utc
 from database.access import current_access
 from database.repositories import CustomerRepository
@@ -211,6 +215,110 @@ async def check_action(
     return await service.outcome_out(project, outcome)
 
 
+# ------------------------------------------------------------- action gateway
+
+
+@router.post("/actions/request", response_model=ActionOut, status_code=201)
+async def request_action(
+    payload: ActionRequestIn,
+    request: Request,
+    project: ApiProject,
+    session: DBSession,
+    cleared: Clearance,
+) -> ActionOut:
+    """The one call an agent makes before it acts (§26 4.5).
+
+    Decides like ``/check`` — the profile, the built-in rules (opt-outs included), the
+    project's rules and its automatic approval limits — and records the action. ``status``
+    says what to do: ``allowed`` (go ahead, then report back with ``/complete``),
+    ``pending_approval`` (a person was asked; call ``/proceed`` once they decide) or
+    ``denied``. Sending the same ``idempotency_key`` again returns the same action.
+    """
+    customer = await CustomerRepository(session).resolve(payload.customer_id, project.id)
+    if customer is None:
+        raise NotFoundError(f"Customer '{payload.customer_id}' not found.")
+    if payload.dry_run:
+        raise ValidationError("An action request is always recorded; use /v1/agent/check with dry_run to simulate.")
+    session_id = await _session_id(session, project.id, customer.id, payload.session_id)
+    service = GuardrailService(session, cleared=cleared)
+    key = getattr(request.state, "api_key", None)
+    record = await service.request_action(
+        project=project,
+        customer=customer,
+        action=payload.action,
+        request=payload.request,
+        profile=getattr(request.state, "agent_profile", None),
+        agent=payload.agent or current_access().agent,
+        api_key_id=key.id if key is not None else None,
+        approval_id=payload.approval_id,
+        session_id=session_id,
+        idempotency_key=payload.idempotency_key,
+    )
+    return await service.action_out(project, record)
+
+
+@router.get("/actions", response_model=Page[ActionOut])
+async def list_actions(
+    project: ApiProject,
+    session: DBSession,
+    cleared: Clearance,
+    customer_id: str | None = None,
+    action: str | None = Query(default=None, max_length=80),
+    status: str | None = Query(
+        default=None, pattern="^(allowed|pending_approval|denied|done|failed|cancelled|expired)$"
+    ),
+    agent: str | None = Query(default=None, max_length=120),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+) -> Page[ActionOut]:
+    """Actions agents requested through the gateway, newest first — a customer's action history."""
+    customer = await _customer(session, project.id, customer_id)
+    rows, total = await GuardrailService(session, cleared=cleared).list_actions(
+        project=project, customer=customer, action=action, status=status, agent=agent, limit=limit, offset=offset
+    )
+    return Page[ActionOut](data=rows, total=total, limit=limit, offset=offset)
+
+
+@router.get("/actions/{action_id}", response_model=ActionOut)
+async def get_action(action_id: str, project: ApiProject, session: DBSession, cleared: Clearance) -> ActionOut:
+    """Where an action stands, and ``next_step``: what the agent should do now."""
+    return await GuardrailService(session, cleared=cleared).get_action(project=project, action_id=action_id)
+
+
+@router.post("/actions/{action_id}/proceed", response_model=ActionOut)
+async def proceed_action(
+    action_id: str, request: Request, project: ApiProject, session: DBSession, cleared: Clearance
+) -> ActionOut:
+    """Go ahead with an action a person approved: the rules run again on the facts as they
+    are now, and the approval is redeemed. Still waiting, rejected or lapsed says so."""
+    service = GuardrailService(session, cleared=cleared)
+    key = getattr(request.state, "api_key", None)
+    record = await service.proceed_action(
+        project=project,
+        action_id=action_id,
+        profile=getattr(request.state, "agent_profile", None),
+        api_key_id=key.id if key is not None else None,
+    )
+    return await service.action_out(project, record)
+
+
+@router.post("/actions/{action_id}/complete", response_model=ActionOut)
+async def complete_action(
+    action_id: str, payload: ActionCompleteIn, project: ApiProject, session: DBSession, cleared: Clearance
+) -> ActionOut:
+    """Report what happened — ``done``, ``failed`` or ``cancelled`` — so the customer's action
+    history (``actions.*`` facts) is what really happened."""
+    service = GuardrailService(session, cleared=cleared)
+    record = await service.complete_action(
+        project=project,
+        action_id=action_id,
+        outcome=payload.outcome,
+        note=payload.note,
+        external_ref=payload.external_ref,
+    )
+    return await service.action_out(project, record)
+
+
 @router.get("/checks", response_model=Page[AgentCheckOut])
 async def list_checks(
     project: ApiProject,
@@ -360,6 +468,16 @@ async def explain_run(
     are now — why each ranked where it did, what was held back, the customer's recorded
     state at that moment, and the guardrail checks around it."""
     return await RunService(session, cleared=cleared).explain(project=project, run_id=run_id)
+
+
+@router.get("/runs/{run_id}/trace", response_model=RunTraceOut)
+async def trace_run(run_id: str, project: ApiProject, session: DBSession, cleared: Clearance) -> RunTraceOut:
+    """Why did my agent do this? What it was given (cited, handed over, or retrieved and not
+    used), what it was **not** given and why — ranked below the cut, capped by type,
+    dropped by the token budget, superseded by a newer memory, expired, restricted, outside
+    its profile — the decision it came to with its confidence, and the guardrail checks
+    around it."""
+    return await RunService(session, cleared=cleared).trace(project=project, run_id=run_id)
 
 
 # -------------------------------------------------------------------- profiles

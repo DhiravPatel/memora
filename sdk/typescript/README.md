@@ -22,11 +22,21 @@ console.log(view.summary);
 
 // A rule, evaluated against a customer — the same language the lifecycle and guardrails use
 const { matched } = await memory.state.evaluate("cus_123", 'problems.entities contains "billing"');
-const state = await memory.state.current("cus_123"); // { state: "at_risk", reason, ... }
+const state = await memory.state.current("cus_123"); // { state: "at_risk", reasons: [...], ... }
+const engagement = await memory.state.current("cus_123", "engagement");
 
-// Is retrieval any good? Measure it, and fail CI on a regression
+// What changed since the last conversation — typed changes, then and now
+const { summary, changes, then, now } = await memory.state.changes("cus_123", {
+  since: "last_session",
+  agent: "support-bot",
+});
+
+// Is memory any good? Measure retrieval and extraction, and fail CI on a regression
 const run = await memory.quality.runEval(setId, { label: "after vocabulary change" });
 if (run.comparison?.regressed) process.exit(1);
+// Before saving a setting: what would it break?
+const check = await memory.quality.evalRegression(setId, { consolidation_similarity: 0.4 });
+if (!check.safe) console.log(check.summary, check.newly_failing);
 
 // Find out what an event would do, without sending it
 const preview = await memory.events.preview({
@@ -51,6 +61,10 @@ const result = await memory.query({
   query: "What problems has this customer experienced?",
 });
 console.log(result.answer, result.sources);
+
+// Why did my agent do this? — including what it was not given, and why
+const trace = await memory.runs.trace(result.runId!);
+trace.ignored.forEach((item) => console.log("✗", item.reason, item.why));
 
 // Give an agent context before it replies
 const context = await memory.context({
@@ -85,7 +99,13 @@ const agent = new MemoryAgent(memory, { customerId: "cus_123", agent: "support-b
 await agent.run(async () => {
   const reply = await agent.respond(ticket.message, (prompt, message) => llm({ system: prompt, user: message }));
   await agent.guard("offer_discount", { amount: 20 }); // throws ActionDeniedError / ApprovalRequiredError
+  // Through the gateway: request, wait for a person if needed, run, report done/failed
+  await agent.perform("issue_credit", () => billing.credit(20), { amount: 20 }, { waitMs: 120_000 });
 });
+
+// Or by hand: the one call before acting, then report the outcome
+const action = await memory.actions.request({ customerId: "cus_123", action: "process_refund", request: { amount: 25 } });
+if (action.status === "allowed") await memory.actions.complete(action.id, "done", { externalRef: refundId });
 ```
 
 `memory.profiles.me()` says which agent profile a key acts as; a bound key reads only the

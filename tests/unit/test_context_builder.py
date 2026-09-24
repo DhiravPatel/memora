@@ -88,3 +88,21 @@ def test_per_section_cap_applies():
     context = ContextBuilder(max_per_section=3).build(customer={"id": "c"}, memories=memories)
     assert len(context.sections["active_problems"]) == 3
     assert context.truncated
+
+
+def test_every_memory_left_out_says_why():
+    """The decision trace (§26 4.4) must not call a duplicate a budget cut."""
+    long_text = "Customer reported a very detailed problem with the export. " * 12
+    context = ContextBuilder(max_per_section=2).build(
+        customer={"id": "cus_1"},
+        memories=[
+            scored("Customer cannot connect Shopify.", memory_id="mem_1"),
+            scored("Customer cannot connect Shopify", memory_id="mem_2"),
+            scored("Invoices fail to send.", memory_id="mem_3"),
+            scored("The CSV importer times out.", memory_id="mem_4"),
+            scored(long_text, MemoryType.PREFERENCE, memory_id="mem_5"),
+        ],
+        token_budget=200,
+    )
+    assert context.memory_ids == ["mem_1", "mem_3"]
+    assert context.left_out == {"mem_2": "duplicate", "mem_4": "section_cap", "mem_5": "token_budget"}

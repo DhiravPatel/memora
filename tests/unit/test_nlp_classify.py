@@ -39,12 +39,56 @@ def test_resolution_is_detected():
     assert result.type is not MemoryType.PROBLEM
 
 
-def test_event_type_prior_applies_when_text_is_ambiguous():
-    """With no cues in the sentence, the event type decides — and nothing else does."""
+def test_a_strong_event_type_prior_decides_ambiguous_text():
+    """With no cues in the sentence, a strong event type decides: a feature_used event is
+    behaviour whatever it says."""
     neutral = "Following up on the thread from yesterday"
-    assert classify(neutral, event_type="support_message").type is MemoryType.PROBLEM
     assert classify(neutral, event_type="feature_used").type is MemoryType.BEHAVIOR
     assert classify(neutral, event_type="").type is MemoryType.FACT
+
+
+def test_a_weak_prior_only_reinforces_evidence_for_its_own_type():
+    """Where a message was sent is not what it says. A support thread carries news and
+    thanks as well as complaints; reading every neutral sentence in one as a problem wrote
+    open problems nobody had."""
+    assert classify("Following up on the thread from yesterday", event_type="support_message").type is MemoryType.FACT
+    news = classify("Weekly campaigns to all 50k subscribers are now live, it went out this morning.", event_type="support_message")
+    assert news.type is not MemoryType.PROBLEM
+    # With evidence of a problem, the prior still adds its weight.
+    slow = classify("The export is slow and keeps timing out.", event_type="support_message")
+    assert slow.type is MemoryType.PROBLEM and "timing out" in slow.cues
+
+
+def test_negation_stays_inside_its_clause():
+    """"will not connect, it keeps rejecting" is two complaints — the "not" of the first
+    must not deny the second."""
+    result = classify("QuickBooks will not connect, it keeps rejecting the customer's credentials.", event_type="support_message")
+    assert result.type is MemoryType.PROBLEM
+    assert "rejected" in result.cues and "rejected" not in result.negated_cues
+    assert "connect" in result.negated_cues  # negated where it stands: "will not connect"
+    # Inside one clause a negation still denies: "no problem" is not a problem report.
+    assert classify("No problem at all, thanks", event_type="").type is not MemoryType.PROBLEM
+
+
+@pytest.mark.parametrize(
+    "sentence",
+    [
+        "We won't be able to log in until SSO is fixed.",
+        "Once the sync is fixed we will roll out to every store.",
+        "Please get this sorted before Friday.",
+        "It needs to be fixed today.",
+    ],
+)
+def test_a_fix_still_to_come_is_not_a_resolution(sentence):
+    assert classify(sentence, event_type="support_message").resolved is False
+
+
+@pytest.mark.parametrize(
+    "sentence",
+    ["It works now, thanks for fixing it so quickly.", "The Shopify sync works now.", "The sync issue is resolved."],
+)
+def test_a_fix_that_happened_is(sentence):
+    assert classify(sentence, event_type="support_message").resolved is True
 
 
 def test_cues_outrank_the_event_type_prior():

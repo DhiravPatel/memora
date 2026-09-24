@@ -139,6 +139,29 @@ class ReasonOut(BaseModel):
     evaluation: dict[str, Any] | None = None
 
 
+class EvidenceMemoryOut(BaseModel):
+    """A memory a reason rests on, in its own words — what a reviewer reads before deciding."""
+
+    id: str
+    type: str | None = None
+    content: str | None = Field(default=None, description="[withheld] for a reviewer who may not read it.")
+    visible: bool = True
+    status: str | None = None
+    first_seen_at: datetime | None = None
+
+
+class CustomerSummaryOut(BaseModel):
+    """The customer as last recorded, for context beside a request."""
+
+    name: str | None = None
+    health_score: float | None = None
+    health_band: str | None = None
+    state: str | None = None
+    plan: str | None = None
+    open_problems: int | None = None
+    taken_at: datetime | None = None
+
+
 class ApprovalOut(BaseModel):
     id: str
     customer_id: str
@@ -154,6 +177,12 @@ class ApprovalOut(BaseModel):
     used_at: datetime | None = None
     expires_at: datetime
     created_at: datetime
+    evidence_memories: list[EvidenceMemoryOut] = Field(
+        default_factory=list, description="The memories the reasons cite, in their own words, as the reviewer may see them."
+    )
+    withheld_evidence: int = Field(default=0, description="Cited memories the reviewer may not read.")
+    customer: CustomerSummaryOut | None = None
+    action_id: str | None = Field(default=None, description="The gateway action waiting on this approval, if any.")
 
 
 class AgentCheckOut(BaseModel):
@@ -247,3 +276,98 @@ class RunExplanationOut(BaseModel):
     held_back: dict[str, Any] = Field(default_factory=dict)
     state_then: SnapshotOut | None = None
     checks: list[AgentCheckOut] = Field(default_factory=list)
+
+
+# ------------------------------------------------------------ decision trace (§26 4.4)
+
+
+class TraceGivenOut(RunMemoryOut):
+    verdict: str = Field(description="cited (the answer rests on it), given (in a context), or not_cited")
+    why: str
+
+
+class TraceIgnoredOut(BaseModel):
+    id: str
+    type: str | None = None
+    reason: str = Field(
+        description="below_cut, type_cap, token_budget, superseded, expired, withheld_restricted or withheld_profile"
+    )
+    why: str
+    visible: bool = True
+    content: str | None = Field(default=None, description="The memory's words, or [withheld] for a reader who may not see it.")
+    score: float | None = None
+    position: int | None = Field(default=None, description="Its place in the full ranking, for ranking reasons.")
+    match: float | None = Field(default=None, description="How closely it matched the question, for unseen memories.")
+    superseded_by: str | None = None
+    replacement_rank: int | None = Field(default=None, description="Where the memory that replaced it ranked in what the agent was given.")
+
+
+class TraceDecisionOut(BaseModel):
+    kind: str = Field(description="answer or context")
+    answer: str | None = None
+    strategy: str | None = None
+    confidence: float | None = None
+    reasoning: list[str] = Field(default_factory=list)
+    evidence: list[str] = Field(default_factory=list)
+    token_count: int | None = None
+    token_budget: int | None = None
+    truncated: bool | None = None
+
+
+class RunTraceOut(BaseModel):
+    run: RunSummaryOut
+    question: str
+    narrative: list[str] = Field(default_factory=list)
+    given: list[TraceGivenOut] = Field(default_factory=list)
+    ignored: list[TraceIgnoredOut] = Field(default_factory=list)
+    decision: TraceDecisionOut
+    cut: dict[str, Any] = Field(default_factory=dict)
+    held_back: dict[str, Any] = Field(default_factory=dict)
+    state_then: SnapshotOut | None = None
+    checks: list[AgentCheckOut] = Field(default_factory=list)
+    recorded: bool = Field(
+        default=True, description="False for runs recorded before traces kept what was considered: `ignored` is then incomplete."
+    )
+
+
+# ----------------------------------------------------------- action gateway (§26 4.5)
+
+
+class ActionRequestIn(AgentCheckIn):
+    idempotency_key: str | None = Field(
+        default=None,
+        max_length=128,
+        description="Your own id for this action. Sending it again returns the same action rather than a second one.",
+    )
+
+
+class ActionCompleteIn(BaseModel):
+    outcome: str = Field(pattern="^(done|failed|cancelled)$", description="done, failed or cancelled")
+    note: str | None = Field(default=None, max_length=2000)
+    external_ref: str | None = Field(
+        default=None, max_length=255, description="Your system's id for what was done — a refund id, a ticket number."
+    )
+
+
+class ActionOut(BaseModel):
+    id: str
+    customer_id: str
+    action: str
+    request: dict[str, Any] = Field(default_factory=dict)
+    status: str = Field(
+        description="allowed, pending_approval, denied, done, failed, cancelled or expired"
+    )
+    decision: str
+    summary: str
+    next_step: str = Field(description="What the agent should do now, in one sentence.")
+    reasons: list[ReasonOut] = Field(default_factory=list)
+    approval: ApprovalOut | None = None
+    check_id: str | None = None
+    agent: str | None = None
+    session_id: str | None = None
+    idempotency_key: str | None = None
+    outcome_note: str | None = None
+    external_ref: str | None = None
+    created_at: datetime
+    updated_at: datetime
+    completed_at: datetime | None = None

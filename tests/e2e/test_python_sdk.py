@@ -197,6 +197,27 @@ def test_facts_conditions_and_lifecycle_through_the_sdk(memory):
     assert "at_risk" in memory.lifecycle()["counts"]
 
 
+def test_what_changed_through_the_sdk(memory):
+    """§26 4.1 over a real socket: typed changes, then and now, and the fallback note."""
+    changes = memory.changes("cus_sdk", since="7d")
+    assert changes.summary.startswith("In the last 7 days:")
+    assert changes.basis == "span" and changes.label == "In the last 7 days"
+    assert changes.now["live"] is True and changes.now["state"]["lifecycle"] == "active"
+    assert any(change.type == "problem" and "Shopify sync" in change.title for change in changes.changes)
+    # The earlier test set the state by hand: that is a change, and says who made it.
+    manual = [change for change in changes.of_type("lifecycle") if change.detail.get("manual")]
+    assert manual and manual[0].title == "Lifecycle: at risk → active (set by hand)"
+    assert manual[0].reasons == ["They are fine."]
+    problems = memory.changes("cus_sdk", since="7d", types=["problem"])
+    assert all(change.type == "problem" for change in problems.changes)
+
+    fallback = memory.changes("cus_sdk", since="last_session", agent="nobody")
+    assert fallback.basis == "last_session" and fallback.note
+
+    compared = memory.compare("cus_sdk", "1d")
+    assert compared["now"]["live"] is True
+
+
 def test_manual_memory_query_and_context(memory):
     memory.remember(
         "cus_sdk",
@@ -423,6 +444,10 @@ def test_guardrails_approvals_and_runs_through_the_sdk(memory, live_server):
     assert answered.run_id in {run.id for run in runs} and isinstance(runs[0], AgentRun)
     explained = memory.explain_run(answered.run_id)
     assert isinstance(explained, RunExplanation) and explained.narrative
+    traced = memory.run_trace(answered.run_id)
+    assert traced.recorded and traced.decision["kind"] == "answer" and traced.confidence is not None
+    assert traced.given and all(item["verdict"] in ("cited", "not_cited") for item in traced.given)
+    assert traced.narrative[0].endswith("“What keeps failing for them?”.")
     assert any(check.action == "issue_credit" for check in memory.checks(customer_id="cus_agent"))
     assert memory.my_profile() is None
 
@@ -455,6 +480,77 @@ def test_the_agent_middleware_runs_the_loop(memory, live_server):
     assert not closed.is_open and closed.turn_count >= 2
     # The checks were filed with the conversation they happened in.
     assert {check.action for check in memory.checks(session_id=session_id)} >= {"offer_upgrade", "issue_credit"}
+
+
+def test_the_gateway_and_perform_through_the_sdk(memory, live_server):
+    """§26 4.5 over a real socket: a request that needs a person, a limit that does not, and
+    perform() reporting both outcomes."""
+    import httpx
+    from ai_memory import ActionDenied, AgentAction, ApprovalRequired, MemoryAgent
+
+    base_url, _ = live_server
+    memory.upsert_customer("cus_gate")
+    memory.remember("cus_gate", "Please do not call us; email is fine.", type="preference")
+
+    call = memory.request_action("cus_gate", "call_customer")
+    assert isinstance(call, AgentAction) and call.denied and "asked not to be called" in call.summary
+
+    waiting = memory.request_action("cus_gate", "issue_credit", {"amount": 15}, idempotency_key="sdk-credit-1")
+    assert waiting.waiting and waiting.approval is not None
+    assert memory.request_action("cus_gate", "issue_credit", {"amount": 15}, idempotency_key="sdk-credit-1").id == waiting.id
+    assert memory.complete_action(waiting.id, "cancelled").status == "cancelled"
+
+    limits = httpx.put(
+        f"{base_url}/v1/projects/{LIVE['project_id']}/settings",
+        json={"settings": {"guardrails": {"auto_approve": [{"actions": ["issue_credit"], "up_to": 50}]}}},
+        headers={"Authorization": f"Bearer {LIVE['token']}"},
+    )
+    assert limits.status_code == 200, limits.text
+    try:
+        with MemoryAgent(memory, "cus_gate", agent="sdk-gateway", write_summary=False) as agent:
+            assert agent.perform("issue_credit", lambda: "credited", amount=20) == "credited"
+            with pytest.raises(RuntimeError):
+                agent.perform("issue_credit", lambda: (_ for _ in ()).throw(RuntimeError("billing is down")), amount=10)
+            with pytest.raises(ApprovalRequired):
+                agent.perform("issue_credit", lambda: "never", amount=500)
+            with pytest.raises(ActionDenied):
+                agent.perform("call_customer", lambda: "never")
+        outcomes = {action.status for action in memory.actions(customer_id="cus_gate", action="issue_credit")}
+        assert {"done", "failed", "pending_approval", "cancelled"} <= outcomes
+        failed = next(action for action in memory.actions(customer_id="cus_gate", status="failed"))
+        assert failed.outcome_note == "RuntimeError: billing is down"
+        assert memory.facts("cus_gate")["values"]["actions.issue_credit.count_30d"] == 1
+    finally:
+        httpx.put(
+            f"{base_url}/v1/projects/{LIVE['project_id']}/settings",
+            json={"settings": {"guardrails": {"auto_approve": []}}},
+            headers={"Authorization": f"Bearer {LIVE['token']}"},
+        )
+
+
+def test_memory_evaluation_through_the_sdk(memory):
+    """§26 4.3 over a real socket: an extraction case, a regression, the scorecard."""
+    memory.upsert_customer("cus_eval")
+    set_id = memory.create_eval_set("sdk extraction")["id"]
+    added = memory.add_eval_cases(
+        set_id,
+        [
+            {
+                "customer_id": "cus_eval",
+                "kind": "extraction",
+                "question": "A failing sync is a problem",
+                "event": {"event_type": "support_message", "data": {"message": "The Shopify sync fails during checkout."}},
+                "expect": [{"type": "problem", "contains": "shopify sync"}],
+            }
+        ],
+    )
+    assert added[0]["kind"] == "extraction"
+    run = memory.run_eval(set_id, label="sdk")
+    assert run["metrics"]["extraction"]["accuracy"] == 1.0
+    regression = memory.eval_regression(set_id, {"min_event_importance": 0.99})
+    assert regression["safe"] is False and regression["newly_failing"][0]["label"] == "A failing sync is a problem"
+    card = memory.eval_scorecard()
+    assert card["extraction"]["cases"] >= 1
 
 
 def test_a_profile_bound_key_reads_through_its_profile(memory, live_server):
@@ -518,6 +614,19 @@ def test_the_mcp_server_over_http(live_server):
         run_id = asked["structuredContent"]["run_id"]
         explained = call({"jsonrpc": "2.0", "id": 6, "method": "tools/call", "params": {"name": "explain_answer", "arguments": {"run_id": run_id}}}).json()["result"]
         assert explained["isError"] is False and "asked" in explained["content"][0]["text"]
+        assert "Given:" in explained["content"][0]["text"]
+        assert explained["structuredContent"]["decision"]["kind"] == "answer"
+
+        changed = call({"jsonrpc": "2.0", "id": 10, "method": "tools/call", "params": {"name": "customer_changes", "arguments": {"customer_id": "cus_mcp", "since": "7d"}}}).json()["result"]
+        assert changed["isError"] is False
+        assert changed["content"][0]["text"].startswith("In the last 7 days:")
+        assert "TPS report" in changed["content"][0]["text"]
+        assert changed["structuredContent"]["window"]["basis"] == "span"
+
+        requested = call({"jsonrpc": "2.0", "id": 11, "method": "tools/call", "params": {"name": "request_action", "arguments": {"customer_id": "cus_mcp", "action": "create_ticket", "request": {"topic": "TPS report"}}}}).json()["result"]
+        assert requested["isError"] is False and requested["content"][0]["text"].startswith("ALLOWED")
+        reported = call({"jsonrpc": "2.0", "id": 12, "method": "tools/call", "params": {"name": "report_action", "arguments": {"action_id": requested["structuredContent"]["action_id"], "external_ref": "T-1"}}}).json()["result"]
+        assert reported["content"][0]["text"] == "Recorded: create_ticket done."
 
         unknown = call({"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": {"name": "get_health", "arguments": {"customer_id": "nobody"}}}).json()["result"]
         assert unknown["isError"] is True and "404" in unknown["content"][0]["text"]

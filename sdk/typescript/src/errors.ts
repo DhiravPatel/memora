@@ -38,9 +38,9 @@ export class MemoryTimeoutError extends Error {
 
 /** A guardrail refused the action. `check` holds every reason and its evidence. */
 export class ActionDeniedError extends Error {
-  readonly check: import("./types.js").ActionCheck;
+  readonly check: import("./types.js").ActionCheck | import("./types.js").AgentAction;
 
-  constructor(check: import("./types.js").ActionCheck) {
+  constructor(check: import("./types.js").ActionCheck | import("./types.js").AgentAction) {
     super(check.summary || "The action was denied.");
     this.name = "ActionDeniedError";
     this.check = check;
@@ -49,10 +49,10 @@ export class ActionDeniedError extends Error {
 
 /** The action needs a person first. `approval` is the request that was filed. */
 export class ApprovalRequiredError extends Error {
-  readonly check: import("./types.js").ActionCheck;
+  readonly check: import("./types.js").ActionCheck | import("./types.js").AgentAction;
   readonly approval: import("./types.js").Approval | null;
 
-  constructor(check: import("./types.js").ActionCheck) {
+  constructor(check: import("./types.js").ActionCheck | import("./types.js").AgentAction) {
     super(check.summary || "The action needs approval.");
     this.name = "ApprovalRequiredError";
     this.check = check;

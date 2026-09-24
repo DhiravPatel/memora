@@ -1,4 +1,4 @@
-"""Scoring retrieval against questions whose right answers are known.
+"""Scoring memory against cases whose right answers are known — retrieval and extraction.
 
 "Does retrieval work?" is not answerable by looking at it. It is answerable by asking it
 questions whose answers you already know and counting how often — and how high — the right
@@ -100,6 +100,7 @@ class CaseResult:
     def as_dict(self) -> dict[str, Any]:
         return {
             "case_id": self.case_id,
+            "kind": "retrieval",
             "question": self.question,
             "error": self.error,
             "first_rank": self.first_rank,
@@ -209,4 +210,222 @@ def compare(current: dict[str, Any], baseline: dict[str, Any] | None) -> dict[st
     # A regression is any case that used to be found and no longer is — the headline
     # number can go up while a question that mattered starts failing.
     deltas["regressed"] = bool(newly_missed) or any(value < 0 for value in deltas["recall"].values())
+    extraction, before = current.get("extraction"), baseline.get("extraction")
+    if extraction and before:
+        newly_failing = sorted(set(extraction.get("failing", [])) - set(before.get("failing", [])))
+        deltas["extraction"] = {
+            "accuracy": round((extraction.get("accuracy") or 0.0) - (before.get("accuracy") or 0.0), 4),
+            "false_memory_rate": round(
+                (extraction.get("false_memory_rate") or 0.0) - (before.get("false_memory_rate") or 0.0), 4
+            ),
+            "newly_failing": newly_failing,
+            "newly_passing": sorted(set(before.get("failing", [])) - set(extraction.get("failing", []))),
+        }
+        deltas["regressed"] = deltas["regressed"] or bool(newly_failing)
     return deltas
+
+
+# ------------------------------------------------------------ extraction (§26 4.3)
+#
+# Retrieval can only find what was remembered. An extraction case checks the remembering:
+# an event, and the memories it should — and must not — become, run through the real
+# pipeline without writing (the same dry run as /v1/events/preview). "Should" is a set of
+# expectations, each naming any of a memory's type, its words (matched like an expected
+# phrase), an entity it names, its sensitivity and what consolidation did with it.
+
+EXPECTATION_FIELDS = ("type", "contains", "entity", "sensitivity", "action")
+PLANNED_ACTIONS = ("create", "merge", "update", "conflict", "ignore")
+SENSITIVITIES = ("normal", "restricted")
+
+
+@dataclass(slots=True, frozen=True)
+class Expectation:
+    type: str | None = None
+    contains: str | None = None
+    entity: str | None = None
+    sensitivity: str | None = None
+    action: str | None = None
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> Expectation:
+        return cls(**{name: (str(raw[name]).strip() or None) if raw.get(name) is not None else None for name in EXPECTATION_FIELDS})
+
+    def as_dict(self) -> dict[str, Any]:
+        return {name: getattr(self, name) for name in EXPECTATION_FIELDS if getattr(self, name) is not None}
+
+    def matches(self, planned: dict[str, Any]) -> bool:
+        if self.type and str(planned.get("type")) != self.type:
+            return False
+        if self.contains and not phrase_matches(self.contains, str(planned.get("content") or "")):
+            return False
+        if self.entity and self.entity.lower() not in {str(name).lower() for name in planned.get("entities") or []}:
+            return False
+        if self.sensitivity and planned.get("sensitivity") != self.sensitivity:
+            return False
+        return not (self.action and planned.get("action") != self.action)
+
+    def says(self, planned: dict[str, Any]) -> bool:
+        """Whether a planned memory says the expected words, whatever else is wrong with it."""
+        return not self.contains or phrase_matches(self.contains, str(planned.get("content") or ""))
+
+    def differences(self, planned: dict[str, Any]) -> list[str]:
+        found: list[str] = []
+        if self.type and str(planned.get("type")) != self.type:
+            found.append(f"typed {planned.get('type')}, expected {self.type}")
+        if self.entity and self.entity.lower() not in {str(name).lower() for name in planned.get("entities") or []}:
+            found.append(f"does not name {self.entity}")
+        if self.sensitivity and planned.get("sensitivity") != self.sensitivity:
+            found.append(f"{planned.get('sensitivity')}, expected {self.sensitivity}")
+        if self.action and planned.get("action") != self.action:
+            found.append(f"would {planned.get('action')}, expected {self.action}")
+        return found
+
+    def describe(self) -> str:
+        parts = [f"a {self.type} memory" if self.type else "a memory"]
+        if self.contains:
+            parts.append(f"saying “{self.contains}”")
+        if self.entity:
+            parts.append(f"naming {self.entity}")
+        if self.sensitivity:
+            parts.append(self.sensitivity)
+        if self.action:
+            parts.append(f"that consolidation would {self.action}")
+        return " ".join(parts)
+
+
+@dataclass(slots=True)
+class ExtractionSpec:
+    case_id: str
+    label: str
+    expect: Sequence[Expectation] = ()
+    forbid: Sequence[Expectation] = ()
+    expect_nothing: bool = False
+
+
+@dataclass(slots=True)
+class ExtractionResult:
+    case_id: str
+    label: str
+    planned: list[dict[str, Any]] = field(default_factory=list)
+    stop_reason: str | None = None
+    expected: list[dict[str, Any]] = field(default_factory=list)
+    forbidden: list[dict[str, Any]] = field(default_factory=list)
+    unexpected: list[int] = field(default_factory=list)
+    expect_nothing: bool = False
+    error: str | None = None
+
+    @property
+    def passed(self) -> bool:
+        if self.error is not None:
+            return False
+        if self.expect_nothing and self.planned:
+            return False
+        return all(item["matched"] for item in self.expected) and not any(item["violated_by"] for item in self.forbidden)
+
+    @property
+    def false_memory(self) -> bool:
+        return any(item["violated_by"] for item in self.forbidden) or (self.expect_nothing and bool(self.planned))
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "case_id": self.case_id,
+            "kind": "extraction",
+            "label": self.label,
+            "passed": self.passed,
+            "error": self.error,
+            "stop_reason": self.stop_reason,
+            "expect_nothing": self.expect_nothing,
+            "planned": self.planned,
+            "expected": self.expected,
+            "forbidden": self.forbidden,
+            "unexpected": self.unexpected,
+        }
+
+
+def score_extraction(spec: ExtractionSpec, planned: Sequence[dict[str, Any]], *, stop_reason: str | None = None) -> ExtractionResult:
+    """What the event became, against what it should (and must not) become."""
+    plans = [dict(item) for item in planned]
+    result = ExtractionResult(
+        case_id=spec.case_id, label=spec.label, planned=plans, stop_reason=stop_reason, expect_nothing=spec.expect_nothing
+    )
+    used: set[int] = set()
+    for expectation in spec.expect:
+        index = next((position for position, plan in enumerate(plans) if expectation.matches(plan)), None)
+        near = None
+        if index is None:
+            # The memory that says the words, and what was wrong with it — "typed fact,
+            # expected problem" is the answer a person is looking for.
+            saying = next((plan for plan in plans if expectation.contains and expectation.says(plan)), None)
+            if saying is not None:
+                near = "; ".join(expectation.differences(saying)) or None
+            elif expectation.contains:
+                near = "nothing said it" if plans else (stop_reason or "nothing was extracted")
+        else:
+            used.add(index)
+        result.expected.append(
+            {
+                "expectation": expectation.as_dict(),
+                "described": expectation.describe(),
+                "matched": index is not None,
+                "memory_index": index,
+                "near_miss": near,
+            }
+        )
+    for expectation in spec.forbid:
+        violated = [position for position, plan in enumerate(plans) if expectation.matches(plan)]
+        result.forbidden.append(
+            {"expectation": expectation.as_dict(), "described": expectation.describe(), "violated_by": violated}
+        )
+        used.update(violated)
+    result.unexpected = [position for position in range(len(plans)) if position not in used]
+    return result
+
+
+def aggregate_extraction(results: Sequence[ExtractionResult]) -> dict[str, Any]:
+    """Accuracy, recall of what was expected, the false-memory rate, and — for the
+    statements that were extracted at all — whether they got the right type, sensitivity
+    and consolidation."""
+    scored = [result for result in results if result.error is None]
+
+    def share(hits: int, total: int) -> float | None:
+        return round(hits / total, 4) if total else None
+
+    expectations = [item for result in scored for item in result.expected]
+    attribute: dict[str, list[bool]] = {"type": [], "sensitivity": [], "action": []}
+    for result in scored:
+        for item in result.expected:
+            expectation = Expectation.from_dict(item["expectation"])
+            saying = next((plan for plan in result.planned if expectation.contains and expectation.says(plan)), None)
+            if saying is None:
+                continue  # never extracted: a recall miss, not a type error
+            for name in attribute:
+                wanted = getattr(expectation, name)
+                if wanted:
+                    got = saying.get("type" if name == "type" else name)
+                    attribute[name].append(str(got) == wanted)
+    return {
+        "cases": len(results),
+        "scored": len(scored),
+        "errors": sum(1 for result in results if result.error is not None),
+        "passed": sum(1 for result in scored if result.passed),
+        "accuracy": share(sum(1 for result in scored if result.passed), len(scored)),
+        "expected_recall": share(sum(1 for item in expectations if item["matched"]), len(expectations)),
+        "false_memory_rate": share(sum(1 for result in scored if result.false_memory), len(scored)),
+        "type_accuracy": share(sum(attribute["type"]), len(attribute["type"])),
+        "sensitivity_accuracy": share(sum(attribute["sensitivity"]), len(attribute["sensitivity"])),
+        "consolidation_accuracy": share(sum(attribute["action"]), len(attribute["action"])),
+        "failing": [result.case_id for result in results if not result.passed],
+    }
+
+
+def passing(results: Sequence[dict[str, Any]]) -> dict[str, bool]:
+    """Pass or fail per case, whatever its kind — what a regression is measured in. A
+    retrieval case passes when an expected memory came back at all; an extraction case
+    when every expectation held."""
+    verdicts: dict[str, bool] = {}
+    for result in results:
+        if result.get("kind") == "extraction":
+            verdicts[result["case_id"]] = bool(result.get("passed"))
+        else:
+            verdicts[result["case_id"]] = result.get("error") is None and result.get("first_rank") is not None
+    return verdicts

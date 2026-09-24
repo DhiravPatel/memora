@@ -5,12 +5,14 @@ import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useState } from "react";
 
+import { ActionsLog } from "@/components/agents/actions";
 import { ApprovalsQueue } from "@/components/agents/approvals";
 import { ChecksLog } from "@/components/agents/checks";
 import { RunsExplorer } from "@/components/agents/runs";
 import { PolicySimulator } from "@/components/agents/simulator";
 import { AskMemory } from "@/components/ask-memory";
 import { CausalChains } from "@/components/causal-chains";
+import { ChangesPanel } from "@/components/changes-panel";
 import {
   ForecastCard,
   GoalList,
@@ -48,6 +50,7 @@ import type {
 
 const TABS = [
   "Actions",
+  "Changes",
   "State",
   "Facts",
   "360",
@@ -92,7 +95,10 @@ export default function CustomerPage() {
 
   const timeline = useQuery({
     queryKey: ["customer-timeline", projectId, customerId],
-    queryFn: () => api<{ entries: TimelineEntry[] }>(`${base}/timeline`, { query: { limit: 150 } }),
+    queryFn: () =>
+      api<{ entries: TimelineEntry[] }>(`${base}/timeline`, {
+        query: { limit: 150 },
+      }),
     enabled: Boolean(projectId) && tab === "Timeline",
   });
 
@@ -139,8 +145,12 @@ export default function CustomerPage() {
         body: { status: input.status, note: "Set from the customer profile" },
       }),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["customer-goals", projectId, customerId] });
-      queryClient.invalidateQueries({ queryKey: ["customer-signals", projectId, customerId] });
+      queryClient.invalidateQueries({
+        queryKey: ["customer-goals", projectId, customerId],
+      });
+      queryClient.invalidateQueries({
+        queryKey: ["customer-signals", projectId, customerId],
+      });
     },
   });
 
@@ -163,19 +173,17 @@ export default function CustomerPage() {
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-3">
-            {lifecycleState.data?.enabled && (
+            {(lifecycleState.data?.tracks ?? []).map((track) => (
               <button
+                key={track.track}
                 onClick={() => setTab("State")}
                 className="flex items-center gap-3 border border-border bg-surface px-4 py-2.5 hover:border-accent"
-                title="Lifecycle state — open the State tab"
+                title={`${track.label} — ${track.current?.reasons?.join("; ") || "open the State tab"}`}
               >
-                <span className="label">Lifecycle</span>
-                <StateBadge
-                  state={lifecycleState.data.current?.state}
-                  pinned={lifecycleState.data.current?.pinned}
-                />
+                <span className="label">{track.label}</span>
+                <StateBadge state={track.current?.state} pinned={track.current?.pinned} />
               </button>
-            )}
+            ))}
             {signals.data && (
               <div className="flex items-center gap-3 border border-border bg-surface px-4 py-2.5">
                 <span className="label">Heading</span>
@@ -236,6 +244,8 @@ export default function CustomerPage() {
           </Card>
         </div>
       )}
+
+      {tab === "Changes" && <ChangesPanel projectId={projectId} customerId={customerId} />}
 
       {tab === "State" && <StatePanel projectId={projectId} customerId={customerId} />}
 
@@ -333,6 +343,10 @@ export default function CustomerPage() {
           <section className="space-y-3">
             <p className="label-strong">Requests waiting for a person</p>
             <ApprovalsQueue projectId={projectId} customerId={customerId} />
+          </section>
+          <section className="space-y-3">
+            <p className="label-strong">What agents did</p>
+            <ActionsLog projectId={projectId} customerId={customerId} />
           </section>
           <section className="space-y-3">
             <p className="label-strong">What agents asked to do</p>

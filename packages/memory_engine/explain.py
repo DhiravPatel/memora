@@ -86,6 +86,9 @@ class MemoryPlan:
     # Which extraction rule produced the statement, so a surprising memory is traceable
     # to the thing that read it.
     extracted_by: str | None = None
+    # The products, integrations and features it names — what an extraction case's
+    # `entity` expectation checks (§26 4.3).
+    entities: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -103,6 +106,7 @@ class MemoryPlan:
             "sensitivity": self.sensitivity,
             "restricted_by": self.restricted_by,
             "extracted_by": self.extracted_by,
+            "entities": list(self.entities),
         }
 
 

@@ -24,6 +24,10 @@ from app.schemas.agent_policy import (
     RunMemoryOut,
     RunOut,
     RunSummaryOut,
+    RunTraceOut,
+    TraceDecisionOut,
+    TraceGivenOut,
+    TraceIgnoredOut,
 )
 from app.services.guardrail_service import GuardrailService
 from app.services.reader import Reader
@@ -37,11 +41,14 @@ from database.repositories import (
     CustomerSnapshotRepository,
     QueryLogRepository,
 )
+from memory_engine import decision_trace
 from memory_engine.policy import WITHHELD
 
 # Checks this close to a run, for the same customer, are shown with it when the run is
 # not part of a session — the agent asked, then acted.
 CHECK_WINDOW_SECONDS = 15 * 60
+# The version reasons that mark a memory being replaced by another.
+_SUPERSEDING_REASONS = frozenset({"conflict_resolution", "feedback_corrected", "offline_consolidation"})
 SCORE_KEYS = (
     "similarity",
     "keyword_score",
@@ -163,6 +170,171 @@ class RunService:
             held_back=held_back,
             state_then=state_then,
             checks=checks,
+        )
+
+    async def trace(self, *, project: Project, run_id: str) -> RunTraceOut:
+        """What the agent was given, what it was not given and why, and what it decided
+        (§26 4.4) — shown to this reader like the rest of the run."""
+        row = await self._row(project, run_id)
+        trace = row.trace or {}
+        kind = "context" if row.kind == "context" else "query"
+        ranked: list[dict[str, Any]] = list(trace.get("memories") or [])
+        passed: list[dict[str, Any]] = list(trace.get("passed_over") or [])
+        unseen: list[dict[str, Any]] = list(trace.get("unseen") or [])
+        # What the context builder left out, and why; runs from before it said why recorded
+        # only the budget's cuts.
+        left_out: dict[str, str] = dict(trace.get("left_out") or {}) or {
+            str(ident): "token_budget" for ident in trace.get("dropped_by_budget") or []
+        }
+        cut = dict(trace.get("cut") or {})
+
+        given_ids = [str(item["memory_id"]) for item in ranked if item.get("memory_id")] or list(row.memory_ids or [])
+        replacements = {str(entry["superseded_by"]) for entry in unseen if entry.get("superseded_by")}
+        ignored_ids = {str(entry["memory_id"]) for entry in (*passed, *unseen)} | set(left_out)
+        hidden = await self.reader.hidden(project.id, {*given_ids, *ignored_ids, *replacements})
+        external = await self._external_ids(project, {row.customer_id} if row.customer_id else set())
+        summary = self._summary(row, hidden, external)
+
+        visible_given = [ident for ident in given_ids if ident not in hidden]
+        now = {memory.id: memory for memory in await self.reader.memories.get_many(visible_given, project.id)}
+        versions = await self.reader.memories.versions_for(visible_given)
+        given: list[TraceGivenOut] = []
+        for rank, item in enumerate(ranked or [{"memory_id": ident} for ident in given_ids], start=1):
+            base = self._memory(item, rank, row.created_at, hidden, now, versions)
+            verdict, why = decision_trace.why_given({**item, "rank": base.rank}, kind=kind)
+            given.append(TraceGivenOut(**base.model_dump(), verdict=verdict, why=why))
+        rank_of = {memory.id: memory.rank for memory in given}
+
+        others = [ident for ident in {*ignored_ids, *replacements} if ident not in hidden]
+        rows = {memory.id: memory for memory in await self.reader.memories.get_many(others, project.id)}
+        superseded = [str(entry["memory_id"]) for entry in unseen if entry.get("reason") == "superseded"]
+        # When, and how, each superseded memory was replaced: its last superseding version.
+        replaced: dict[str, Any] = {
+            ident: next((version for version in reversed(history) if version.reason in _SUPERSEDING_REASONS), None)
+            for ident, history in (await self.reader.memories.versions_for([i for i in superseded if i not in hidden])).items()
+        }
+
+        def content(ident: str) -> tuple[bool, str | None]:
+            if ident in hidden:
+                return False, WITHHELD
+            memory = rows.get(ident)
+            return True, memory.content if memory is not None else None
+
+        ignored: list[TraceIgnoredOut] = []
+        for entry in passed:
+            ident = str(entry["memory_id"])
+            visible, words = content(ident)
+            ignored.append(
+                TraceIgnoredOut(
+                    id=ident,
+                    type=entry.get("type"),
+                    reason=str(entry.get("reason")),
+                    why=decision_trace.why_ignored(entry, limit=cut.get("limit"), per_type=cut.get("per_type")),
+                    visible=visible,
+                    content=words,
+                    score=entry.get("score"),
+                    position=entry.get("position"),
+                )
+            )
+        for ident, reason in left_out.items():
+            visible, words = content(ident)
+            memory = rows.get(ident)
+            kind_of = str(memory.type) if memory is not None else None
+            ignored.append(
+                TraceIgnoredOut(
+                    id=ident,
+                    type=kind_of,
+                    reason=reason,
+                    why=decision_trace.why_ignored(
+                        {"reason": reason, "type": kind_of}, token_budget=trace.get("token_budget")
+                    ),
+                    visible=visible,
+                    content=words,
+                )
+            )
+        for entry in unseen:
+            ident = str(entry["memory_id"])
+            visible, words = content(ident)
+            replacement = str(entry.get("superseded_by") or "") or None
+            replacement_words = None
+            if replacement and replacement not in hidden and replacement in rows:
+                replacement_words = rows[replacement].content
+            ignored.append(
+                TraceIgnoredOut(
+                    id=ident,
+                    type=entry.get("type"),
+                    reason=str(entry.get("reason")),
+                    why=decision_trace.why_ignored(
+                        entry,
+                        profile=trace.get("profile"),
+                        replacement=replacement_words,
+                        replacement_rank=rank_of.get(replacement) if replacement else None,
+                        superseded_at=replaced[ident].created_at if replaced.get(ident) else None,
+                        merged=bool(replaced.get(ident)) and replaced[ident].reason == "offline_consolidation",
+                    ),
+                    visible=visible,
+                    content=words,
+                    match=entry.get("match"),
+                    superseded_by=replacement if replacement and replacement not in hidden else None,
+                    replacement_rank=rank_of.get(replacement) if replacement else None,
+                )
+            )
+
+        withheld_answer = summary.answer == WITHHELD
+        decision = (
+            TraceDecisionOut(
+                kind="answer",
+                answer=summary.answer,
+                strategy=trace.get("answer_strategy"),
+                confidence=trace.get("confidence"),
+                # An answer composed from a memory the reader may not see is withheld; so is
+                # the reasoning that led to it.
+                reasoning=[] if withheld_answer else list(trace.get("reasoning") or []),
+                evidence=[ident for ident in trace.get("evidence") or [] if ident not in hidden],
+            )
+            if kind == "query"
+            else TraceDecisionOut(
+                kind="context",
+                token_count=trace.get("token_count"),
+                token_budget=trace.get("token_budget"),
+                truncated=trace.get("truncated"),
+            )
+        )
+
+        state_then = None
+        if row.snapshot_id:
+            snapshot = await self.snapshots.get(row.snapshot_id, project.id)
+            if snapshot is not None:
+                state_then = snapshot_out(snapshot, cleared=self.cleared)
+        checks = await self._checks(project, row)
+        return RunTraceOut(
+            run=summary,
+            question=row.query,
+            narrative=decision_trace.narrative(
+                kind=kind,
+                agent=row.agent,
+                query=row.query,
+                given=[{"verdict": memory.verdict} for memory in given],
+                ignored=[
+                    {"reason": item.reason, "replacement_rank": item.replacement_rank} for item in ignored
+                ],
+                decision=decision.model_dump(),
+                checks=checks,
+            ),
+            given=given,
+            ignored=ignored,
+            decision=decision,
+            cut=cut,
+            held_back={
+                "withheld": int(trace.get("withheld") or 0),
+                "cleared": trace.get("cleared", row.cleared),
+                "readable_types": trace.get("readable_types"),
+                "profile": trace.get("profile"),
+                "hidden_from_you": len(hidden),
+            },
+            state_then=state_then,
+            checks=checks,
+            recorded="unseen" in trace,
         )
 
     # ---------------------------------------------------------------- pieces

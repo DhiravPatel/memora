@@ -9,6 +9,7 @@ from webhooks.dispatcher import WebhookDispatcher
 from webhooks.events import (
     PAYLOAD_VERSION,
     OutboundEvent,
+    agent_action_completed,
     agent_action_denied,
     agent_approval_decided,
     agent_approval_requested,
@@ -41,6 +42,7 @@ __all__ = [
     "TIMESTAMP_HEADER",
     "OutboundEvent",
     "WebhookDispatcher",
+    "agent_action_completed",
     "agent_action_denied",
     "agent_approval_decided",
     "agent_approval_requested",

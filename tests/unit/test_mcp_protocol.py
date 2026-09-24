@@ -51,7 +51,9 @@ def test_initialize_negotiates_a_supported_version():
     reply = rpc(server, "initialize", {"protocolVersion": "2025-03-26", "capabilities": {}, "clientInfo": {"name": "t"}})
     assert reply["result"]["protocolVersion"] == "2025-03-26"
     assert reply["result"]["capabilities"] == {"tools": {"listChanged": False}}
-    assert "check_action" in reply["result"]["instructions"]
+    # The model is told to go through the gateway before acting, and to report back after.
+    assert "request_action" in reply["result"]["instructions"]
+    assert "report_action" in reply["result"]["instructions"]
     future = rpc(server, "initialize", {"protocolVersion": "2099-01-01"})
     assert future["result"]["protocolVersion"] == "2025-06-18"
 
@@ -64,7 +66,7 @@ def test_every_tool_is_described_with_an_object_schema():
         assert tool["inputSchema"]["type"] == "object"
         assert tool["description"] and tool["annotations"]["title"]
     writes = {tool["name"] for tool in tools if not tool["annotations"]["readOnlyHint"]}
-    assert writes == {"check_action", "remember"}
+    assert writes == {"check_action", "request_action", "proceed_action", "report_action", "remember"}
 
 
 def test_a_tool_call_returns_text_and_structured_content():

@@ -7,11 +7,12 @@ are blended by the ranking engine.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Sequence
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Float, Text, and_, cast, func, select, update
+from sqlalchemy import Float, Text, and_, cast, func, or_, select, update
 from sqlalchemy.dialects.postgresql import ARRAY, array
 from sqlalchemy.orm import aliased
 
@@ -23,6 +24,28 @@ from database.access import UNRESTRICTED, current_access, hidden_condition, visi
 from database.models import Embedding, Entity, Memory, MemoryEntity, MemoryVersion
 from database.repositories.base import BaseRepository
 from nlp.concepts import concepts_for
+from nlp.tokenize import surface_words
+
+# Words in nearly every memory ("The customer…"): as search terms they match everything.
+_UNSELECTIVE = frozenset(
+    {"customer", "customers", "client", "clients", "user", "users", "account", "they", "their", "them", "team", "company"}
+)
+_SEARCH_SYNTAX = re.compile(r'"|(^|\s)-\w|\bor\b', re.IGNORECASE)
+_TERM = re.compile(r"^[a-z0-9]{2,40}$")
+
+
+def _tsquery(query: str, *, any_word: bool = True) -> Any | None:
+    """Web-search syntax when the query uses it (or the project asked for every word);
+    otherwise any meaningful word."""
+    if not any_word or _SEARCH_SYNTAX.search(query):
+        return func.websearch_to_tsquery("english", query)
+    terms = list(
+        dict.fromkeys(word for word in surface_words(query) if _TERM.match(word) and word not in _UNSELECTIVE)
+    )[:12]
+    if not terms:
+        # Only stopwords and generic words: the substring fallback may still find it.
+        return func.websearch_to_tsquery("english", query)
+    return func.to_tsquery("english", " | ".join(terms))
 
 
 class MemoryRepository(BaseRepository):
@@ -508,6 +531,127 @@ class MemoryRepository(BaseRepository):
             grouped.setdefault(version.memory_id, []).append(version)
         return grouped
 
+    async def first_seen_between(
+        self,
+        *,
+        project_id: str,
+        customer_id: str,
+        since: datetime,
+        until: datetime,
+        type: MemoryType | None = None,
+        limit: int = 500,
+    ) -> list[Memory]:
+        """Memories a customer's events first produced in a window, oldest first, whatever
+        became of them since — superseded and expired ones are part of what happened.
+
+        A system read: what changed is decided over everything and shown through a reader
+        (§26 4.1), the same rule the fact document follows.
+        """
+        conditions = [
+            Memory.project_id == project_id,
+            Memory.customer_id == customer_id,
+            Memory.first_seen_at >= since,
+            Memory.first_seen_at <= until,
+            Memory.status != MemoryStatus.DELETED,
+        ]
+        if type is not None:
+            conditions.append(Memory.type == type)
+        result = await self.session.execute(
+            select(Memory).where(*conditions).order_by(Memory.first_seen_at.asc()).limit(limit)
+        )
+        return list(result.scalars())
+
+    async def latest_before(
+        self, *, project_id: str, customer_id: str, type: MemoryType, before: datetime
+    ) -> Memory | None:
+        """The newest memory of a type first seen before ``before`` — "what the plan was"."""
+        result = await self.session.execute(
+            select(Memory)
+            .where(
+                Memory.project_id == project_id,
+                Memory.customer_id == customer_id,
+                Memory.type == type,
+                Memory.first_seen_at < before,
+                Memory.status != MemoryStatus.DELETED,
+            )
+            .order_by(Memory.first_seen_at.desc())
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
+
+    async def versions_between(
+        self,
+        *,
+        project_id: str,
+        customer_id: str,
+        since: datetime,
+        until: datetime,
+        reasons: Sequence[str] = (),
+        reason_prefixes: Sequence[str] = (),
+        limit: int = 500,
+    ) -> list[tuple[MemoryVersion, Memory]]:
+        """Versions written to a customer's memories in a window, oldest first, with the
+        memory each belongs to. Creations are left out — a new memory is its own record."""
+        matches = [MemoryVersion.reason.in_(list(reasons))] if reasons else []
+        matches.extend(MemoryVersion.reason.startswith(prefix) for prefix in reason_prefixes)
+        conditions = [
+            Memory.project_id == project_id,
+            Memory.customer_id == customer_id,
+            MemoryVersion.created_at >= since,
+            MemoryVersion.created_at <= until,
+            MemoryVersion.reason != "created",
+        ]
+        if matches:
+            conditions.append(or_(*matches))
+        result = await self.session.execute(
+            select(MemoryVersion, Memory)
+            .join(Memory, Memory.id == MemoryVersion.memory_id)
+            .where(*conditions)
+            .order_by(MemoryVersion.created_at.asc())
+            .limit(limit)
+        )
+        return [(version, memory) for version, memory in result]
+
+    async def inactive_for_customer(
+        self, *, project_id: str, customer_id: str, limit: int = 200
+    ) -> list[Memory]:
+        """A customer's superseded and expired memories, most recently seen first — what no
+        agent could have been given. A system read for the decision trace (§26 4.4): ids are
+        recorded, and content is shaped for whoever reads the trace later."""
+        result = await self.session.execute(
+            select(Memory)
+            .where(
+                Memory.project_id == project_id,
+                Memory.customer_id == customer_id,
+                Memory.status.in_([MemoryStatus.SUPERSEDED, MemoryStatus.EXPIRED]),
+            )
+            .order_by(Memory.last_seen_at.desc())
+            .limit(limit)
+        )
+        return list(result.scalars())
+
+    async def hidden_for_customer(
+        self, *, project_id: str, customer_id: str, limit: int = 200
+    ) -> list[Memory]:
+        """A customer's active memories this repository's reader may *not* see — restricted
+        ones without clearance, types outside the agent profile. Empty for a reader who sees
+        everything. For recording what an agent was not shown; never for showing it."""
+        hidden = hidden_condition(cleared=self.cleared, readable_types=self.readable_types)
+        if hidden is None:
+            return []
+        result = await self.session.execute(
+            select(Memory)
+            .where(
+                Memory.project_id == project_id,
+                Memory.customer_id == customer_id,
+                Memory.status == MemoryStatus.ACTIVE,
+                hidden,
+            )
+            .order_by(Memory.last_seen_at.desc())
+            .limit(limit)
+        )
+        return list(result.scalars())
+
     async def entity_ids_for_memories(self, memory_ids: Sequence[str]) -> dict[str, list[str]]:
         if not memory_ids:
             return {}
@@ -596,11 +740,21 @@ class MemoryRepository(BaseRepository):
         customer_id: str | None,
         query: str,
         limit: int = 30,
+        any_word: bool = True,
     ) -> list[tuple[Memory, float]]:
-        """PostgreSQL full-text search, used alongside vectors for exact terms."""
+        """PostgreSQL full-text search, used alongside vectors for exact terms.
+
+        A question is matched on *any* of its meaningful words, ranked by how many and which
+        match: web-search syntax requires every word, so "are the webhook retries still
+        failing?" found nothing that did not also say "still". Queries that use that syntax
+        on purpose — quotes, ``-term``, ``or`` — keep it, and so does a project that set
+        ``keyword_match_any`` off.
+        """
         if not query.strip():
             return []
-        tsquery = func.websearch_to_tsquery("english", query)
+        tsquery = _tsquery(query, any_word=any_word)
+        if tsquery is None:
+            return []
         tsvector = func.to_tsvector("english", Memory.content)
         rank = cast(func.ts_rank(tsvector, tsquery), Float).label("rank")
         result = await self.session.execute(

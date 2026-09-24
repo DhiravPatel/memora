@@ -24,6 +24,19 @@ CUES: dict[MemoryType, tuple[tuple[str, float], ...]] = {
         ("time out", 0.85), ("timeout", 0.85), ("stuck", 0.85), ("missing", 0.7),
         ("lost data", 1.0), ("double charge", 1.0), ("charged twice", 1.0), ("wrong", 0.7),
         ("no longer work", 1.0), ("never work", 1.0), ("declined", 0.7), ("rejected", 0.7),
+        # A verb that will not do its job is a complaint whatever the verb: "will not
+        # connect", "won't open", "does not save".
+        ("not connect", 0.9), ("not open", 0.8), ("not save", 0.85), ("not send", 0.8),
+        ("not log in", 0.85), ("not start", 0.8), ("not let", 0.7), ("keep reject", 0.9),
+        ("not be able to", 0.85), ("timing out", 0.85),
+        # Symptoms: how people describe a fault without naming one.
+        ("loops back", 0.85), ("stuck in a loop", 0.9), ("freezes", 0.85), ("frozen", 0.85),
+        ("keeps hanging", 0.85), ("stalls", 0.75), ("blank page", 0.9), ("blank screen", 0.9),
+        ("white screen", 0.9), ("glitch", 0.85), ("outage", 1.0), ("is down", 0.85), ("laggy", 0.8),
+        ("keeps spinning", 0.85), ("kicked out", 0.85), ("logs me out", 0.8), ("nothing happens", 0.85),
+        ("does nothing", 0.8), ("disappeared", 0.8), ("vanished", 0.85), ("out of sync", 0.9),
+        ("mismatch", 0.8), ("incorrect", 0.75), ("inaccurate", 0.8), ("takes forever", 0.9),
+        ("slow to load", 0.9), ("bounced", 0.6), ("is blank", 0.85),
     ),
     MemoryType.PREFERENCE: (
         ("prefer", 1.0), ("rather", 0.8), ("instead of", 0.6), ("please contact", 0.95),
@@ -37,6 +50,7 @@ CUES: dict[MemoryType, tuple[tuple[str, float], ...]] = {
         ("plan to", 0.95), ("planning to", 0.95), ("hope to", 0.85), ("need to", 0.8),
         ("looking to", 0.9), ("our goal", 1.0), ("we aim", 0.95), ("so that we can", 0.8),
         ("in order to", 0.7), ("by the end of", 0.6), ("launch", 0.6), ("scale to", 0.85),
+        ("roll out", 0.7),
     ),
     MemoryType.INTENT: (
         ("thinking about", 0.85), ("considering", 0.9), ("evaluating", 0.9), ("comparing", 0.85),

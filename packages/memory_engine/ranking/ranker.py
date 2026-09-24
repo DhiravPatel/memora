@@ -60,6 +60,11 @@ class RankingWeights:
 # Discounted so that, at equal strength, the memory that uses the asker's own words ranks
 # first — the concept leg adds recall, it does not reorder what lexical matching found.
 CONCEPT_WEIGHT = 0.8
+# Keyword scores are normalised to the best keyword match, so every memory that shares the
+# question's strongest terms scores 1.0 — "their contract renews in March" and "the
+# contract includes a renewal discount" alike. A share of the vector similarity is blended
+# in so that a tie on the strongest signal goes to the memory closest in meaning.
+SEMANTIC_BLEND = 0.1
 
 
 class MemoryRanker:
@@ -69,9 +74,10 @@ class MemoryRanker:
     def score(self, candidate: ScoredMemory) -> float:
         memory = candidate.memory
         weights = self.weights
-        similarity = max(
+        strongest = max(
             candidate.similarity, candidate.keyword_score, candidate.concept_score * CONCEPT_WEIGHT
         )
+        similarity = (1 - SEMANTIC_BLEND) * strongest + SEMANTIC_BLEND * candidate.similarity
         candidate.recency = candidate.recency or recency_score(
             memory.last_seen_at, memory.type
         )

@@ -21,7 +21,7 @@ import { Agent } from "./resources/agent.js";
 import { Customers } from "./resources/customers.js";
 import { Events } from "./resources/events.js";
 import { Foresight } from "./resources/foresight.js";
-import { Guardrails, Profiles, Runs } from "./resources/guardrails.js";
+import { Actions, Guardrails, Profiles, Runs } from "./resources/guardrails.js";
 import { MemoryResource } from "./resources/memory.js";
 import { Quality } from "./resources/quality.js";
 import { State } from "./resources/state.js";
@@ -49,6 +49,8 @@ export class MemoryClient {
   readonly quality: Quality;
   /** Ask before acting: checks, approvals. */
   readonly guardrails: Guardrails;
+  /** The approval gateway: request an action, proceed once approved, report the outcome. */
+  readonly actions: Actions;
   /** Every answer and briefing an agent asked for, and why it said what it said. */
   readonly runs: Runs;
   /** Agent profiles: which memory an agent may read and which actions it may take. */
@@ -65,6 +67,7 @@ export class MemoryClient {
     this.state = new State(http);
     this.quality = new Quality(http);
     this.guardrails = new Guardrails(http);
+    this.actions = new Actions(http);
     this.runs = new Runs(http);
     this.profiles = new Profiles(http);
   }
@@ -140,5 +143,6 @@ export {
   verifyWebhookSignature,
 } from "./webhooks.js";
 export type { WebhookEventEnvelope } from "./webhooks.js";
+export type { Expectation } from "./resources/quality.js";
 export * from "./types.js";
 export default MemoryClient;

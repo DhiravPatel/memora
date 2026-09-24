@@ -193,6 +193,46 @@ class MemoryAgent:
             raise ActionDenied(redeemed) if redeemed.denied else ApprovalRequired(redeemed)
         raise ApprovalRequired(verdict)
 
+    def perform(
+        self,
+        action: str,
+        do: Callable[[], Any] | None = None,
+        request: Mapping[str, Any] | None = None,
+        *,
+        idempotency_key: str | None = None,
+        wait: float = 0.0,
+        interval: float = 5.0,
+        **details: Any,
+    ) -> Any:
+        """Take an action through the approval gateway (§26 4.5), start to finish.
+
+        Requests it; with ``wait``, waits for a person when one is needed; runs ``do`` only
+        once it is allowed; and reports the outcome — ``done``, or ``failed`` with the error
+        if ``do`` raises (the error is re-raised). Returns what ``do`` returned, or the
+        allowed :class:`AgentAction` when there is no ``do`` — then report it yourself with
+        ``client.complete_action``. Raises :class:`ActionDenied` or :class:`ApprovalRequired`
+        like :meth:`guard`, so the customer's action history is only what really happened.
+
+            memory.perform("issue_credit", lambda: billing.credit(20), amount=20, wait=120)
+        """
+        payload = _details(request, details)
+        taken = self.client.request_action(
+            self.customer_id, action, payload, idempotency_key=idempotency_key, session_id=self.start().id
+        )
+        if taken.waiting and wait > 0:
+            taken = self.client.wait_for_action(taken.id, timeout=wait, interval=interval)
+        if not taken.allowed:
+            raise ApprovalRequired(taken) if taken.waiting else ActionDenied(taken)
+        if do is None:
+            return taken
+        try:
+            result = do()
+        except Exception as error:
+            self.client.complete_action(taken.id, "failed", note=f"{type(error).__name__}: {error}"[:2000])
+            raise
+        self.client.complete_action(taken.id, "done")
+        return result
+
     def guarded(self, action: str, *, wait: float = 0.0) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
         """Decorate a tool so it runs only when ``action`` is allowed; its keyword
         arguments are the request the rules see (``amount=``, ``channel=``…)."""
@@ -312,3 +352,34 @@ class AsyncMemoryAgent:
                 return redeemed
             raise ActionDenied(redeemed) if redeemed.denied else ApprovalRequired(redeemed)
         raise ApprovalRequired(verdict)
+
+    async def perform(
+        self,
+        action: str,
+        do: Callable[[], Awaitable[Any]] | None = None,
+        request: Mapping[str, Any] | None = None,
+        *,
+        idempotency_key: str | None = None,
+        wait: float = 0.0,
+        interval: float = 5.0,
+        **details: Any,
+    ) -> Any:
+        """:meth:`MemoryAgent.perform`, with ``do`` a coroutine function."""
+        payload = _details(request, details)
+        session = await self.start()
+        taken = await self.client.request_action(
+            self.customer_id, action, payload, idempotency_key=idempotency_key, session_id=session.id
+        )
+        if taken.waiting and wait > 0:
+            taken = await self.client.wait_for_action(taken.id, timeout=wait, interval=interval)
+        if not taken.allowed:
+            raise ApprovalRequired(taken) if taken.waiting else ActionDenied(taken)
+        if do is None:
+            return taken
+        try:
+            result = await do()
+        except Exception as error:
+            await self.client.complete_action(taken.id, "failed", note=f"{type(error).__name__}: {error}"[:2000])
+            raise
+        await self.client.complete_action(taken.id, "done")
+        return result

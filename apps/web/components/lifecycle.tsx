@@ -20,11 +20,18 @@ import type {
   SnapshotChange,
   SnapshotSummary,
   StateRefresh,
+  TrackState,
 } from "@/lib/types";
 
 /** Colours for the default machine's states. A project's own states fall back to neutral —
  *  guessing what "renewal_window" should look like would be worse than not colouring it. */
 const STATE_STYLES: Record<string, string> = {
+  new: "border-info/70 bg-info/10 text-info",
+  activated: "border-violet/70 bg-violet/10 text-violet",
+  adopting: "border-success/70 bg-success/10 text-success",
+  power_user: "border-success/70 bg-success/20 text-success",
+  paying: "border-success/70 bg-success/10 text-success",
+  renewing: "border-violet/70 bg-violet/10 text-violet",
   trial: "border-info/70 bg-info/10 text-info",
   onboarding: "border-violet/70 bg-violet/10 text-violet",
   active: "border-success/70 bg-success/10 text-success",
@@ -57,7 +64,7 @@ export function useCustomerState(projectId: string | null, customerId: string) {
   });
 }
 
-/** Where the customer is in the lifecycle, how they got there, and what we knew then. */
+/** Where the customer is on every lifecycle track, how they got there, and what we knew then. */
 export function StatePanel({
   projectId,
   customerId,
@@ -68,10 +75,13 @@ export function StatePanel({
   const base = `/v1/projects/${projectId}/customers/${customerId}`;
   const queryClient = useQueryClient();
   const current = useCustomerState(projectId, customerId);
+  const [historyTrack, setHistoryTrack] = useState("all");
   const history = useQuery({
-    queryKey: ["customer-state-history", projectId, customerId],
+    queryKey: ["customer-state-history", projectId, customerId, historyTrack],
     queryFn: () =>
-      api<Page<CustomerStateRecord>>(`${base}/state/history`, { query: { limit: 50 } }),
+      api<Page<CustomerStateRecord>>(`${base}/state/history`, {
+        query: { limit: 50, track: historyTrack },
+      }),
     enabled: Boolean(projectId),
   });
   const snapshots = useQuery({
@@ -86,6 +96,7 @@ export function StatePanel({
       "customer-state-history",
       "customer-snapshots",
       "customer-facts",
+      "customer-changes",
     ]) {
       queryClient.invalidateQueries({ queryKey: [key] });
     }
@@ -95,101 +106,94 @@ export function StatePanel({
     mutationFn: () => api<StateRefresh>(`${base}/state/refresh`, { method: "POST" }),
     onSuccess: invalidate,
   });
-  const release = useMutation({
-    mutationFn: () => api(`${base}/state/pin`, { method: "DELETE" }),
-    onSuccess: invalidate,
-  });
 
   if (current.isLoading) return <LoadingRow />;
   if (current.error) return <ErrorState error={current.error} />;
   const state = current.data;
   if (!state) return null;
-  if (!state.enabled) {
+  const tracks = state.tracks?.length
+    ? state.tracks
+    : state.enabled
+      ? [
+          {
+            track: "lifecycle",
+            label: "Lifecycle",
+            primary: true,
+            current: state.current,
+            states: state.states,
+          },
+        ]
+      : [];
+  if (!tracks.length) {
     return (
       <EmptyState
         title="Lifecycle tracking is off"
-        description="Turn it on in Settings → Engine → Lifecycle to place customers in states."
+        description="Turn it on in Settings → Engine → Lifecycle, or add a track, to place customers in states."
       />
     );
   }
+  const labels = Object.fromEntries(tracks.map((track) => [track.track, track.label]));
+  const moved = refresh.data
+    ? Object.entries(refresh.data.tracks ?? {}).filter(([, outcome]) => outcome.moved)
+    : [];
 
-  const record = state.current;
   return (
     <div className="space-y-6">
       <Card>
         <CardHeader className="flex flex-row flex-wrap items-start justify-between gap-4">
           <div>
-            <CardTitle>Lifecycle state</CardTitle>
+            <CardTitle>Lifecycle</CardTitle>
             <p className="mt-1 text-xs text-muted-foreground">
-              Decided by the project's state machine from this customer's facts. A state set by hand
-              is pinned and left alone until released.
+              Each track is a state machine over this customer&apos;s facts — how engaged they are,
+              where they are commercially, or whatever your project defines. A state set by hand is
+              pinned and left alone until released.
             </p>
           </div>
-          <div className="flex gap-2">
-            {record?.pinned && (
-              <Button
-                size="sm"
-                variant="outline"
-                loading={release.isPending}
-                onClick={() => release.mutate()}
-              >
-                Release pin
-              </Button>
-            )}
-            <Button
-              size="sm"
-              variant="secondary"
-              loading={refresh.isPending}
-              onClick={() => refresh.mutate()}
-            >
-              Re-evaluate
-            </Button>
-          </div>
+          <Button
+            size="sm"
+            variant="secondary"
+            loading={refresh.isPending}
+            onClick={() => refresh.mutate()}
+          >
+            Re-evaluate every track
+          </Button>
         </CardHeader>
-        <CardContent className="space-y-4">
-          {record ? (
-            <>
-              <div className="flex flex-wrap items-center gap-3">
-                <StateBadge state={record.state} pinned={record.pinned} />
-                <span className="label">
-                  since {formatRelative(record.entered_at)} · {record.source}
-                  {record.transition && ` · ${record.transition.replace(/_/g, " ")}`}
-                  {record.pinned_until && ` · pinned until ${formatDate(record.pinned_until)}`}
-                </span>
-              </div>
-              {record.evaluation?.leaves?.length ? (
-                <ConditionTrace evaluation={record.evaluation} />
-              ) : (
-                record.reason && (
-                  <p className="text-[12px] text-muted-foreground">{record.reason}</p>
-                )
-              )}
-            </>
-          ) : (
-            <p className="text-[12px] text-muted-foreground">
-              Not placed yet — the next processed event, the nightly sweep or Re-evaluate will place
-              them.
-            </p>
-          )}
+        <CardContent className="space-y-3">
           {refresh.data && (
             <p className="label">
-              {refresh.data.moved
-                ? `Moved: ${refresh.data.transitions.map((step) => `${step.from ?? "—"} → ${step.to}`).join(", ") || "placed"}`
-                : "Nothing moved — no transition's condition holds."}
+              {moved.length
+                ? moved
+                    .map(
+                      ([track, outcome]) =>
+                        `${labels[track] ?? track}: ${outcome.transitions.map((step) => `${step.from ?? "—"} → ${step.to}`).join(", ") || "placed"}`,
+                    )
+                    .join(" · ")
+                : "Nothing moved — no transition's condition holds on any track."}
             </p>
           )}
-          <OverrideForm
-            states={state.states}
-            current={record?.state ?? null}
-            onSaved={invalidate}
-            path={`${base}/state`}
-          />
+          <div className="grid gap-4 xl:grid-cols-2">
+            {tracks.map((track) => (
+              <TrackCard key={track.track} base={base} track={track} onChanged={invalidate} />
+            ))}
+          </div>
         </CardContent>
       </Card>
 
       <Card>
-        <CardHeader>
+        <CardHeader className="flex flex-row flex-wrap items-center justify-between gap-3">
           <CardTitle>History</CardTitle>
+          <Select
+            value={historyTrack}
+            onChange={(event) => setHistoryTrack(event.target.value)}
+            className="w-48"
+          >
+            <option value="all">Every track</option>
+            {tracks.map((track) => (
+              <option key={track.track} value={track.track}>
+                {track.label}
+              </option>
+            ))}
+          </Select>
         </CardHeader>
         <CardContent>
           {history.isLoading && <LoadingRow />}
@@ -198,18 +202,28 @@ export function StatePanel({
           )}
           <ol className="space-y-px">
             {history.data?.data.map((row) => (
-              <li key={row.id} className="flex flex-wrap items-center gap-3 bg-surface-2 px-3 py-2">
-                <StateBadge state={row.state} pinned={row.pinned && !row.exited_at} />
-                <span className="label">
-                  {formatDate(row.entered_at)}
-                  {row.exited_at ? ` → ${formatDate(row.exited_at)}` : " → now"}
-                </span>
-                <span className="text-[11px] text-muted-foreground">
-                  {row.source === "manual"
-                    ? "set by hand"
-                    : (row.transition?.replace(/_/g, " ") ?? row.source)}
-                  {row.previous_state && ` · from ${row.previous_state.replace(/_/g, " ")}`}
-                </span>
+              <li key={row.id} className="space-y-1 bg-surface-2 px-3 py-2">
+                <div className="flex flex-wrap items-center gap-3">
+                  {historyTrack === "all" && (
+                    <span className="label w-24 shrink-0">{labels[row.track] ?? row.track}</span>
+                  )}
+                  <StateBadge state={row.state} pinned={row.pinned && !row.exited_at} />
+                  <span className="label">
+                    {formatDate(row.entered_at)}
+                    {row.exited_at ? ` → ${formatDate(row.exited_at)}` : " → now"}
+                  </span>
+                  <span className="text-[11px] text-muted-foreground">
+                    {row.source === "manual"
+                      ? "set by hand"
+                      : (row.transition?.replace(/_/g, " ") ?? row.source)}
+                    {row.previous_state && ` · from ${row.previous_state.replace(/_/g, " ")}`}
+                  </span>
+                </div>
+                {row.reasons?.length > 0 && row.source !== "initial" && (
+                  <p className="pl-1 text-[11px] text-muted-foreground">
+                    {row.reasons.join(" · ")}
+                  </p>
+                )}
               </li>
             ))}
           </ol>
@@ -225,15 +239,95 @@ export function StatePanel({
   );
 }
 
+function TrackCard({
+  base,
+  track,
+  onChanged,
+}: {
+  base: string;
+  track: TrackState;
+  onChanged: () => void;
+}) {
+  const [showTrace, setShowTrace] = useState(false);
+  const release = useMutation({
+    mutationFn: () => api(`${base}/state/pin`, { method: "DELETE", query: { track: track.track } }),
+    onSuccess: onChanged,
+  });
+  const record = track.current;
+  return (
+    <div className="space-y-3 border border-border bg-surface px-4 py-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="label-strong">
+          {track.label}
+          {track.primary && <span className="label ml-2">primary</span>}
+        </p>
+        {record?.pinned && (
+          <Button
+            size="sm"
+            variant="outline"
+            loading={release.isPending}
+            onClick={() => release.mutate()}
+          >
+            Release pin
+          </Button>
+        )}
+      </div>
+      {record ? (
+        <>
+          <div className="flex flex-wrap items-center gap-3">
+            <StateBadge state={record.state} pinned={record.pinned} />
+            <span className="label">
+              since {formatRelative(record.entered_at)} · {record.source}
+              {record.transition && ` · ${record.transition.replace(/_/g, " ")}`}
+              {record.pinned_until && ` · pinned until ${formatDate(record.pinned_until)}`}
+            </span>
+          </div>
+          {record.reasons?.length > 0 && record.source !== "initial" && (
+            <ul className="space-y-0.5">
+              {record.reasons.map((reason) => (
+                <li key={reason} className="text-[12px] text-foreground">
+                  · {reason}
+                </li>
+              ))}
+            </ul>
+          )}
+          {record.evaluation?.leaves?.length ? (
+            <div>
+              <button className="label hover:text-accent" onClick={() => setShowTrace(!showTrace)}>
+                {showTrace ? "Hide" : "Show"} the rule trace
+              </button>
+              {showTrace && <ConditionTrace evaluation={record.evaluation} />}
+            </div>
+          ) : null}
+        </>
+      ) : (
+        <p className="text-[12px] text-muted-foreground">
+          Not placed yet — the next processed event, the nightly sweep or Re-evaluate will place
+          them.
+        </p>
+      )}
+      <OverrideForm
+        states={track.states}
+        current={record?.state ?? null}
+        onSaved={onChanged}
+        path={`${base}/state`}
+        track={track.track}
+      />
+    </div>
+  );
+}
+
 function OverrideForm({
   states,
   current,
   path,
+  track,
   onSaved,
 }: {
   states: string[];
   current: string | null;
   path: string;
+  track: string;
   onSaved: () => void;
 }) {
   const [target, setTarget] = useState(current ?? states[0] ?? "");
@@ -245,6 +339,7 @@ function OverrideForm({
         method: "PUT",
         body: {
           state: target,
+          track,
           pin: true,
           pin_days: pinDays ? Number(pinDays) : null,
           note: note || null,
@@ -257,16 +352,16 @@ function OverrideForm({
   });
 
   return (
-    <div className="border-t border-border pt-4">
+    <div className="border-t border-border pt-3">
       <p className="label mb-2">Set by hand</p>
       <div className="flex flex-wrap items-end gap-2">
         <div>
-          <Label htmlFor="state-target">State</Label>
+          <Label htmlFor={`state-target-${track}`}>State</Label>
           <Select
-            id="state-target"
+            id={`state-target-${track}`}
             value={target}
             onChange={(event) => setTarget(event.target.value)}
-            className="w-40"
+            className="w-36"
           >
             {states.map((state) => (
               <option key={state} value={state}>
@@ -276,29 +371,29 @@ function OverrideForm({
           </Select>
         </div>
         <div>
-          <Label htmlFor="state-pin">Pin for (days)</Label>
+          <Label htmlFor={`state-pin-${track}`}>Pin (days)</Label>
           <Input
-            id="state-pin"
+            id={`state-pin-${track}`}
             type="number"
             min={1}
             max={365}
             placeholder="until released"
             value={pinDays}
             onChange={(event) => setPinDays(event.target.value)}
-            className="w-36"
+            className="w-28"
           />
         </div>
-        <div className="min-w-[14rem] flex-1">
-          <Label htmlFor="state-note">Why</Label>
+        <div className="min-w-[10rem] flex-1">
+          <Label htmlFor={`state-note-${track}`}>Why</Label>
           <Input
-            id="state-note"
+            id={`state-note-${track}`}
             value={note}
             onChange={(event) => setNote(event.target.value)}
             placeholder="Spoke to them — they are fine."
           />
         </div>
         <Button size="sm" loading={save.isPending} onClick={() => save.mutate()}>
-          Set state
+          Set
         </Button>
       </div>
       {save.error && <ErrorState error={save.error} />}

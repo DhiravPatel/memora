@@ -10,11 +10,19 @@ from sqlalchemy import func, or_, select, text, update
 
 from common.ids import new_id
 from common.time import utcnow
-from database.models import AgentApproval, AgentCheck, AgentProfile, ApiKey
+from database.models import AgentAction, AgentApproval, AgentCheck, AgentProfile, ApiKey
 from database.repositories.base import BaseRepository
 
 PENDING, APPROVED, REJECTED, EXPIRED, USED = "pending", "approved", "rejected", "expired", "used"
 OPEN_STATUSES = (PENDING, APPROVED)
+
+# An action's life (§26 4.5).
+ACTION_ALLOWED, ACTION_PENDING, ACTION_DENIED = "allowed", "pending_approval", "denied"
+ACTION_DONE, ACTION_FAILED, ACTION_CANCELLED, ACTION_EXPIRED = "done", "failed", "cancelled", "expired"
+# What counts as the customer's action history: cleared to go ahead, or reported done. An
+# allowed action nobody reported back on counts — for a limit, assuming it happened is the
+# safe side.
+ACTION_TAKEN = (ACTION_ALLOWED, ACTION_DONE)
 
 
 class AgentProfileRepository(BaseRepository):
@@ -309,3 +317,130 @@ class AgentApprovalRepository(BaseRepository):
             .execution_options(synchronize_session=False)
         )
         return list(result.scalars())
+
+
+class AgentActionRepository(BaseRepository):
+    async def create(
+        self,
+        *,
+        project_id: str,
+        customer_id: str,
+        action: str,
+        request: dict[str, Any],
+        amount: float | None,
+        status: str,
+        decision: str,
+        check_id: str | None,
+        approval_id: str | None,
+        agent: str | None,
+        api_key_id: str | None,
+        session_id: str | None,
+        idempotency_key: str | None,
+    ) -> AgentAction:
+        now = utcnow()
+        record = AgentAction(
+            id=new_id("act"),
+            project_id=project_id,
+            customer_id=customer_id,
+            action=action,
+            request=request,
+            amount=amount,
+            status=status,
+            decision=decision,
+            check_id=check_id,
+            approval_id=approval_id,
+            agent=agent,
+            api_key_id=api_key_id,
+            session_id=session_id,
+            idempotency_key=idempotency_key,
+            created_at=now,
+            updated_at=now,
+        )
+        self.session.add(record)
+        await self.session.flush()
+        return record
+
+    async def get(self, action_id: str, project_id: str, *, for_update: bool = False) -> AgentAction | None:
+        statement = select(AgentAction).where(AgentAction.id == action_id, AgentAction.project_id == project_id)
+        if for_update:
+            statement = statement.with_for_update()
+        result = await self.session.execute(statement)
+        return result.scalar_one_or_none()
+
+    async def by_idempotency_key(self, project_id: str, key: str) -> AgentAction | None:
+        result = await self.session.execute(
+            select(AgentAction).where(AgentAction.project_id == project_id, AgentAction.idempotency_key == key)
+        )
+        return result.scalar_one_or_none()
+
+    async def set_status(self, record: AgentAction, status: str, **fields: Any) -> AgentAction:
+        record.status = status
+        for name, value in fields.items():
+            setattr(record, name, value)
+        record.updated_at = utcnow()
+        await self.session.flush()
+        return record
+
+    async def list(
+        self,
+        *,
+        project_id: str,
+        customer_id: str | None = None,
+        action: str | None = None,
+        status: str | None = None,
+        agent: str | None = None,
+        since: datetime | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[list[AgentAction], int]:
+        conditions = [AgentAction.project_id == project_id]
+        if customer_id:
+            conditions.append(AgentAction.customer_id == customer_id)
+        if action:
+            conditions.append(AgentAction.action == action)
+        if status:
+            conditions.append(AgentAction.status == status)
+        if agent:
+            conditions.append(AgentAction.agent == agent)
+        if since:
+            conditions.append(AgentAction.created_at >= since)
+        total = await self.session.scalar(select(func.count()).select_from(AgentAction).where(*conditions))
+        result = await self.session.execute(
+            select(AgentAction).where(*conditions).order_by(AgentAction.created_at.desc()).limit(limit).offset(offset)
+        )
+        return list(result.scalars()), int(total or 0)
+
+    async def history(
+        self, *, project_id: str, customer_id: str, since: datetime
+    ) -> list[tuple[str, datetime, float | None]]:
+        """(action, when, amount) for everything taken since ``since`` — the raw material
+        of the customer's ``actions.*`` facts."""
+        result = await self.session.execute(
+            select(AgentAction.action, AgentAction.created_at, AgentAction.amount).where(
+                AgentAction.project_id == project_id,
+                AgentAction.customer_id == customer_id,
+                AgentAction.status.in_(ACTION_TAKEN),
+                AgentAction.created_at >= since,
+            )
+        )
+        return [(str(action), created_at, amount) for action, created_at, amount in result]
+
+    async def pending_for_approvals(self, project_id: str, approval_ids: Sequence[str]) -> list[AgentAction]:
+        if not approval_ids:
+            return []
+        result = await self.session.execute(
+            select(AgentAction).where(
+                AgentAction.project_id == project_id,
+                AgentAction.approval_id.in_(list(approval_ids)),
+                AgentAction.status == ACTION_PENDING,
+            )
+        )
+        return list(result.scalars())
+
+    async def counts_by_status(self, project_id: str, *, since: datetime) -> dict[str, int]:
+        result = await self.session.execute(
+            select(AgentAction.status, func.count())
+            .where(AgentAction.project_id == project_id, AgentAction.created_at >= since)
+            .group_by(AgentAction.status)
+        )
+        return {str(status): int(count) for status, count in result}

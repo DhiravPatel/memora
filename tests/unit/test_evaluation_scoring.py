@@ -94,3 +94,85 @@ def test_a_regression_is_flagged_even_when_the_average_rises():
 
 def test_no_baseline_means_no_comparison():
     assert compare({"recall": {}}, None) is None
+
+
+# ------------------------------------------------------------ extraction (§26 4.3)
+
+from memory_engine.evaluation import (  # noqa: E402
+    Expectation,
+    ExtractionSpec,
+    aggregate_extraction,
+    passing,
+    score_extraction,
+)
+
+PLANNED = [
+    {"content": "The Shopify sync fails during checkout.", "type": "problem", "action": "create",
+     "sensitivity": "normal", "entities": ["Shopify"]},
+    {"content": "The customer prefers WhatsApp.", "type": "fact", "action": "create", "sensitivity": "normal", "entities": []},
+]
+
+
+def test_an_extraction_case_passes_when_every_expectation_holds():
+    spec = ExtractionSpec(
+        "c1",
+        "support message",
+        expect=[Expectation(type="problem", contains="shopify sync fail", entity="shopify", action="create")],
+        forbid=[Expectation(type="intent")],
+    )
+    result = score_extraction(spec, PLANNED)
+    assert result.passed
+    assert result.expected[0]["matched"] and result.expected[0]["memory_index"] == 0
+    assert result.unexpected == [1]  # reported, not failed: the case did not forbid it
+
+
+def test_a_near_miss_says_what_was_wrong():
+    spec = ExtractionSpec("c2", "preference", expect=[Expectation(type="preference", contains="prefers whatsapp")])
+    result = score_extraction(spec, PLANNED)
+    assert not result.passed
+    assert result.expected[0]["near_miss"] == "typed fact, expected preference"
+    missing = score_extraction(ExtractionSpec("c3", "x", expect=[Expectation(contains="refund")]), PLANNED)
+    assert missing.expected[0]["near_miss"] == "nothing said it"
+    stopped = score_extraction(ExtractionSpec("c4", "x", expect=[Expectation(contains="refund")]), [], stop_reason="Below the threshold.")
+    assert stopped.expected[0]["near_miss"] == "Below the threshold."
+
+
+def test_forbidden_memories_and_expecting_nothing_are_false_memories():
+    forbidden = score_extraction(ExtractionSpec("c5", "news", forbid=[Expectation(type="problem")]), PLANNED)
+    assert not forbidden.passed and forbidden.false_memory and forbidden.forbidden[0]["violated_by"] == [0]
+    quiet = score_extraction(ExtractionSpec("c6", "page view", expect_nothing=True), [])
+    assert quiet.passed and not quiet.false_memory
+    noisy = score_extraction(ExtractionSpec("c7", "page view", expect_nothing=True), PLANNED[:1])
+    assert not noisy.passed and noisy.false_memory
+
+
+def test_extraction_metrics_separate_recall_from_type_errors():
+    results = [
+        score_extraction(ExtractionSpec("a", "a", expect=[Expectation(type="problem", contains="shopify sync")]), PLANNED),
+        score_extraction(ExtractionSpec("b", "b", expect=[Expectation(type="preference", contains="prefers whatsapp")]), PLANNED),
+        score_extraction(ExtractionSpec("c", "c", expect=[Expectation(type="problem", contains="double charge")]), PLANNED),
+        score_extraction(ExtractionSpec("d", "d", forbid=[Expectation(type="problem")]), PLANNED),
+    ]
+    metrics = aggregate_extraction(results)
+    assert metrics["accuracy"] == 0.25
+    assert metrics["expected_recall"] == round(1 / 3, 4)
+    # Of the two statements that were extracted at all, one got its type wrong; the third
+    # was never extracted, which is a recall miss, not a type error.
+    assert metrics["type_accuracy"] == 0.5
+    assert metrics["false_memory_rate"] == 0.25
+    assert metrics["failing"] == ["b", "c", "d"]
+
+
+def test_pass_fail_per_case_for_a_regression():
+    extraction = score_extraction(ExtractionSpec("x1", "x", expect=[Expectation(contains="shopify")]), PLANNED).as_dict()
+    retrieval = score_case(CaseSpec("r1", "billing?", expected_ids=["mem_c"]), RESULTS).as_dict()
+    missed = score_case(CaseSpec("r2", "refunds?", expected_ids=["mem_z"]), RESULTS).as_dict()
+    assert passing([extraction, retrieval, missed]) == {"x1": True, "r1": True, "r2": False}
+
+
+def test_compare_flags_an_extraction_case_that_stopped_passing():
+    before = {"recall": {}, "hit": {}, "misses": [], "extraction": {"accuracy": 1.0, "false_memory_rate": 0.0, "failing": []}}
+    after = {"recall": {}, "hit": {}, "misses": [], "extraction": {"accuracy": 0.5, "false_memory_rate": 0.5, "failing": ["x1"]}}
+    deltas = compare(after, before)
+    assert deltas["regressed"] is True
+    assert deltas["extraction"] == {"accuracy": -0.5, "false_memory_rate": 0.5, "newly_failing": ["x1"], "newly_passing": []}

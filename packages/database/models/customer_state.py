@@ -65,10 +65,11 @@ class CustomerState(Base):
     __tablename__ = "customer_states"
     __table_args__ = (
         Index("ix_customer_states_customer_entered", "customer_id", "entered_at"),
-        # The current state of every customer in a project, for cohort-style reads.
+        # The current state of every customer in a project, per track, for cohort-style reads.
         Index(
             "ix_customer_states_project_current",
             "project_id",
+            "track",
             "state",
             postgresql_where=text("exited_at IS NULL"),
         ),
@@ -81,6 +82,8 @@ class CustomerState(Base):
     customer_id: Mapped[str] = mapped_column(
         String(ID_LENGTH), ForeignKey("customers.id", ondelete="CASCADE"), nullable=False
     )
+    # Which lifecycle track this stay belongs to (§26 4.2). The primary is "lifecycle".
+    track: Mapped[str] = mapped_column(String(40), nullable=False, default="lifecycle", server_default="lifecycle")
     state: Mapped[str] = mapped_column(String(64), nullable=False)
     previous_state: Mapped[str | None] = mapped_column(String(64))
     entered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
