@@ -1,12 +1,15 @@
 "use client";
 
+import { useQuery } from "@tanstack/react-query";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
 import { Button } from "@/components/ui/button";
 import { Select } from "@/components/ui/input";
 import { useRequireSession } from "@/hooks/use-session";
+import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
+import type { AgentActivity } from "@/lib/types";
 
 const NAV = [
   { href: "/overview", label: "Overview", group: "Signal" },
@@ -18,7 +21,8 @@ const NAV = [
   { href: "/goals", label: "Goals", group: "Memory" },
   { href: "/events", label: "Events", group: "Pipeline" },
   { href: "/playground", label: "Playground", group: "Pipeline" },
-  { href: "/agents", label: "Agent Sessions", group: "Pipeline" },
+  { href: "/quality", label: "Quality", group: "Pipeline" },
+  { href: "/agents", label: "Agents", group: "Pipeline" },
   { href: "/integrations", label: "Integrations", group: "System" },
   { href: "/webhooks", label: "Webhooks", group: "System" },
   { href: "/keys", label: "API Keys", group: "System" },
@@ -32,6 +36,15 @@ const GROUPS = ["Signal", "Memory", "Pipeline", "System"];
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const { user, projects, projectId, selectProject, logout } = useRequireSession();
+  // Requests waiting for a person, on every page: an agent is blocked until one decides.
+  const activity = useQuery({
+    queryKey: ["agent-activity", projectId],
+    queryFn: () =>
+      api<AgentActivity>(`/v1/projects/${projectId}/agent/activity`, { query: { days: 7 } }),
+    enabled: Boolean(projectId),
+    refetchInterval: 60_000,
+  });
+  const pendingApprovals = activity.data?.approvals.pending ?? 0;
 
   return (
     <div className="flex min-h-screen">
@@ -71,8 +84,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
               <p className="label px-3 pb-2">{group}</p>
               <div className="space-y-0.5">
                 {NAV.filter((item) => item.group === group).map((item) => {
-                  const active =
-                    pathname === item.href || pathname.startsWith(`${item.href}/`);
+                  const active = pathname === item.href || pathname.startsWith(`${item.href}/`);
                   return (
                     <Link
                       key={item.href}
@@ -93,6 +105,14 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                         />
                       )}
                       {item.label}
+                      {item.href === "/agents" && pendingApprovals > 0 && (
+                        <span
+                          className="ml-auto rounded-sm bg-warning/15 px-1.5 font-mono text-[10px] text-warning"
+                          title="Approval requests waiting for a person"
+                        >
+                          {pendingApprovals}
+                        </span>
+                      )}
                     </Link>
                   );
                 })}

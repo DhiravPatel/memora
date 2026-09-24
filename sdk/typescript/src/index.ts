@@ -21,7 +21,10 @@ import { Agent } from "./resources/agent.js";
 import { Customers } from "./resources/customers.js";
 import { Events } from "./resources/events.js";
 import { Foresight } from "./resources/foresight.js";
+import { Guardrails, Profiles, Runs } from "./resources/guardrails.js";
 import { MemoryResource } from "./resources/memory.js";
+import { Quality } from "./resources/quality.js";
+import { State } from "./resources/state.js";
 import type {
   ClientOptions,
   ContextResult,
@@ -40,6 +43,16 @@ export class MemoryClient {
   readonly foresight: Foresight;
   /** Sessions that give an agent memory between conversations. */
   readonly agent: Agent;
+  /** Facts, the condition language, the lifecycle and snapshots of what was known. */
+  readonly state: State;
+  /** The quality report and retrieval evaluation. */
+  readonly quality: Quality;
+  /** Ask before acting: checks, approvals. */
+  readonly guardrails: Guardrails;
+  /** Every answer and briefing an agent asked for, and why it said what it said. */
+  readonly runs: Runs;
+  /** Agent profiles: which memory an agent may read and which actions it may take. */
+  readonly profiles: Profiles;
 
   constructor(options: ClientOptions) {
     const http = new HttpClient(options);
@@ -49,6 +62,23 @@ export class MemoryClient {
     this.admin = new Admin(http);
     this.foresight = new Foresight(http);
     this.agent = new Agent(http);
+    this.state = new State(http);
+    this.quality = new Quality(http);
+    this.guardrails = new Guardrails(http);
+    this.runs = new Runs(http);
+    this.profiles = new Profiles(http);
+  }
+
+  /** Shorthand for `guardrails.check`. */
+  checkAction(input: {
+    customerId: string;
+    action: string;
+    request?: Record<string, unknown>;
+    approvalId?: string;
+    sessionId?: string;
+    dryRun?: boolean;
+  }) {
+    return this.guardrails.check(input);
   }
 
   /** Shorthand for `admin.health`. */
@@ -62,6 +92,7 @@ export class MemoryClient {
     query: string;
     limit?: number;
     includeTrace?: boolean;
+    sessionId?: string;
   }): Promise<QueryResult> {
     return this.memories.query(input);
   }
@@ -84,12 +115,21 @@ export class MemoryClient {
     limit?: number;
     tokenBudget?: number;
     format?: "json" | "text";
+    sessionId?: string;
   }): Promise<ContextResult> {
     return this.memories.context(input);
   }
 }
 
-export { MemoryApiError, MemoryConfigError, MemoryTimeoutError } from "./errors.js";
+export {
+  ActionDeniedError,
+  ApprovalRequiredError,
+  MemoryApiError,
+  MemoryConfigError,
+  MemoryTimeoutError,
+} from "./errors.js";
+export { MemoryAgent } from "./agent-loop.js";
+export type { MemoryAgentOptions, TurnContext } from "./agent-loop.js";
 export {
   DELIVERY_HEADER,
   EVENT_HEADER,

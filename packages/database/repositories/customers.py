@@ -23,6 +23,15 @@ class CustomerRepository(BaseRepository):
         )
         return result.scalar_one_or_none()
 
+    async def get_many(self, customer_ids: list[str], project_id: str) -> list[Customer]:
+        """Several customers by id, in one query, scoped to the project."""
+        if not customer_ids:
+            return []
+        result = await self.session.execute(
+            select(Customer).where(Customer.project_id == project_id, Customer.id.in_(list(customer_ids)))
+        )
+        return list(result.scalars())
+
     async def get_by_external_id(self, external_id: str, project_id: str) -> Customer | None:
         result = await self.session.execute(
             select(Customer).where(

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.services.customer_state_service import CustomerStateService
 from common.enums import EventStatus
 from common.logging import get_logger
 from database.models import Customer, Event, Project
@@ -90,6 +91,7 @@ async def process_event(ctx: dict[str, Any], event_id: str) -> dict[str, Any]:
         health_band = None
         goals_moved = 0
         trajectory = None
+        lifecycle_state = None
         if result.processed:
             customer = await CustomerRepository(session).get(event.customer_id, project.id)
             if customer is not None:
@@ -116,10 +118,24 @@ async def process_event(ctx: dict[str, Any], event_id: str) -> dict[str, Any]:
                 goals_moved = len(refresh.all)
                 notifications += await _notify_goals(session, project, customer, refresh)
 
-                trajectory, raised = await _refresh_signals(
+                trajectory, raised, report = await _refresh_signals(
                     session, engine, project, customer, change.score.score
                 )
                 notifications += raised
+
+                # Last, because it reads everything above: the fact document, the
+                # lifecycle move it implies, and a snapshot if anything material changed.
+                # Health and the forecast are handed over rather than recomputed.
+                refreshed = await CustomerStateService(session).refresh(
+                    project=project,
+                    customer=customer,
+                    reason="event",
+                    event_id=event.id,
+                    health=change.score,
+                    report=report,
+                )
+                lifecycle_state = refreshed.state
+                notifications += len(refreshed.steps)
 
                 # A rolling summary that no longer reflects the memory it summarises is
                 # worse than none, so drift is checked here rather than waiting for the
@@ -138,6 +154,7 @@ async def process_event(ctx: dict[str, Any], event_id: str) -> dict[str, Any]:
             "health_band": health_band,
             "goals_moved": goals_moved,
             "trajectory": trajectory,
+            "lifecycle_state": lifecycle_state,
             "notifications": notifications,
         }
 
@@ -202,7 +219,7 @@ async def _refresh_signals(
     project: Project,
     customer: Customer,
     health_score: float,
-) -> tuple[str | None, int]:
+) -> tuple[str | None, int, Any]:
     """Recompute the forecast, store today's reading, and alert on genuinely new risks.
 
     The previously stored snapshot is what makes this quiet: a risk that was already
@@ -241,4 +258,4 @@ async def _refresh_signals(
             strength=signal.strength,
             trajectory=str(report.trajectory),
         )
-    return str(report.trajectory), emitted
+    return str(report.trajectory), emitted, report

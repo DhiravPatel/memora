@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Query
 
-from app.core.dependencies import ApiProject, DBSession, require_scope
+from app.core.dependencies import ApiProject, Clearance, DBSession, require_scope
 from app.schemas.common import Page
 from app.schemas.goals import GoalOut, GoalSummaryOut, GoalUpdate
 from app.services.goal_service import GoalService
@@ -20,12 +20,17 @@ router = APIRouter(prefix="/v1/goals", tags=["goals"])
 async def list_goals(
     project: ApiProject,
     session: DBSession,
+    cleared: Clearance,
     status: GoalStatus | None = None,
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
 ) -> Page[GoalOut]:
-    """Every tracked goal in the project, live ones first."""
-    goals, total = await GoalService(session).list_for_project(
+    """Every tracked goal in the project, live ones first.
+
+    A goal born from a memory this key may not read is not listed: its statement is that
+    memory's words.
+    """
+    goals, total = await GoalService(session, cleared=cleared).list_for_project(
         project=project, status=status, limit=limit, offset=offset
     )
     return Page[GoalOut](
@@ -40,20 +45,22 @@ async def goal_summary(project: ApiProject, session: DBSession) -> GoalSummaryOu
 
 
 @router.get("/{goal_id}", response_model=GoalOut)
-async def get_goal(goal_id: str, project: ApiProject, session: DBSession) -> GoalOut:
-    return goal_out(await GoalService(session).get(project=project, goal_id=goal_id))
+async def get_goal(
+    goal_id: str, project: ApiProject, session: DBSession, cleared: Clearance
+) -> GoalOut:
+    return goal_out(await GoalService(session, cleared=cleared).get(project=project, goal_id=goal_id))
 
 
 @router.patch("/{goal_id}", response_model=GoalOut, dependencies=WRITE)
 async def update_goal(
-    goal_id: str, payload: GoalUpdate, project: ApiProject, session: DBSession
+    goal_id: str, payload: GoalUpdate, project: ApiProject, session: DBSession, cleared: Clearance
 ) -> GoalOut:
     """Set a goal's status by hand.
 
     The tracker stops touching an overridden goal, so a correction sticks rather than
     being undone by the next event.
     """
-    goal = await GoalService(session).override(
+    goal = await GoalService(session, cleared=cleared).override(
         project=project,
         goal_id=goal_id,
         status=GoalStatus(payload.status),

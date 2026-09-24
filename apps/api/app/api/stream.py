@@ -30,7 +30,8 @@ from typing import Any
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import StreamingResponse
 
-from app.core.dependencies import UserProject
+from app.core.dependencies import Clearance, UserProject
+from app.services.reader import Reader
 from app.services.serializers import event_out
 from common.logging import get_logger
 from common.time import utcnow
@@ -60,6 +61,7 @@ def _frame(event: str, data: Any) -> str:
 async def stream_events(
     request: Request,
     project: UserProject,
+    cleared: Clearance,
     since_seconds: int = Query(
         default=30, ge=0, le=3600, description="Replay this many seconds of history first"
     ),
@@ -85,7 +87,9 @@ async def stream_events(
 
                 sink: list[dict[str, Any]] = []
                 async with session_scope() as session:
-                    cursor = await _drain(EventRepository(session), project_id, cursor, sink)
+                    cursor = await _drain(
+                        EventRepository(session), project_id, cursor, sink, Reader(session, cleared=cleared)
+                    )
                 for payload in sink:
                     yield _frame("event", payload)
 
@@ -114,14 +118,19 @@ async def stream_events(
 
 
 async def _drain(
-    events: EventRepository, project_id: str, cursor: datetime, sink: list[dict[str, Any]]
+    events: EventRepository,
+    project_id: str,
+    cursor: datetime,
+    sink: list[dict[str, Any]],
+    reader: Reader,
 ) -> datetime:
     """Collect everything newer than the cursor, and return the new cursor."""
     rows = await events.changed_since(project_id=project_id, since=cursor, limit=BATCH_LIMIT)
+    mask = await reader.event_mask(project_id, rows)
     for event in rows:
         sink.append(
             {
-                **event_out(event).model_dump(mode="json"),
+                **event_out(event, mask).model_dump(mode="json"),
                 # What moved: a new arrival, or the worker finishing with it.
                 "change": "processed" if event.processed_at else "created",
             }

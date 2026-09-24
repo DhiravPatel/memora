@@ -22,8 +22,12 @@ import { useSession } from "@/hooks/use-session";
 import { api } from "@/lib/api";
 import { formatDate } from "@/lib/format";
 import { cn } from "@/lib/utils";
+import { GuardrailsEditor } from "@/components/settings/guardrails-editor";
+import { LifecycleEditor } from "@/components/settings/lifecycle-editor";
 import type {
+  GuardrailSettings,
   LearnedTerm,
+  LifecycleDefinition,
   ProjectSettings,
   RestrictionRule,
   SettingField,
@@ -450,6 +454,45 @@ function Control({
           unit={field.unit}
           onChange={onChange}
         />
+      </Field>
+    );
+  }
+
+  if (field.kind === "lifecycle") {
+    return (
+      <Field
+        label={field.label}
+        help={field.help}
+        changed={changed}
+        hint={
+          <LifecycleEditor
+            value={(value ?? { states: [], initial: "", transitions: [] }) as LifecycleDefinition}
+            onChange={onChange}
+          />
+        }
+      >
+        {reset}
+      </Field>
+    );
+  }
+
+  if (field.kind === "guardrails") {
+    return (
+      <Field
+        label={field.label}
+        help={field.help}
+        changed={changed}
+        hint={
+          <GuardrailsEditor
+            value={
+              (value ?? { disabled: [], rules: [], approval_ttl_hours: 24 }) as GuardrailSettings
+            }
+            builtins={field.keys}
+            onChange={onChange}
+          />
+        }
+      >
+        {reset}
       </Field>
     );
   }

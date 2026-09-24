@@ -14,13 +14,15 @@ forecast.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from dataclasses import dataclass, field
+from collections.abc import Iterable, Sequence
+from collections.abc import Set as AbstractSet
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any
 
 from common.enums import MemoryType, SignalDirection, Trajectory
 from common.time import days_between, ensure_utc, utcnow
+from memory_engine.policy import WITHHELD
 from nlp.answer import MemoryView
 from nlp.tokenize import content_words, lemmatize
 
@@ -116,6 +118,21 @@ class Signal:
     rationale: str
     memory_ids: tuple[str, ...] = ()
     observed: float = 0.0
+    # (id, words) for a goal or memory quoted in the rationale — see :func:`mask_quotes`.
+    quotes: tuple[tuple[str, str], ...] = ()
+
+    def cited_ids(self) -> set[str]:
+        return {*self.memory_ids, *(ident for ident, _ in self.quotes)}
+
+    def redacted(self, hidden: AbstractSet[str]) -> Signal:
+        if not hidden or not (self.cited_ids() & hidden):
+            return self
+        return replace(
+            self,
+            rationale=mask_quotes(self.rationale, self.quotes, hidden),
+            memory_ids=tuple(ident for ident in self.memory_ids if ident not in hidden),
+            quotes=tuple(quote for quote in self.quotes if quote[0] not in hidden),
+        )
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -152,6 +169,16 @@ class SignalReport:
     def headline(self) -> str:
         return headline(self)
 
+    def cited_ids(self) -> set[str]:
+        return {ident for signal in self.signals for ident in signal.cited_ids()}
+
+    def redacted(self, hidden: AbstractSet[str]) -> SignalReport:
+        """The report as a reader who may not see ``hidden`` sees it. The numbers stay —
+        they were computed over everything, like health — and quoted words go."""
+        if not hidden or not (self.cited_ids() & hidden):
+            return self
+        return replace(self, signals=[signal.redacted(hidden) for signal in self.signals])
+
     def as_dict(self) -> dict[str, Any]:
         return {
             "trajectory": str(self.trajectory),
@@ -163,6 +190,14 @@ class SignalReport:
             "measurements": {key: round(value, 3) for key, value in self.measurements.items()},
             "computed_at": self.computed_at.isoformat(),
         }
+
+
+def mask_quotes(text: str, quotes: Iterable[tuple[str, str]], hidden: AbstractSet[str]) -> str:
+    """``text`` with the words quoted from each hidden id replaced by a marker."""
+    for ident, words in quotes:
+        if ident in hidden and words:
+            text = text.replace(words, WITHHELD)
+    return text
 
 
 def headline(report: SignalReport) -> str:
@@ -221,6 +256,7 @@ def compute(
         rationale: str,
         memory_ids: Sequence[str] = (),
         observed: float = 0.0,
+        quotes: tuple[tuple[str, str], ...] = (),
     ) -> None:
         if strength <= 0:
             return
@@ -234,6 +270,7 @@ def compute(
                 rationale=rationale,
                 memory_ids=tuple(memory_ids),
                 observed=observed,
+                quotes=quotes,
             )
         )
 
@@ -447,6 +484,7 @@ def compute(
             45,
             f"no progress on “{_clip(stalled[0].statement)}” for {int(oldest)} days",
             observed=len(stalled),
+            quotes=((stalled[0].id, _clip(stalled[0].statement)),),
         )
 
     achieved = [goal for goal in goals if goal.status == "achieved"]
@@ -459,6 +497,7 @@ def compute(
             30,
             f"reached the goal “{_clip(achieved[0].statement)}”",
             observed=len(achieved),
+            quotes=((achieved[0].id, _clip(achieved[0].statement)),),
         )
 
     # ------------------------------------------------------------ health deltas

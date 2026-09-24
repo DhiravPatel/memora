@@ -13,6 +13,7 @@ from datetime import date
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.services.reader import Reader
 from common.enums import Trajectory
 from common.time import days_ago, ensure_utc
 from database.models import Customer, Project, SignalSnapshot
@@ -83,8 +84,12 @@ class Portfolio:
 
 
 class SignalService:
-    def __init__(self, session: AsyncSession) -> None:
+    def __init__(self, session: AsyncSession, *, cleared: bool | None = None) -> None:
+        """Pass ``cleared`` for a caller-facing service. The forecast is still computed over
+        everything — like health, it is a statement about the customer — but the words it
+        quotes from memories or goals the caller may not see are withheld (§26 3.1)."""
         self.session = session
+        self.reader = None if cleared is None else Reader(session, cleared=cleared)
         self.customers = CustomerRepository(session)
         self.memories = MemoryRepository(session)
         self.events = EventRepository(session)
@@ -102,6 +107,8 @@ class SignalService:
                 customer_id=customer.id,
                 since=days_ago(SERIES_DAYS).date(),
             )
+        if self.reader is not None:
+            report = await self.reader.report(project.id, report)
         return CustomerSignals(
             customer_id=customer.id,
             external_id=customer.external_id,
@@ -128,6 +135,9 @@ class SignalService:
             health_score=health.score,
             customer_name=customer.name,
         )
+        if self.reader is not None:
+            actions = await self.reader.recommendations(project.id, actions)
+            report = await self.reader.report(project.id, report)
         return actions, report
 
     async def portfolio(
@@ -219,7 +229,12 @@ class SignalService:
             results = [
                 item for item in results if str(item.report.trajectory) in trajectories
             ]
-        return Portfolio(customers=results[:limit], counts=counts)
+        results = results[:limit]
+        if self.reader is not None:
+            shaped = await self.reader.reports(project.id, [item.report for item in results])
+            for item, report in zip(results, shaped, strict=True):
+                item.report = report
+        return Portfolio(customers=results, counts=counts)
 
     async def record_snapshot(self, *, project: Project, customer: Customer) -> SignalReport:
         """Compute and store today's reading. Used by the nightly job."""

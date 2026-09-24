@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services.health_service import HealthService
 from app.services.memory_service import MemoryService
+from app.services.reader import Reader
 from app.services.serializers import (
     customer_out,
     entity_out,
@@ -61,7 +62,7 @@ class ExportService:
         self.entities = EntityRepository(session)
         self.relationships = RelationshipRepository(session)
         self.links = MemoryLinkRepository(session)
-        self.goals = GoalRepository(session)
+        self.goals = GoalRepository(session, cleared=cleared)
         self.sessions = AgentSessionRepository(session)
         self.audit = AuditRepository(session)
 
@@ -101,17 +102,32 @@ class ExportService:
             project_id=project.id, entity_ids=list(referenced_entity_ids)
         )
         links = await self.links.for_customer(project_id=project.id, customer_id=customer.id)
+        if not self.memories.sees_everything:
+            # A link names both of its memories; one the reader may not see drops it.
+            hidden = await self.memories.hidden_among(
+                project.id, {i for link in links for i in (link.source_memory_id, link.target_memory_id)}
+            )
+            links = [
+                link
+                for link in links
+                if link.source_memory_id not in hidden and link.target_memory_id not in hidden
+            ]
         goals, _ = await self.goals.list(
             project_id=project.id, customer_id=customer.id, limit=MAX_GOALS
         )
         sessions, _ = await self.sessions.list(
             project_id=project.id, customer_id=customer.id, limit=MAX_SESSIONS
         )
+        reader = Reader(self.session, cleared=self.cleared)
+        event_mask = await reader.event_mask(project.id, events)
+        session_mask = await reader.session_mask(project.id, sessions)
         health = await HealthService(self.session).for_customer(project=project, customer=customer)
-        signals = await SignalService(self.session).for_customer(
+        signals = await SignalService(self.session, cleared=self.cleared).for_customer(
             project=project, customer=customer
         )
-        graph = await MemoryService(self.session).graph(project=project, customer=customer)
+        graph = await MemoryService(self.session, cleared=self.cleared).graph(
+            project=project, customer=customer
+        )
 
         await self.audit.record(
             action=AuditAction.API_ACCESS,
@@ -140,7 +156,7 @@ class ExportService:
                 "goals": len(goals),
                 "agent_sessions": len(sessions),
             },
-            "events": [event_out(event).model_dump(mode="json") for event in events],
+            "events": [event_out(event, event_mask).model_dump(mode="json") for event in events],
             "memories": memory_payloads,
             "entities": [entity_out(entity).model_dump(mode="json") for entity in entities],
             "relationships": [
@@ -161,7 +177,7 @@ class ExportService:
             "health": health.health.as_dict(),
             "goals": [goal_out(goal).model_dump(mode="json") for goal in goals],
             "agent_sessions": [
-                session_out(item).model_dump(mode="json") for item in sessions
+                session_out(item, mask=session_mask).model_dump(mode="json") for item in sessions
             ],
             "signals": signals.as_dict(),
         }

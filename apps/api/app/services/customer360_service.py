@@ -32,6 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.services.goal_service import GoalService
 from app.services.health_service import HealthService
 from app.services.memory_service import MemoryService
+from app.services.reader import Reader
 from app.services.signal_service import SignalService
 from common.enums import AgentSessionStatus, MemoryType
 from common.time import utcnow
@@ -42,6 +43,7 @@ from database.repositories import (
     MemoryRepository,
 )
 from memory_engine import MemoryEngine
+from memory_engine.policy import WITHHELD
 
 # Per section, and deliberately modest. Raising these is a decision about somebody's
 # context window, so it is made here rather than by a query parameter nobody sets.
@@ -97,8 +99,8 @@ class Customer360Service:
         self.events = EventRepository(session)
         self.sessions = AgentSessionRepository(session)
         self.health = HealthService(session)
-        self.signals = SignalService(session)
-        self.goals = GoalService(session)
+        self.signals = SignalService(session, cleared=cleared)
+        self.goals = GoalService(session, cleared=cleared)
 
     async def build(
         self, *, project: Project, customer: Customer, include: frozenset[str] | None = None
@@ -210,12 +212,15 @@ class Customer360Service:
             sessions, _ = await self.sessions.list(
                 project_id=project.id, customer_id=customer.id, limit=CONVERSATIONS
             )
+            mask = await Reader(self.session, cleared=self.cleared).session_mask(project.id, sessions)
             view.sections["recent_conversations"] = [
                 {
                     "id": item.id,
                     "agent": item.agent,
                     "status": str(item.status),
-                    "summary": item.summary,
+                    "summary": (
+                        WITHHELD if mask is not None and item.id in mask.summaries else item.summary
+                    ),
                     "started_at": item.started_at,
                     "closed_at": item.closed_at,
                     "turn_count": item.turn_count,

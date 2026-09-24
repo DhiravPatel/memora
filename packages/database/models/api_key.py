@@ -40,6 +40,11 @@ class ApiKey(Base, TimestampMixin):
     use_count: Mapped[int] = mapped_column(nullable=False, default=0)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # The agent profile this key acts as (§26 3.1). Bound to the key rather than chosen per
+    # request, so an agent cannot pick a more generous profile by asking for one.
+    agent_profile_id: Mapped[str | None] = mapped_column(
+        String(ID_LENGTH), ForeignKey("agent_profiles.id", ondelete="SET NULL")
+    )
     meta: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, nullable=False, default=dict)
 
     @property

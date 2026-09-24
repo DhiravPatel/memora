@@ -143,6 +143,8 @@ class AgentService:
             customer=customer,
             task=f"brief {agent} before it replies",
             token_budget=token_budget,
+            session_id=session.id,
+            agent=session.agent,
         )
         prior = await self.sessions.recent_closed(
             project_id=project.id,
@@ -213,13 +215,22 @@ class AgentService:
         retrieved: list[str] = []
         if retrieve and role == TurnRole.USER:
             result = await self.engine.answer(
-                project=project, customer=customer, query=content, limit=8
+                project=project,
+                customer=customer,
+                query=content,
+                limit=8,
+                session_id=session.id,
+                agent=session.agent,
             )
             answer = result.answer
             confidence = result.confidence
             retrieved = [memory["id"] for memory in result.memories]
             context = await self.engine.build_context(
-                project=project, customer=customer, query=content
+                project=project,
+                customer=customer,
+                query=content,
+                session_id=session.id,
+                agent=session.agent,
             )
 
         turn = await self.turns.add(
@@ -289,6 +300,8 @@ class AgentService:
                 },
             )
             memory_id = memory.id
+            # The summary is what the next session is briefed from — it has to be findable.
+            await self.memories.embed(memory, self.engine.embedder)
 
         await self.sessions.close(
             session, summary=summary, summary_memory_id=memory_id, status=status

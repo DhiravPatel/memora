@@ -6,16 +6,17 @@ Goals are small and read together with a customer, so everything here is keyed b
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import case, delete, func, select
+from sqlalchemy import case, delete, exists, func, select
 
 from common.enums import GoalStatus
 from common.ids import new_id
 from common.time import utcnow
-from database.models import CustomerGoal
+from database.access import UNRESTRICTED, current_access, hidden_condition
+from database.models import CustomerGoal, Memory
 from database.repositories.base import BaseRepository
 
 # Live goals first, then most recently touched.
@@ -25,6 +26,45 @@ _LIVE_FIRST = case(
 
 
 class GoalRepository(BaseRepository):
+    """Goal SQL. Reader-bound the same way :class:`MemoryRepository` is.
+
+    A goal's statement *is* the words of the memory it was born from, so a goal whose
+    memory the reader may not see — restricted without clearance, or of a type outside
+    their agent profile — is hidden with it. Pass ``cleared`` to get a reader-bound
+    repository; omit it for the tracker and aggregates, which see everything.
+    """
+
+    def __init__(self, session: Any, *, cleared: bool | None = None) -> None:
+        super().__init__(session)
+        self.reader = cleared is not None
+        access = current_access() if self.reader else UNRESTRICTED
+        self._hidden_memory = (
+            hidden_condition(cleared=bool(cleared), readable_types=access.readable_types)
+            if self.reader
+            else None
+        )
+
+    def _visible(self) -> list[Any]:
+        if self._hidden_memory is None:
+            return []
+        return [
+            ~exists().where(Memory.id == CustomerGoal.memory_id, self._hidden_memory)
+        ]
+
+    async def hidden_among(self, project_id: str, ids: Iterable[str]) -> frozenset[str]:
+        """Which of these goal ids quote a memory the reader may not see."""
+        wanted = list({ident for ident in ids if ident})
+        if self._hidden_memory is None or not wanted:
+            return frozenset()
+        result = await self.session.execute(
+            select(CustomerGoal.id).where(
+                CustomerGoal.project_id == project_id,
+                CustomerGoal.id.in_(wanted),
+                exists().where(Memory.id == CustomerGoal.memory_id, self._hidden_memory),
+            )
+        )
+        return frozenset(result.scalars())
+
     async def create(
         self,
         *,
@@ -61,7 +101,7 @@ class GoalRepository(BaseRepository):
     async def get(self, goal_id: str, project_id: str) -> CustomerGoal | None:
         result = await self.session.execute(
             select(CustomerGoal).where(
-                CustomerGoal.id == goal_id, CustomerGoal.project_id == project_id
+                CustomerGoal.id == goal_id, CustomerGoal.project_id == project_id, *self._visible()
             )
         )
         return result.scalar_one_or_none()
@@ -75,7 +115,7 @@ class GoalRepository(BaseRepository):
         limit: int = 50,
         offset: int = 0,
     ) -> tuple[list[CustomerGoal], int]:
-        filters = [CustomerGoal.project_id == project_id]
+        filters = [CustomerGoal.project_id == project_id, *self._visible()]
         if customer_id:
             filters.append(CustomerGoal.customer_id == customer_id)
         if status:

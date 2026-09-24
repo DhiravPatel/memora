@@ -20,8 +20,10 @@ from common.enums import ApiKeyScope, UserRole
 from common.errors import AuthenticationError, AuthorizationError, NotFoundError
 from common.logging import project_id_var
 from common.settings import Settings, get_settings
-from database.models import ApiKey, Customer, Project, User
+from database.access import MemoryAccess, access_for_types, set_access
+from database.models import AgentProfile, ApiKey, Customer, Project, User
 from database.repositories import (
+    AgentProfileRepository,
     ApiKeyRepository,
     AuditRepository,
     CustomerRepository,
@@ -75,13 +77,17 @@ async def get_clearance(
 
     Denied by default, on every path. An API key needs ``memory:restricted`` explicitly —
     including a legacy full-scope key, which predates the idea of restricted memory and
-    cannot be assumed to have been issued with it in mind. A dashboard user needs the admin
-    role, because a restriction exists precisely to keep the content away from most of the
-    team.
+    cannot be assumed to have been issued with it in mind — and, when it acts as an agent
+    profile, a profile that allows it too: the scope says what the key may be trusted
+    with, the profile what the agent's job needs. A dashboard user needs the admin role,
+    because a restriction exists precisely to keep the content away from most of the team.
     """
     key: ApiKey | None = getattr(request.state, "api_key", None)
     if key is not None:
-        return key.has_scope(ApiKeyScope.MEMORY_RESTRICTED)
+        if not key.has_scope(ApiKeyScope.MEMORY_RESTRICTED):
+            return False
+        profile: AgentProfile | None = getattr(request.state, "agent_profile", None)
+        return profile is None or bool(profile.can_read_restricted)
     if getattr(request.state, "project_id", None) is not None:
         return False  # legacy project key: authenticated, but not cleared
 
@@ -95,6 +101,7 @@ async def get_clearance(
 
 
 Clearance = Annotated[bool, Depends(get_clearance)]
+EmbedderDep = Annotated[Embedder, Depends(get_embedder)]
 
 
 def get_memory_engine(
@@ -172,11 +179,16 @@ async def get_api_project(
     session: DBSession,
     x_api_key: Annotated[str | None, Header(alias="X-API-Key")] = None,
     authorization: Annotated[str | None, Header()] = None,
+    x_agent_name: Annotated[str | None, Header(alias="X-Agent-Name")] = None,
 ) -> Project:
     """Resolve the project behind an API key. This is the tenancy boundary.
 
     Keys live in ``api_keys`` (named, scoped, revocable). A project's original key is
     still accepted and behaves as a full-scope key, so nothing breaks on upgrade.
+
+    A key bound to an agent profile (§26 3.1) also fixes what the request may read: the
+    profile's memory types are set as the request's access here, before any route runs,
+    and every reader-bound repository honours them.
     """
     api_key = x_api_key
     if not api_key and authorization and authorization.lower().startswith("bearer "):
@@ -202,12 +214,35 @@ async def get_api_project(
             raise AuthenticationError("Invalid API key.")
         await keys.touch(record.id, ip_address=client_ip(request))
         request.state.api_key = record
+        profile = (
+            await AgentProfileRepository(session).get_any(record.agent_profile_id)
+            if record.agent_profile_id
+            else None
+        )
+        if profile is not None and profile.project_id != project.id:
+            profile = None  # cannot happen through the API; never trust it anyway
     else:
         project = await ProjectRepository(session).get_by_api_key_hash(digest)
         if project is None:
             raise AuthenticationError("Invalid API key.")
         request.state.api_key = None  # legacy project key: full scope
+        profile = None
 
+    request.state.agent_profile = profile
+    key_id = record.id if record is not None else None
+    if profile is not None:
+        access = access_for_types(
+            profile.readable_types,
+            profile_id=profile.id,
+            profile=profile.name,
+            api_key_id=key_id,
+            agent=profile.name,
+        )
+    else:
+        # An unbound key may label its runs; a bound one is labelled by its profile.
+        label = " ".join((x_agent_name or "").split())[:120] or None
+        access = MemoryAccess(api_key_id=key_id, agent=label)
+    set_access(access)
     project_id_var.set(project.id)
     request.state.project_id = project.id
     return project

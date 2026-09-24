@@ -90,6 +90,33 @@ def customer_health_changed(
     )
 
 
+def customer_state_changed(
+    *,
+    project_id: str,
+    customer: Any,
+    previous_state: str | None,
+    state: str,
+    transition: str | None,
+    source: str,
+    reason: str | None,
+    evidence: list[str],
+) -> OutboundEvent:
+    """A customer moved through the lifecycle — the event most workflows start from."""
+    return OutboundEvent(
+        type=WebhookEvent.CUSTOMER_STATE_CHANGED,
+        project_id=project_id,
+        data={
+            "customer": _customer_ref(customer),
+            "previous_state": previous_state,
+            "state": state,
+            "transition": transition,
+            "source": source,
+            "reason": reason,
+            "evidence": evidence[:10],
+        },
+    )
+
+
 def customer_created(*, project_id: str, customer: Any) -> OutboundEvent:
     return OutboundEvent(
         type=WebhookEvent.CUSTOMER_CREATED,
@@ -170,6 +197,70 @@ def signal_raised(*, project_id: str, customer: Any, report: Any, signal: Any) -
             "headline": getattr(report, "headline", ""),
         },
     )
+
+
+def agent_action_denied(*, project_id: str, customer: Any, check: Any) -> OutboundEvent:
+    """An agent asked to do something and was refused — for alerting on agents that keep
+    trying, and for audits of what the guardrails stopped."""
+    return OutboundEvent(
+        type=WebhookEvent.AGENT_ACTION_DENIED,
+        project_id=project_id,
+        data={
+            "customer": _customer_ref(customer),
+            "check_id": check.id,
+            "agent": check.agent,
+            "action": check.action,
+            "request": check.request or {},
+            "reasons": _reasons(check.reasons),
+            "evidence": list(check.evidence or [])[:10],
+        },
+    )
+
+
+def agent_approval_requested(*, project_id: str, customer: Any, approval: Any) -> OutboundEvent:
+    """A person needs to decide: route it to Slack, a ticket queue or a phone."""
+    return OutboundEvent(
+        type=WebhookEvent.AGENT_APPROVAL_REQUESTED,
+        project_id=project_id,
+        data={"customer": _customer_ref(customer), "approval": _approval(approval)},
+    )
+
+
+def agent_approval_decided(*, project_id: str, customer: Any, approval: Any) -> OutboundEvent:
+    """Approved or rejected — an agent waiting on the decision can act without polling."""
+    return OutboundEvent(
+        type=WebhookEvent.AGENT_APPROVAL_DECIDED,
+        project_id=project_id,
+        data={"customer": _customer_ref(customer), "approval": _approval(approval)},
+    )
+
+
+def _approval(approval: Any) -> dict[str, Any]:
+    return {
+        "id": approval.id,
+        "check_id": approval.check_id,
+        "agent": approval.agent,
+        "action": approval.action,
+        "request": approval.request or {},
+        "status": str(approval.status),
+        "reasons": _reasons(approval.reasons),
+        "note": approval.note,
+        "decided_by": approval.decided_by,
+        "decided_at": approval.decided_at.isoformat() if approval.decided_at else None,
+        "expires_at": approval.expires_at.isoformat() if approval.expires_at else None,
+    }
+
+
+def _reasons(reasons: Any) -> list[dict[str, Any]]:
+    return [
+        {
+            "rule": reason.get("rule"),
+            "source": reason.get("source"),
+            "decision": reason.get("decision"),
+            "explanation": reason.get("explanation"),
+        }
+        for reason in (reasons or [])
+    ]
 
 
 def _memory_payload(memory: Any) -> dict[str, Any]:

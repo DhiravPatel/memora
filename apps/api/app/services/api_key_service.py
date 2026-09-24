@@ -19,7 +19,7 @@ from common.logging import get_logger
 from common.settings import get_settings
 from common.time import utcnow
 from database.models import ApiKey, Project
-from database.repositories import ApiKeyRepository, AuditRepository
+from database.repositories import AgentProfileRepository, ApiKeyRepository, AuditRepository
 
 logger = get_logger(__name__)
 
@@ -47,6 +47,7 @@ class ApiKeyService:
         scopes: list[str] | None = None,
         expires_in_days: int | None = None,
         actor_id: str | None = None,
+        agent_profile_id: str | None = None,
     ) -> CreatedKey:
         if not name.strip():
             raise ValidationError("An API key needs a name so it can be recognised later.")
@@ -57,6 +58,7 @@ class ApiKeyService:
 
         requested = scopes or [scope.value for scope in ApiKeyScope.defaults()]
         validated = self._validate_scopes(requested)
+        profile_id = await self._validate_profile(project, agent_profile_id, validated)
 
         expires_at: datetime | None = None
         if expires_in_days is not None:
@@ -75,6 +77,8 @@ class ApiKeyService:
             created_by=actor_id,
             expires_at=expires_at,
         )
+        key.agent_profile_id = profile_id
+        await self.session.flush()
         await self.audit.record(
             action=AuditAction.KEY_CHANGE,
             actor_type="user" if actor_id else "system",
@@ -83,7 +87,12 @@ class ApiKeyService:
             project_id=project.id,
             resource_type="api_key",
             resource_id=key.id,
-            metadata={"event": "created", "name": key.name, "scopes": validated},
+            metadata={
+                "event": "created",
+                "name": key.name,
+                "scopes": validated,
+                "agent_profile_id": profile_id,
+            },
         )
         logger.info("api_key.created", project_id=project.id, key_id=key.id, scopes=validated)
         return CreatedKey(key=key, plaintext=plaintext)
@@ -119,22 +128,63 @@ class ApiKeyService:
     async def update_scopes(
         self, *, project: Project, key_id: str, scopes: list[str], actor_id: str | None = None
     ) -> ApiKey:
+        return await self.update(project=project, key_id=key_id, scopes=scopes, actor_id=actor_id)
+
+    async def update(
+        self,
+        *,
+        project: Project,
+        key_id: str,
+        scopes: list[str] | None = None,
+        agent_profile_id: str | None = None,
+        rebind: bool = False,
+        actor_id: str | None = None,
+    ) -> ApiKey:
+        """Change a key's scopes, its agent profile (``rebind``), or both."""
         key = await self.keys.get(key_id, project.id)
         if key is None:
             raise NotFoundError("API key not found.")
-        validated = self._validate_scopes(scopes)
-        await self.keys.update_scopes(key, validated)
-        await self.audit.record(
-            action=AuditAction.KEY_CHANGE,
-            actor_type="user" if actor_id else "system",
-            actor_id=actor_id,
-            organization_id=project.organization_id,
-            project_id=project.id,
-            resource_type="api_key",
-            resource_id=key.id,
-            metadata={"event": "scopes_updated", "scopes": validated},
-        )
+        validated = self._validate_scopes(scopes) if scopes is not None else list(key.scopes or [])
+        profile_id = key.agent_profile_id
+        if rebind:
+            profile_id = await self._validate_profile(project, agent_profile_id or None, validated)
+        else:
+            await self._validate_profile(project, profile_id, validated)
+        changes: dict[str, object] = {}
+        if scopes is not None:
+            await self.keys.update_scopes(key, validated)
+            changes["scopes"] = validated
+        if rebind and profile_id != key.agent_profile_id:
+            changes["agent_profile_id"] = {"from": key.agent_profile_id, "to": profile_id}
+            key.agent_profile_id = profile_id
+            await self.session.flush()
+        if changes:
+            await self.audit.record(
+                action=AuditAction.KEY_CHANGE,
+                actor_type="user" if actor_id else "system",
+                actor_id=actor_id,
+                organization_id=project.organization_id,
+                project_id=project.id,
+                resource_type="api_key",
+                resource_id=key.id,
+                metadata={"event": "updated", **changes},
+            )
         return key
+
+    async def _validate_profile(
+        self, project: Project, profile_id: str | None, scopes: list[str]
+    ) -> str | None:
+        if not profile_id:
+            return None
+        profile = await AgentProfileRepository(self.session).get(profile_id, project.id)
+        if profile is None:
+            raise ValidationError(f"Agent profile '{profile_id}' not found in this project.")
+        if ApiKeyScope.APPROVALS_DECIDE.value in scopes:
+            raise ValidationError(
+                "A key that acts as an agent cannot also decide approvals — it could approve "
+                "its own requests. Use a separate key for whoever reviews them."
+            )
+        return profile.id
 
     @staticmethod
     def _validate_scopes(scopes: list[str]) -> list[str]:

@@ -58,9 +58,12 @@ class CustomerContext:
     memory_ids: list[str]
     token_count: int
     truncated: bool = False
+    # The agent run this build was recorded as (§26 3.4), when it was recorded.
+    run_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "run_id": self.run_id,
             "customer": self.customer,
             "important_facts": [item["content"] for item in self.sections.get("important_facts", [])],
             "active_problems": [item["content"] for item in self.sections.get("active_problems", [])],

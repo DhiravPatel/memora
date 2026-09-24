@@ -118,6 +118,10 @@ class ScoredMemory:
     keyword_score: float = 0.0
     recency: float = 0.0
     relationship_relevance: float = 0.0
+    # How much the memory is *about* what was asked (nlp.concepts), and which concepts
+    # matched — the explanation for a paraphrase match that shares no words.
+    concept_score: float = 0.0
+    matched_concepts: list[str] = field(default_factory=list)
     score: float = 0.0
     strategies: set[str] = field(default_factory=set)
 
@@ -131,6 +135,8 @@ class ScoredMemory:
             "score": round(self.score, 4),
             "similarity": round(self.similarity, 4),
             "keyword_score": round(self.keyword_score, 4),
+            "concept_score": round(self.concept_score, 4),
+            "matched_concepts": list(self.matched_concepts),
             "recency": round(self.recency, 4),
             "relationship_relevance": round(self.relationship_relevance, 4),
             "importance": round(float(self.memory.importance), 4),

@@ -86,6 +86,7 @@ class EventExplanationOut(BaseModel):
     would_process: bool = False
     # The field to read first. Null means the pipeline ran to the end.
     stop_reason: str | None = None
+    stop_code: str | None = Field(default=None, description="below_threshold, no_text or customer_missing")
     summary: str = ""
     importance: float = 0.0
     threshold: float = 0.0
@@ -137,3 +138,5 @@ class EventOut(BaseModel):
     # Why this event did or did not become a memory. Null for events processed before
     # outcomes were recorded, which is different from "nothing happened".
     outcome: EventExplanationOut | None = None
+    # True when the payload fed a memory this caller may not read, so ``data`` is empty.
+    withheld: bool = False

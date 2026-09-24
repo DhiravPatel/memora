@@ -175,6 +175,9 @@ class ApiKeyScope(StrEnum):
     MEMORY_RESTRICTED = "memory:restricted"
     CUSTOMERS_READ = "customers:read"
     CUSTOMERS_WRITE = "customers:write"
+    # Approve or reject an action an agent asked permission for (§26 3.3). Like clearance
+    # it is a grant, not a consequence of admin — see ``not_implied_by_admin``.
+    APPROVALS_DECIDE = "approvals:decide"
     ADMIN = "admin"
 
     @classmethod
@@ -190,8 +193,12 @@ class ApiKeyScope(StrEnum):
         pasted into backend configuration everywhere; if admin implied clearance, the
         single most widely-copied credential in a deployment would be able to read exactly
         the content a restriction policy exists to protect. So it has to be asked for.
+
+        Deciding approvals is the same kind of grant for the same reason: the admin key is
+        exactly the key an agent's backend is most likely to hold, and an agent that could
+        approve its own requests would make the approval a formality.
         """
-        return frozenset({cls.MEMORY_RESTRICTED})
+        return frozenset({cls.MEMORY_RESTRICTED, cls.APPROVALS_DECIDE})
 
     @classmethod
     def all(cls) -> list[ApiKeyScope]:
@@ -213,6 +220,10 @@ class WebhookEvent(StrEnum):
     GOAL_ACHIEVED = "goal.achieved"
     GOAL_ABANDONED = "goal.abandoned"
     SIGNAL_RAISED = "signal.raised"
+    CUSTOMER_STATE_CHANGED = "customer.state_changed"
+    AGENT_ACTION_DENIED = "agent.action_denied"
+    AGENT_APPROVAL_REQUESTED = "agent.approval_requested"
+    AGENT_APPROVAL_DECIDED = "agent.approval_decided"
 
     @classmethod
     def all(cls) -> list[WebhookEvent]:
@@ -244,3 +255,5 @@ class AuditAction(StrEnum):
     WEBHOOK_CHANGE = "webhook_change"
     GOAL_CHANGE = "goal_change"
     AGENT_SESSION = "agent_session"
+    AGENT_POLICY_CHANGE = "agent_policy_change"
+    AGENT_APPROVAL = "agent_approval"

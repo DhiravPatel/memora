@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from fastapi import APIRouter, Depends, Query
 
 from app.core.dependencies import (
@@ -29,8 +31,19 @@ from app.schemas.goals import GoalOut
 from app.schemas.health import HealthOut
 from app.schemas.memories import CustomerLinks, MemoryGraph, MemoryOut
 from app.schemas.signals import RecommendationsOut, SignalReportOut
+from app.schemas.state import (
+    CurrentStateOut,
+    CustomerFactsOut,
+    CustomerStateOut,
+    SnapshotOut,
+    SnapshotSummaryOut,
+    StateRefreshOut,
+    StateSetIn,
+)
+from app.services import state_views
 from app.services.customer360_service import SECTIONS, Customer360Service
 from app.services.customer_service import CustomerService
+from app.services.customer_state_service import CustomerStateService
 from app.services.deletion_service import DeletionService
 from app.services.export_service import ExportService
 from app.services.goal_service import GoalService
@@ -45,6 +58,7 @@ from app.services.serializers import (
 from app.services.signal_service import SignalService
 from common.enums import ApiKeyScope, GoalStatus, MemoryStatus, MemoryType
 from common.errors import ValidationError
+from common.time import ensure_utc
 from database.repositories import CustomerRepository
 
 WRITE = [Depends(require_scope(ApiKeyScope.CUSTOMERS_WRITE))]
@@ -200,10 +214,11 @@ async def get_customer_signals(
     customer: ApiCustomer,
     project: ApiProject,
     session: DBSession,
+    cleared: Clearance,
     series: bool = Query(default=True, description="Include the stored daily history"),
 ) -> SignalReportOut:
     """Where this customer is heading, and the observations that say so."""
-    result = await SignalService(session).for_customer(
+    result = await SignalService(session, cleared=cleared).for_customer(
         project=project, customer=customer, include_series=series
     )
     return signal_report_out(result)
@@ -211,10 +226,14 @@ async def get_customer_signals(
 
 @router.get("/{customer_id}/recommendations", response_model=RecommendationsOut)
 async def get_customer_recommendations(
-    customer: ApiCustomer, project: ApiProject, session: DBSession
+    customer: ApiCustomer, project: ApiProject, session: DBSession, cleared: Clearance
 ) -> RecommendationsOut:
-    """What to do about this customer next, most urgent first, with the evidence."""
-    service = SignalService(session)
+    """What to do about this customer next, most urgent first, with the evidence.
+
+    Judged over everything the customer said; words quoted from a memory this key may not
+    read are shown as ``[withheld]``.
+    """
+    service = SignalService(session, cleared=cleared)
     actions, report = await service.recommendations(project=project, customer=customer)
     return RecommendationsOut(
         customer_id=customer.id,
@@ -232,12 +251,13 @@ async def get_customer_goals(
     customer: ApiCustomer,
     project: ApiProject,
     session: DBSession,
+    cleared: Clearance,
     status: GoalStatus | None = None,
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
 ) -> Page[GoalOut]:
     """What this customer said they were trying to do, and how far it got."""
-    goals, total = await GoalService(session).list_for_customer(
+    goals, total = await GoalService(session, cleared=cleared).list_for_customer(
         project=project, customer=customer, status=status, limit=limit, offset=offset
     )
     return Page[GoalOut](
@@ -276,6 +296,135 @@ async def get_customer_360(
         sections=view.sections,
         withheld=view.withheld,
         generated_at=view.generated_at,
+    )
+
+
+# ------------------------------------------------------ facts, lifecycle, snapshots
+
+MEMORY_READ = [Depends(require_scope(ApiKeyScope.MEMORY_READ))]
+
+
+@router.get("/{customer_id}/facts", response_model=CustomerFactsOut, dependencies=MEMORY_READ)
+async def get_customer_facts(
+    customer: ApiCustomer, project: ApiProject, session: DBSession, cleared: Clearance
+) -> CustomerFactsOut:
+    """Every fact a rule can read about this customer, with the evidence behind each.
+
+    What guardrails, the lifecycle, workflows and flags decide on. Shown redacted to a
+    caller without clearance: counts stay whole, values that came only from restricted
+    memories are removed and listed in `withheld_facts`.
+    """
+    return await state_views.customer_facts(session, project=project, customer=customer, cleared=cleared)
+
+
+@router.get("/{customer_id}/state", response_model=CurrentStateOut)
+async def get_customer_state(
+    customer: ApiCustomer, project: ApiProject, session: DBSession, cleared: Clearance
+) -> CurrentStateOut:
+    """Where this customer is in the lifecycle, and the transition that put them there."""
+    return await state_views.current_state(session, project=project, customer=customer, cleared=cleared)
+
+
+@router.get("/{customer_id}/state/history", response_model=Page[CustomerStateOut])
+async def get_customer_state_history(
+    customer: ApiCustomer,
+    project: ApiProject,
+    session: DBSession,
+    cleared: Clearance,
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+) -> Page[CustomerStateOut]:
+    """Every state the customer has been in, newest first, each with its reason."""
+    return await state_views.state_history(
+        session, project=project, customer=customer, cleared=cleared, limit=limit, offset=offset
+    )
+
+
+@router.put("/{customer_id}/state", response_model=CustomerStateOut, dependencies=WRITE)
+async def set_customer_state(
+    payload: StateSetIn, customer: ApiCustomer, project: ApiProject, session: DBSession
+) -> CustomerStateOut:
+    """Set the state by hand. Pinned by default: the machine leaves it alone until released."""
+    row = await CustomerStateService(session).set_state(
+        project=project,
+        customer=customer,
+        state=payload.state,
+        pin=payload.pin,
+        pin_days=payload.pin_days,
+        note=payload.note,
+        actor_type="api_key",
+        actor_id=project.id,
+    )
+    return state_views.state_out(row, sanitize=False)
+
+
+@router.delete("/{customer_id}/state/pin", response_model=CustomerStateOut, dependencies=WRITE)
+async def release_customer_state(
+    customer: ApiCustomer, project: ApiProject, session: DBSession
+) -> CustomerStateOut:
+    """Hand the customer back to the machine."""
+    row = await CustomerStateService(session).release(
+        project=project, customer=customer, actor_type="api_key", actor_id=project.id
+    )
+    return state_views.state_out(row, sanitize=False)
+
+
+@router.post("/{customer_id}/state/refresh", response_model=StateRefreshOut, dependencies=WRITE)
+async def refresh_customer_state(
+    customer: ApiCustomer, project: ApiProject, session: DBSession
+) -> StateRefreshOut:
+    """Re-evaluate the lifecycle now instead of waiting for the next event or night."""
+    return await state_views.refresh_state(session, project=project, customer=customer)
+
+
+@router.get("/{customer_id}/snapshots", response_model=Page[SnapshotSummaryOut], dependencies=MEMORY_READ)
+async def list_customer_snapshots(
+    customer: ApiCustomer,
+    project: ApiProject,
+    session: DBSession,
+    cleared: Clearance,
+    since: datetime | None = None,
+    until: datetime | None = None,
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+) -> Page[SnapshotSummaryOut]:
+    """Every material change in what we knew about this customer, newest first."""
+    return await state_views.snapshots(
+        session,
+        project=project,
+        customer=customer,
+        cleared=cleared,
+        since=since,
+        until=until,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.get("/{customer_id}/snapshots/at", response_model=SnapshotOut, dependencies=MEMORY_READ)
+async def get_customer_snapshot_at(
+    customer: ApiCustomer,
+    project: ApiProject,
+    session: DBSession,
+    cleared: Clearance,
+    time: datetime = Query(description="ISO 8601. The newest snapshot at or before it is returned."),
+) -> SnapshotOut:
+    """What we knew about this customer at a moment in the past."""
+    return await state_views.snapshot_at(
+        session, project=project, customer=customer, moment=ensure_utc(time), cleared=cleared
+    )
+
+
+@router.get("/{customer_id}/snapshots/{snapshot_id}", response_model=SnapshotOut, dependencies=MEMORY_READ)
+async def get_customer_snapshot(
+    snapshot_id: str,
+    customer: ApiCustomer,
+    project: ApiProject,
+    session: DBSession,
+    cleared: Clearance,
+) -> SnapshotOut:
+    return await state_views.snapshot_detail(
+        session, project=project, customer=customer, snapshot_id=snapshot_id, cleared=cleared
     )
 
 

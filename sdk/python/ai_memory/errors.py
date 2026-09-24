@@ -40,3 +40,20 @@ class MemoryConfigError(MemoryError):
 
 class MemoryTimeoutError(MemoryError):
     pass
+
+
+class ActionDenied(MemoryError):
+    """A guardrail refused the action. ``check`` holds every reason and its evidence."""
+
+    def __init__(self, check: Any) -> None:
+        super().__init__(getattr(check, "summary", "") or "The action was denied.")
+        self.check = check
+
+
+class ApprovalRequired(MemoryError):
+    """The action needs a person first. ``approval`` is the request that was filed."""
+
+    def __init__(self, check: Any) -> None:
+        super().__init__(getattr(check, "summary", "") or "The action needs approval.")
+        self.check = check
+        self.approval = getattr(check, "approval", None)

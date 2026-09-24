@@ -7,7 +7,7 @@ const DEFAULT_BASE_URL = "https://api.aimemorylayer.com";
 const RETRYABLE_STATUS = new Set([408, 409, 425, 429, 500, 502, 503, 504]);
 
 export interface RequestOptions {
-  method: "GET" | "POST" | "PATCH" | "DELETE";
+  method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
   path: string;
   body?: unknown;
   query?: Record<string, string | number | boolean | undefined | null>;
@@ -31,7 +31,10 @@ export class HttpClient {
     this.baseUrl = (options.baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, "");
     this.timeoutMs = options.timeoutMs ?? 30_000;
     this.maxRetries = Math.max(0, options.maxRetries ?? 2);
-    this.headers = options.headers ?? {};
+    this.headers = {
+      ...(options.agentName ? { "X-Agent-Name": options.agentName } : {}),
+      ...(options.headers ?? {}),
+    };
     const fetchImpl = options.fetch ?? globalThis.fetch;
     if (!fetchImpl) {
       throw new MemoryConfigError(

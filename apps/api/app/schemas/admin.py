@@ -18,10 +18,16 @@ class ApiKeyCreate(BaseModel):
         default=None, description="Defaults to events:write, memory:read, customers:read"
     )
     expires_in_days: int | None = Field(default=None, ge=1, le=3650)
+    agent_profile_id: str | None = Field(
+        default=None, description="Act as this agent profile: its memory types and actions bind the key."
+    )
 
 
 class ApiKeyScopesUpdate(BaseModel):
-    scopes: list[ApiKeyScope] = Field(min_length=1)
+    scopes: list[ApiKeyScope] | None = Field(default=None, min_length=1)
+    agent_profile_id: str | None = Field(
+        default=None, description="Bind the key to this agent profile. Send an empty string to unbind."
+    )
 
 
 class ApiKeyOut(BaseModel):
@@ -30,6 +36,8 @@ class ApiKeyOut(BaseModel):
     name: str
     key_prefix: str
     scopes: list[str]
+    # The agent profile this key acts as (§26 3.1), if any.
+    agent_profile_id: str | None = None
     created_by: str | None = None
     last_used_at: datetime | None = None
     last_used_ip: str | None = None
@@ -61,7 +69,13 @@ SCOPE_DESCRIPTIONS: dict[str, str] = {
         "Clearance to read memories this project marked restricted. Granted on its own — "
         "admin does not confer it"
     ),
-    ApiKeyScope.ADMIN.value: "Everything except clearance to read restricted memory",
+    ApiKeyScope.APPROVALS_DECIDE.value: (
+        "Approve or reject actions agents asked permission for. Granted on its own — admin "
+        "does not confer it, and a key bound to an agent profile cannot use it"
+    ),
+    ApiKeyScope.ADMIN.value: (
+        "Everything except clearance to read restricted memory and deciding agent approvals"
+    ),
 }
 
 
@@ -192,6 +206,13 @@ WEBHOOK_EVENT_DESCRIPTIONS: dict[str, str] = {
     WebhookEvent.CUSTOMER_HEALTH_CHANGED.value: "A customer's health band changed",
     WebhookEvent.EVENT_FAILED.value: "An event exhausted its processing retries",
     WebhookEvent.CUSTOMER_DELETED.value: "A customer and everything derived from them was deleted",
+    WebhookEvent.GOAL_ACHIEVED.value: "A goal a customer stated was reached",
+    WebhookEvent.GOAL_ABANDONED.value: "A goal a customer stated was given up",
+    WebhookEvent.SIGNAL_RAISED.value: "A predictive signal started firing for a customer",
+    WebhookEvent.CUSTOMER_STATE_CHANGED.value: "A customer moved to another lifecycle state",
+    WebhookEvent.AGENT_ACTION_DENIED.value: "A guardrail check refused an action an agent proposed",
+    WebhookEvent.AGENT_APPROVAL_REQUESTED.value: "An agent needs a person to approve an action",
+    WebhookEvent.AGENT_APPROVAL_DECIDED.value: "An approval request was approved, rejected or expired",
 }
 
 

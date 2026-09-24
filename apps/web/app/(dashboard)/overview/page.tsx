@@ -5,12 +5,13 @@ import Link from "next/link";
 
 import { UsageChart } from "@/components/usage-chart";
 import { MemoryTypeBadge } from "@/components/ui/badge";
+import { StateBadge } from "@/components/lifecycle";
 import { Card, CardContent, CardHeader, CardTitle, StatTile } from "@/components/ui/card";
 import { EmptyState, ErrorState, LoadingRow, PageHeader } from "@/components/ui/states";
 import { useSession } from "@/hooks/use-session";
 import { api } from "@/lib/api";
 import { formatNumber } from "@/lib/format";
-import type { Overview, UsageResponse } from "@/lib/types";
+import type { LifecycleOverview, Overview, UsageResponse } from "@/lib/types";
 
 export default function OverviewPage() {
   const { projectId, project } = useSession();
@@ -18,6 +19,12 @@ export default function OverviewPage() {
   const overview = useQuery({
     queryKey: ["overview", projectId],
     queryFn: () => api<Overview>(`/v1/projects/${projectId}/overview`),
+    enabled: Boolean(projectId),
+  });
+
+  const lifecycle = useQuery({
+    queryKey: ["lifecycle", projectId],
+    queryFn: () => api<LifecycleOverview>(`/v1/projects/${projectId}/lifecycle`),
     enabled: Boolean(projectId),
   });
 
@@ -87,7 +94,11 @@ export default function OverviewPage() {
                 <span className="label">events / memories / queries</span>
               </CardHeader>
               <CardContent className="pt-5">
-                {usage.isLoading ? <LoadingRow /> : <UsageChart series={usage.data?.series ?? []} />}
+                {usage.isLoading ? (
+                  <LoadingRow />
+                ) : (
+                  <UsageChart series={usage.data?.series ?? []} />
+                )}
               </CardContent>
             </Card>
 
@@ -122,6 +133,44 @@ export default function OverviewPage() {
               </CardContent>
             </Card>
           </div>
+
+          {lifecycle.data?.enabled && (
+            <Card>
+              <CardHeader className="flex items-center justify-between">
+                <CardTitle>Lifecycle</CardTitle>
+                <span className="label">where every customer is now</span>
+              </CardHeader>
+              <CardContent className="space-y-2.5">
+                {(lifecycle.data.states ?? []).map((state) => {
+                  const count = lifecycle.data?.counts[state] ?? 0;
+                  const placed = Object.values(lifecycle.data?.counts ?? {}).reduce(
+                    (sum, value) => sum + value,
+                    0,
+                  );
+                  return (
+                    <Link
+                      key={state}
+                      href={`/customers?state=${state}`}
+                      className="flex items-center gap-3 hover:opacity-80"
+                    >
+                      <span className="w-28">
+                        <StateBadge state={state} />
+                      </span>
+                      <div className="h-[6px] flex-1 overflow-hidden rounded-full bg-surface-3">
+                        <div
+                          className="h-full bg-accent"
+                          style={{ width: `${placed ? (count / placed) * 100 : 0}%` }}
+                        />
+                      </div>
+                      <span className="numeric w-8 text-right text-[11px] text-muted-foreground">
+                        {count}
+                      </span>
+                    </Link>
+                  );
+                })}
+              </CardContent>
+            </Card>
+          )}
         </>
       )}
     </div>

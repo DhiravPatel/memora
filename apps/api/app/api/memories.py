@@ -8,6 +8,7 @@ from app.core.dependencies import (
     ApiProject,
     Clearance,
     DBSession,
+    EmbedderDep,
     Engine,
     require_scope,
 )
@@ -74,6 +75,7 @@ async def create_memory(
         content=payload.content,
         importance=payload.importance,
         confidence=payload.confidence,
+        embedder=engine.embedder,
     )
     # A memory written by hand has to move goals too, otherwise a goal stated through this
     # endpoint would sit untracked until some unrelated event happened to arrive.
@@ -110,9 +112,10 @@ async def submit_feedback(
     project: ApiProject,
     session: DBSession,
     cleared: Clearance,
+    embedder: EmbedderDep,
 ) -> FeedbackOut:
     """Confirm, reject or correct a memory. Confidence moves; history is preserved."""
-    result = await FeedbackService(session, cleared=cleared).submit(
+    result = await FeedbackService(session, cleared=cleared, embedder=embedder).submit(
         project=project,
         memory_id=memory_id,
         verdict=payload.verdict,

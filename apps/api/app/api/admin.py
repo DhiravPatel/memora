@@ -24,7 +24,7 @@ from app.schemas.common import Message, Page
 from app.services.api_key_service import ApiKeyService
 from app.services.serializers import api_key_out, webhook_delivery_out, webhook_endpoint_out
 from app.services.webhook_service import WebhookService
-from common.enums import DeliveryStatus, UserRole
+from common.enums import DeliveryStatus, UserRole, WebhookEvent
 
 router = APIRouter(prefix="/v1/projects/{project_id}", tags=["administration"])
 
@@ -57,6 +57,7 @@ async def create_api_key(
         scopes=[scope.value for scope in payload.scopes] if payload.scopes else None,
         expires_in_days=payload.expires_in_days,
         actor_id=current_user.user.id,
+        agent_profile_id=payload.agent_profile_id,
     )
     return ApiKeyWithSecret(
         **api_key_out(created.key).model_dump(), api_key=created.plaintext
@@ -71,11 +72,14 @@ async def update_api_key_scopes(
     session: DBSession,
     current_user: CurrentUserDep,
 ) -> ApiKeyOut:
+    """Change a key's scopes and/or the agent profile it acts as."""
     current_user.require(UserRole.ADMIN)
-    key = await ApiKeyService(session).update_scopes(
+    key = await ApiKeyService(session).update(
         project=project,
         key_id=key_id,
-        scopes=[scope.value for scope in payload.scopes],
+        scopes=[scope.value for scope in payload.scopes] if payload.scopes else None,
+        agent_profile_id=payload.agent_profile_id,
+        rebind="agent_profile_id" in payload.model_fields_set,
         actor_id=current_user.user.id,
     )
     return api_key_out(key)
@@ -238,7 +242,9 @@ async def retry_delivery(
 
 @router.get("/webhooks/events", response_model=list[WebhookEventInfo])
 async def list_webhook_events(project: UserProject) -> list[WebhookEventInfo]:
+    # Every event the product can send — iterating the enum, not the descriptions, so a
+    # new event can never be emitted without also being subscribable.
     return [
-        WebhookEventInfo(event=event, description=description)
-        for event, description in WEBHOOK_EVENT_DESCRIPTIONS.items()
+        WebhookEventInfo(event=event.value, description=WEBHOOK_EVENT_DESCRIPTIONS.get(event.value, ""))
+        for event in WebhookEvent.all()
     ]

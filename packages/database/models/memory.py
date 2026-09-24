@@ -15,7 +15,7 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from common.enums import MemorySource, MemoryStatus, MemoryType, Sensitivity
@@ -34,6 +34,8 @@ class Memory(Base, TimestampMixin):
             func.to_tsvector(text("'english'"), text("content")),
             postgresql_using="gin",
         ),
+        # Backs the concept leg: `concepts && :query_concepts` is an index scan.
+        Index("ix_memories_concepts", "concepts", postgresql_using="gin"),
     )
 
     id: Mapped[str] = mapped_column(String(ID_LENGTH), primary_key=True)
@@ -60,6 +62,12 @@ class Memory(Base, TimestampMixin):
     sensitivity: Mapped[Sensitivity] = mapped_column(
         String(16), nullable=False, default=Sensitivity.NORMAL, index=True
     )
+    # What the memory is *about*, as concept ids from ``nlp.concepts`` — the paraphrase
+    # families that let "the connector stopped functioning" answer a question about "the
+    # integration being broken". Written with the content, on every write path, by the
+    # repository. Null only for memories written before concepts existed, until the
+    # backfill reaches them.
+    concepts: Mapped[list[str] | None] = mapped_column(ARRAY(String(48)))
     # Every event that contributed evidence to this memory, newest last.
     source_event_ids: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
     evidence_count: Mapped[int] = mapped_column(nullable=False, default=1)

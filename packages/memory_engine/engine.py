@@ -26,16 +26,17 @@ from common.enums import (
     MemoryStatus,
     MemoryType,
     RelationshipType,
-    Sensitivity,
 )
 from common.logging import get_logger
 from common.metrics import event_processing_latency, events_processed
 from common.pii import detect as detect_pii
 from common.settings import Settings, get_settings
 from common.time import days_ago, ensure_utc, utcnow
+from database.access import current_access
 from database.models import Customer, CustomerGoal, Event, Memory, Project
 from database.repositories import (
     CustomerRepository,
+    CustomerSnapshotRepository,
     EntityRepository,
     EventRepository,
     GoalRepository,
@@ -78,6 +79,7 @@ from memory_engine.schemas import (
     ExtractionResult,
     NormalizedEvent,
     ProcessingResult,
+    ScoredMemory,
 )
 from nlp.answer import Answer, EventView, MemoryView, compose
 from nlp.question import analyze as analyze_question
@@ -176,6 +178,8 @@ class QueryResult:
     memories: list[dict[str, Any]]
     sources: list[dict[str, Any]]
     trace: dict[str, Any]
+    # The agent run this answer was recorded as; ``GET /v1/agent/runs/{id}/explain``.
+    run_id: str | None = None
 
 
 class MemoryEngine:
@@ -205,6 +209,7 @@ class MemoryEngine:
         self.entities = EntityRepository(session)
         self.relationships = RelationshipRepository(session)
         self.query_logs = QueryLogRepository(session)
+        self.customer_snapshots = CustomerSnapshotRepository(session)
         self.usage = UsageRepository(session)
         self.links = MemoryLinkRepository(session)
         self.goals = GoalRepository(session)
@@ -307,6 +312,7 @@ class MemoryEngine:
             # The commonest cause of "nothing happened", and the least obvious: the
             # payload was valid JSON with no field the engine reads as prose.
             explanation.stop_reason = explain.NO_TEXT
+            explanation.stop_code = "no_text"
             explanation.duration_ms = round((time.perf_counter() - started) * 1000, 2)
             return explanation
 
@@ -314,6 +320,7 @@ class MemoryEngine:
             explanation.stop_reason = explain.below_threshold(
                 normalized.importance, config.threshold
             )
+            explanation.stop_code = "below_threshold"
             explanation.duration_ms = round((time.perf_counter() - started) * 1000, 2)
             return explanation
 
@@ -345,11 +352,7 @@ class MemoryEngine:
             # the writer has to, or it would create a second copy of a restricted memory.
             # A *reader* must not see through that, so the target is masked here.
             target = planned.target
-            hidden = (
-                target is not None
-                and not self.cleared
-                and str(target.sensitivity) == Sensitivity.RESTRICTED.value
-            )
+            hidden = target is not None and not self.memories.can_see(target)
             explanation.memories.append(
                 MemoryPlan(
                     content=candidate.content,
@@ -433,6 +436,7 @@ class MemoryEngine:
         if not normalized.text.strip():
             result.skipped_reason = explain.NO_TEXT
             explanation.stop_reason = result.skipped_reason
+            explanation.stop_code = "no_text"
             await self.events.mark_status(
                 event.id, EventStatus.SKIPPED, error=None, outcome=explanation.as_dict(include_text=False)
             )
@@ -445,6 +449,7 @@ class MemoryEngine:
         if normalized.importance < threshold:
             result.skipped_reason = explain.below_threshold(normalized.importance, threshold)
             explanation.stop_reason = result.skipped_reason
+            explanation.stop_code = "below_threshold"
             await self.events.mark_status(
                 event.id, EventStatus.SKIPPED, error=None, outcome=explanation.as_dict(include_text=False)
             )
@@ -457,6 +462,7 @@ class MemoryEngine:
         if customer is None:
             result.skipped_reason = explain.customer_missing()
             explanation.stop_reason = result.skipped_reason
+            explanation.stop_code = "customer_missing"
             await self.events.mark_status(
                 event.id,
                 EventStatus.SKIPPED,
@@ -990,6 +996,7 @@ class MemoryEngine:
             query=query,
             limit=limit,
             types=types,
+            include_concepts=bool((project.settings or {}).get("concept_retrieval", True)),
             learned_synonyms=await self.learned_synonyms(project),
         )
 
@@ -1000,7 +1007,20 @@ class MemoryEngine:
         customer: Customer,
         query: str,
         limit: int = 10,
+        record: bool = True,
+        session_id: str | None = None,
+        agent: str | None = None,
     ) -> QueryResult:
+        """Answer a question about a customer from memory.
+
+        ``record=False`` answers without writing a query log or counting usage — for an
+        evaluation run, whose hundreds of synthetic questions are neither traffic nor
+        something a customer should be billed for, and which would otherwise pollute the
+        audit trail of real questions with its own.
+
+        A recorded answer is an agent run (§26 3.4): ``session_id`` and ``agent`` tie it to
+        the conversation it happened in, when there is one.
+        """
         started = time.perf_counter()
         retrieval = await self.search(project=project, customer=customer, query=query, limit=limit)
         analysis = analyze_question(query, learned_synonyms=await self.learned_synonyms(project))
@@ -1046,20 +1066,33 @@ class MemoryEngine:
         )
 
         latency_ms = int((time.perf_counter() - started) * 1000)
-        await self.query_logs.record(
-            project_id=project.id,
-            customer_id=customer.id,
-            query=query,
-            answer=composed.text,
-            memory_ids=[item.memory.id for item in retrieval.memories],
-            event_ids=source_event_ids,
-            provider="deterministic",
-            model=ENGINE_VERSION,
-            latency_ms=latency_ms,
-        )
-        await self.usage.increment(project_id=project.id, metric="ai_queries")
+        run_id = None
+        if record:
+            run_id = await self._record_run(
+                project=project,
+                customer=customer,
+                kind="query",
+                query=query,
+                answer=composed.text,
+                ranked=retrieval.memories,
+                cited=cited,
+                event_ids=source_event_ids,
+                latency_ms=latency_ms,
+                session_id=session_id,
+                agent=agent,
+                extra={
+                    "analysis": analysis.as_dict(),
+                    "strategies": retrieval.strategies_used,
+                    "answer_strategy": composed.strategy,
+                    "reasoning": composed.reasoning,
+                    "evidence": composed.evidence,
+                    "confidence": round(composed.confidence, 3),
+                },
+            )
+            await self.usage.increment(project_id=project.id, metric="ai_queries")
 
         return QueryResult(
+            run_id=run_id,
             answer=composed.text,
             confidence=composed.confidence,
             memories=memories_payload,
@@ -1086,12 +1119,16 @@ class MemoryEngine:
         task: str | None = None,
         limit: int = 20,
         token_budget: int | None = None,
+        session_id: str | None = None,
+        agent: str | None = None,
     ) -> CustomerContext:
         """Assemble the context an external AI agent needs before it answers."""
+        started = time.perf_counter()
         effective_query = query or task or "important context about this customer"
         retrieval = await self.search(
             project=project, customer=customer, query=effective_query, limit=limit
         )
+        memories = await self._with_floor(project, customer, retrieval.memories, limit=limit)
 
         recent_events = await self.events.recent_for_customer(
             project_id=project.id, customer_id=customer.id, limit=8
@@ -1105,7 +1142,7 @@ class MemoryEngine:
                 "name": customer.name,
                 "email": customer.email,
             },
-            memories=retrieval.memories,
+            memories=memories,
             recent_events=[
                 {
                     "id": event.id,
@@ -1117,17 +1154,121 @@ class MemoryEngine:
             relationships=edges,
             token_budget=token_budget,
         )
-        await self.query_logs.record(
-            project_id=project.id,
-            customer_id=customer.id,
+        included = set(context.memory_ids)
+        context.run_id = await self._record_run(
+            project=project,
+            customer=customer,
             kind="context",
             query=effective_query,
+            # What the agent was actually handed: the budget can drop the tail.
+            ranked=[item for item in memories if item.memory.id in included],
             memory_ids=context.memory_ids,
-            provider="deterministic",
-            model=ENGINE_VERSION,
+            latency_ms=int((time.perf_counter() - started) * 1000),
+            session_id=session_id,
+            agent=agent,
+            extra={
+                "strategies": retrieval.strategies_used,
+                "token_count": context.token_count,
+                "token_budget": token_budget,
+                "truncated": context.truncated,
+                "dropped_by_budget": [item.memory.id for item in memories if item.memory.id not in included],
+            },
         )
         await self.usage.increment(project_id=project.id, metric="context_requests")
         return context
+
+    async def _record_run(
+        self,
+        *,
+        project: Project,
+        customer: Customer,
+        kind: str,
+        query: str,
+        ranked: Sequence[Any],
+        answer: str | None = None,
+        cited: set[str] | frozenset[str] = frozenset(),
+        memory_ids: list[str] | None = None,
+        event_ids: list[str] | None = None,
+        latency_ms: int = 0,
+        session_id: str | None = None,
+        agent: str | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> str:
+        """Store a context build or an answer as an agent run, and return its id.
+
+        The trace is what "why did my agent say that?" needs a month later, when the
+        memories may have changed: each memory's rank and the scores that put it there,
+        whether the answer cited it, what the reader's clearance and profile held back,
+        and the customer snapshot current at that moment.
+        """
+        access = current_access()
+        snapshot = await self.customer_snapshots.latest(project_id=project.id, customer_id=customer.id)
+        withheld = await self.memories.withheld_count(project_id=project.id, customer_id=customer.id)
+        readable = self.memories.readable_types
+        trace = {
+            "engine": ENGINE_VERSION,
+            "memories": [
+                {
+                    **item.explain(),
+                    "rank": rank,
+                    "type": str(item.memory.type),
+                    "cited": item.memory.id in cited,
+                }
+                for rank, item in enumerate(ranked, start=1)
+            ],
+            "withheld": withheld,
+            "cleared": self.cleared,
+            "readable_types": sorted(readable) if readable is not None else None,
+            "profile": access.profile,
+            **(extra or {}),
+        }
+        log = await self.query_logs.record(
+            project_id=project.id,
+            customer_id=customer.id,
+            kind=kind,
+            query=query,
+            answer=answer,
+            memory_ids=memory_ids if memory_ids is not None else [item.memory.id for item in ranked],
+            event_ids=event_ids,
+            provider="deterministic",
+            model=ENGINE_VERSION,
+            latency_ms=latency_ms,
+            api_key_id=access.api_key_id,
+            agent=agent or access.agent,
+            session_id=session_id,
+            snapshot_id=snapshot.id if snapshot else None,
+            cleared=self.cleared,
+            trace=trace,
+        )
+        return log.id
+
+    async def _with_floor(
+        self, project: Project, customer: Customer, retrieved: list[Any], *, limit: int
+    ) -> list[Any]:
+        """What the task asked about, then the customer's most important memories.
+
+        Retrieval's own fallback fires only when *nothing* matches. With six recall
+        strategies something nearly always matches, so a vague request ("support_response")
+        would come back with one loosely related memory — a context with no open problems,
+        handed to an agent about to reply to that customer. Context is a briefing, not a
+        search result, so it is topped up to ``limit`` with the memories that matter most,
+        after the relevant ones and marked as such.
+        """
+        if len(retrieved) >= limit:
+            return retrieved
+        present = {item.memory.id for item in retrieved}
+        ranker = self.build_retriever(project).ranker
+        floor: list[Any] = []
+        for memory in await self.memories.top_for_customer(
+            project_id=project.id, customer_id=customer.id, limit=limit
+        ):
+            if memory.id in present:
+                continue
+            item = ScoredMemory(memory=memory, strategies={"floor"})
+            ranker.score(item)
+            floor.append(item)
+        floor.sort(key=lambda item: item.score, reverse=True)
+        return [*retrieved, *floor[: limit - len(retrieved)]]
 
     # ------------------------------------------------------------- utilities
 

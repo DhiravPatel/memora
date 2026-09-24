@@ -6,6 +6,7 @@ from fastapi import APIRouter
 
 from app.core.dependencies import ApiProject, DBSession, Engine
 from app.schemas.query import ContextRequest, ContextResponse
+from app.services.run_service import session_for
 from common.errors import NotFoundError
 from database.repositories import CustomerRepository
 
@@ -24,6 +25,7 @@ async def build_context(
     if customer is None:
         raise NotFoundError(f"Customer '{payload.customer_id}' not found.")
 
+    agent_session = await session_for(session, project.id, customer.id, payload.session_id)
     context = await engine.build_context(
         project=project,
         customer=customer,
@@ -31,10 +33,13 @@ async def build_context(
         task=payload.task,
         limit=payload.limit,
         token_budget=payload.token_budget,
+        session_id=agent_session.id if agent_session else None,
+        agent=agent_session.agent if agent_session else None,
     )
     return ContextResponse(
         customer_context=context.to_dict(),
         prompt_text=context.to_prompt_text() if payload.format == "text" else None,
         token_count=context.token_count,
         truncated=context.truncated,
+        run_id=context.run_id,
     )

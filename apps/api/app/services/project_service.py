@@ -93,12 +93,14 @@ class ProjectService:
             await self._assert_unique_name(project, name)
             project.name = name.strip()
         previous_policies = (project.settings or {}).get("restriction_policies")
+        previous_lifecycle = (project.settings or {}).get("lifecycle")
         if settings is not None:
             # Every write goes through the same validation the settings form renders from,
             # so an out-of-range value can never reach the engine.
             validated = validate_settings(settings)
             await self.projects.update_settings(project, validated)
             await self._reclassify_if_policy_changed(project, previous_policies, validated)
+            await self._reevaluate_if_lifecycle_changed(project, previous_lifecycle, validated)
         await self.audit.record(
             action=AuditAction.CONFIGURATION_CHANGE,
             actor_type="user",
@@ -120,9 +122,11 @@ class ProjectService:
     ) -> dict[str, Any]:
         """Validate and persist a settings patch, returning the effective result."""
         previous = (project.settings or {}).get("restriction_policies")
+        previous_lifecycle = (project.settings or {}).get("lifecycle")
         validated = validate_settings(settings)
         await self.projects.update_settings(project, validated)
         await self._reclassify_if_policy_changed(project, previous, validated)
+        await self._reevaluate_if_lifecycle_changed(project, previous_lifecycle, validated)
         await self.audit.record(
             action=AuditAction.CONFIGURATION_CHANGE,
             actor_type="user" if actor_id else "system",
@@ -155,6 +159,19 @@ class ProjectService:
             rules=len(patch["restriction_policies"] or []),
             queued=queued is not None,
         )
+
+    async def _reevaluate_if_lifecycle_changed(
+        self, project: Project, previous: Any, patch: dict[str, Any]
+    ) -> None:
+        """Move every customer under the new rules now, rather than one event at a time.
+
+        A changed machine applied lazily would leave quiet customers in states the new
+        rules would never have put them in — possibly states that no longer exist.
+        """
+        if "lifecycle" not in patch or patch["lifecycle"] == previous:
+            return
+        queued = await enqueue("refresh_customer_states", project.id, "lifecycle_changed")
+        logger.info("lifecycle.reevaluate_queued", project_id=project.id, queued=queued is not None)
 
     async def _assert_unique_name(self, project: Project, name: str) -> None:
         siblings = await self.projects.list_for_organization(project.organization_id)

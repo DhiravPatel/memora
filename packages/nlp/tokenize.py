@@ -198,6 +198,18 @@ def lemmas(text: str, *, drop_stopwords: bool = False) -> list[str]:
     return tokens
 
 
+def surface_words(text: str) -> list[str]:
+    """Stopword-free tokens *as written* — lowercased, not lemmatised.
+
+    For anything a person reads back (a fact document, a rule trace) and for
+    :func:`root`, which needs the real word: the lemmatiser has already turned "salaries"
+    into "salari" and "failures" into "failur", and a root taken from those can no longer
+    find its family.
+    """
+    words = [token for token in tokenize(expand_contractions(text)) if len(token) > 1]
+    return [word for word in words if word not in STOPWORDS and lemmatize(word) not in STOPWORDS]
+
+
 def lemmatized_text(text: str) -> str:
     """A lemmatised rendering used for cue-phrase matching."""
     return " ".join(lemmas(text))
@@ -234,3 +246,53 @@ def is_question(sentence: str) -> bool:
 
 def word_count(text: str) -> int:
     return len(tokenize(text))
+
+
+# (suffix, replacement, minimum stem length). Longest first; the minimum keeps short words
+# from being eaten — "create" must not become "cr" while "integrate" becomes "integr".
+_ROOT_SUFFIXES: tuple[tuple[str, str, int], ...] = (
+    ("ations", "", 4), ("ation", "", 4), ("ating", "", 4), ("ated", "", 4), ("ates", "", 4),
+    ("ate", "", 4), ("ions", "", 4), ("ion", "", 4), ("ments", "", 4), ("ment", "", 4),
+    ("ures", "", 4), ("ure", "", 4), ("ings", "", 3), ("ing", "", 3), ("ies", "y", 3),
+    ("ied", "y", 3), ("ed", "", 3), ("es", "", 3), ("s", "", 3), ("e", "", 3),
+)
+# Doubled consonants that are an artefact of inflection ("shipped", "planning") rather
+# than part of the word ("bill", "pass", "buzz").
+_UNDOUBLE = frozenset("bcdfgkmnprtv")
+
+
+def root(word: str) -> str:
+    """A word's family, for matching what a person means rather than what they typed.
+
+    The lemmatizer is built for retrieval and keeps derivations apart — "failing" and
+    "failure", "billing" and "bill", "integrate" and "integration" land on different stems.
+    A rule that says *mentions sync failures* means all of them. This folds inflection and
+    the common derivational suffixes onto one root, so a family matches itself:
+
+        fail, failed, failing, failure, failures      -> fail
+        bill, bills, billing                          -> bill
+        integrate, integrated, integration            -> integr
+        salary, salaries                              -> salary
+
+    Deliberately conservative about agentive "-er": folding "customer" into "custom" would
+    make a rule fire on words it was never about.
+    """
+    word = word.lower()
+    for suffix, replacement, minimum in _ROOT_SUFFIXES:
+        if word.endswith(suffix):
+            # "pass", "status", "analysis" end in an s that is part of the word.
+            if suffix == "s" and word.endswith(("ss", "us", "is")):
+                continue
+            stem = word[: len(word) - len(suffix)]
+            if len(stem) + len(replacement) < minimum:
+                continue
+            stem += replacement
+            if (
+                suffix in ("ing", "ings", "ed")
+                and len(stem) >= 4
+                and stem[-1] == stem[-2]
+                and stem[-1] in _UNDOUBLE
+            ):
+                stem = stem[:-1]
+            return stem
+    return word

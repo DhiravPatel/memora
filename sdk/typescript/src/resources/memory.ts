@@ -25,6 +25,8 @@ export class MemoryResource {
     query: string;
     limit?: number;
     includeTrace?: boolean;
+    /** The agent session this question belongs to, so its run is filed with it. */
+    sessionId?: string;
   }): Promise<QueryResult> {
     const raw = await this.http.request<any>({
       method: "POST",
@@ -34,6 +36,7 @@ export class MemoryResource {
         query: input.query,
         limit: input.limit,
         include_trace: input.includeTrace ?? false,
+        session_id: input.sessionId,
       },
     });
     return {
@@ -42,6 +45,7 @@ export class MemoryResource {
       memories: (raw.memories ?? []).map(toMemory),
       sources: (raw.sources ?? []).map((source: any) => ({ eventId: source.event_id })),
       trace: raw.trace ?? undefined,
+      runId: raw.run_id ?? null,
     };
   }
 
@@ -73,6 +77,7 @@ export class MemoryResource {
     limit?: number;
     tokenBudget?: number;
     format?: "json" | "text";
+    sessionId?: string;
   }): Promise<ContextResult> {
     const raw = await this.http.request<any>({
       method: "POST",
@@ -84,6 +89,7 @@ export class MemoryResource {
         limit: input.limit,
         token_budget: input.tokenBudget,
         format: input.format ?? "json",
+        session_id: input.sessionId,
       },
     });
     const context = raw.customer_context ?? {};
@@ -101,6 +107,7 @@ export class MemoryResource {
       promptText: raw.prompt_text ?? null,
       tokenCount: raw.token_count ?? 0,
       truncated: raw.truncated ?? false,
+      runId: raw.run_id ?? null,
     };
   }
 

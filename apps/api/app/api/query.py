@@ -13,6 +13,7 @@ from app.schemas.query import (
     MemorySearchResponse,
     QueriedMemory,
 )
+from app.services.run_service import session_for
 from common.errors import NotFoundError
 from database.repositories import CustomerRepository
 
@@ -31,8 +32,14 @@ async def query_memory(
     if customer is None:
         raise NotFoundError(f"Customer '{payload.customer_id}' not found.")
 
+    agent_session = await session_for(session, project.id, customer.id, payload.session_id)
     result = await engine.answer(
-        project=project, customer=customer, query=payload.query, limit=payload.limit
+        project=project,
+        customer=customer,
+        query=payload.query,
+        limit=payload.limit,
+        session_id=agent_session.id if agent_session else None,
+        agent=agent_session.agent if agent_session else None,
     )
     return MemoryQueryResponse(
         answer=result.answer,
@@ -40,7 +47,9 @@ async def query_memory(
         memories=[QueriedMemory(**memory) for memory in result.memories],
         sources=[EvidenceOut(**source) for source in result.sources],
         trace=result.trace if payload.include_trace else None,
+        run_id=result.run_id,
     )
+
 
 
 @router.post("/search", response_model=MemorySearchResponse)

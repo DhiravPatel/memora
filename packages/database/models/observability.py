@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Any
 
-from sqlalchemy import Date, DateTime, ForeignKey, Index, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Index, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -50,10 +50,18 @@ class UsageRecord(Base):
 
 
 class QueryLog(Base):
-    """Every answer is traceable: query → memories → source events → composed response."""
+    """Every answer is traceable: query → memories → source events → composed response.
+
+    Each row is also an *agent run* (§26 3.4): who asked (key, profile, session), what
+    the customer's recorded state was at that moment (``snapshot_id``), and in ``trace``
+    why each memory was retrieved and what the reader's clearance and profile held back.
+    """
 
     __tablename__ = "query_logs"
-    __table_args__ = (Index("ix_query_logs_project_created", "project_id", "created_at"),)
+    __table_args__ = (
+        Index("ix_query_logs_project_created", "project_id", "created_at"),
+        Index("ix_query_logs_session", "session_id"),
+    )
 
     id: Mapped[str] = mapped_column(String(ID_LENGTH), primary_key=True)
     project_id: Mapped[str] = mapped_column(
@@ -70,4 +78,12 @@ class QueryLog(Base):
     prompt_tokens: Mapped[int] = mapped_column(nullable=False, default=0)
     completion_tokens: Mapped[int] = mapped_column(nullable=False, default=0)
     latency_ms: Mapped[int] = mapped_column(nullable=False, default=0)
+    # Who asked. Null on rows written before runs were recorded, and for dashboard users.
+    api_key_id: Mapped[str | None] = mapped_column(String(ID_LENGTH))
+    agent: Mapped[str | None] = mapped_column(String(120))
+    session_id: Mapped[str | None] = mapped_column(String(ID_LENGTH))
+    # The customer snapshot current when the question was asked: "what did we know then".
+    snapshot_id: Mapped[str | None] = mapped_column(String(ID_LENGTH))
+    cleared: Mapped[bool | None] = mapped_column(Boolean)
+    trace: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

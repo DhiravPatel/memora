@@ -13,7 +13,7 @@ import { useSession } from "@/hooks/use-session";
 import { api } from "@/lib/api";
 import { formatDate, formatRelative } from "@/lib/format";
 import { cn, SCOPE_COLORS } from "@/lib/utils";
-import type { ApiKey, ApiKeyWithSecret, ScopeInfo } from "@/lib/types";
+import type { AgentProfile, ApiKey, ApiKeyWithSecret, ScopeInfo } from "@/lib/types";
 
 const EXPIRY_OPTIONS = [
   { label: "Never expires", value: "" },
@@ -27,9 +27,22 @@ export default function ApiKeysPage() {
   const queryClient = useQueryClient();
   const [name, setName] = useState("");
   const [expiry, setExpiry] = useState("");
-  const [selected, setSelected] = useState<string[]>(["events:write", "memory:read", "customers:read"]);
+  const [selected, setSelected] = useState<string[]>([
+    "events:write",
+    "memory:read",
+    "customers:read",
+  ]);
   const [revealed, setRevealed] = useState<ApiKeyWithSecret | null>(null);
   const [showRevoked, setShowRevoked] = useState(false);
+  const [profileId, setProfileId] = useState("");
+
+  const profiles = useQuery({
+    queryKey: ["agent-profiles", projectId],
+    queryFn: () => api<AgentProfile[]>(`/v1/projects/${projectId}/agent/profiles`),
+    enabled: Boolean(projectId),
+  });
+  const profileName = (id: string | null) =>
+    profiles.data?.find((profile) => profile.id === id)?.name ?? id;
 
   const keys = useQuery({
     queryKey: ["api-keys", projectId, showRevoked],
@@ -54,12 +67,26 @@ export default function ApiKeysPage() {
           name,
           scopes: selected,
           expires_in_days: expiry ? Number(expiry) : undefined,
+          agent_profile_id: profileId || undefined,
         },
       }),
     onSuccess: (created) => {
       setRevealed(created);
       setName("");
       queryClient.invalidateQueries({ queryKey: ["api-keys"] });
+    },
+  });
+
+  // Rebinding a live key changes what it can read on its very next request.
+  const bind = useMutation({
+    mutationFn: ({ keyId, agentProfileId }: { keyId: string; agentProfileId: string }) =>
+      api<ApiKey>(`/v1/projects/${projectId}/api-keys/${keyId}`, {
+        method: "PATCH",
+        body: { agent_profile_id: agentProfileId || null },
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["api-keys"] });
+      queryClient.invalidateQueries({ queryKey: ["agent-profiles", projectId] });
     },
   });
 
@@ -115,7 +142,9 @@ export default function ApiKeysPage() {
       <Card>
         <CardHeader>
           <CardTitle>Create a key</CardTitle>
-          <CardDescription>Name it for where it runs, and grant only what it needs.</CardDescription>
+          <CardDescription>
+            Name it for where it runs, and grant only what it needs.
+          </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="grid gap-3 sm:grid-cols-2">
@@ -131,13 +160,39 @@ export default function ApiKeysPage() {
             </div>
             <div>
               <Label htmlFor="key-expiry">Expiry</Label>
-              <Select id="key-expiry" value={expiry} onChange={(event) => setExpiry(event.target.value)}>
+              <Select
+                id="key-expiry"
+                value={expiry}
+                onChange={(event) => setExpiry(event.target.value)}
+              >
                 {EXPIRY_OPTIONS.map((option) => (
                   <option key={option.value} value={option.value}>
                     {option.label}
                   </option>
                 ))}
               </Select>
+            </div>
+            <div className="sm:col-span-2">
+              <Label htmlFor="key-profile">Acts as agent profile</Label>
+              <Select
+                id="key-profile"
+                value={profileId}
+                onChange={(event) => setProfileId(event.target.value)}
+              >
+                <option value="">No profile — the scopes alone decide</option>
+                {profiles.data?.map((profile) => (
+                  <option key={profile.id} value={profile.id}>
+                    {profile.name}
+                    {profile.readable_types.length
+                      ? ` — reads ${profile.readable_types.join(", ")}`
+                      : " — reads everything"}
+                  </option>
+                ))}
+              </Select>
+              <p className="label mt-1">
+                A profile narrows the key: it reads only the profile&apos;s memory types and is held
+                to its actions. Manage profiles on the Agents page.
+              </p>
             </div>
           </div>
 
@@ -199,12 +254,13 @@ export default function ApiKeysPage() {
         {keys.error && <ErrorState error={keys.error} />}
         {keys.data?.length === 0 && <EmptyState title="No keys" />}
         {!!keys.data?.length && (
-          <Table className="min-w-[900px]">
+          <Table className="min-w-[1060px]">
             <THead>
               <TR>
                 <TH>Name</TH>
                 <TH className="w-44">Prefix</TH>
                 <TH>Scopes</TH>
+                <TH className="w-44">Agent profile</TH>
                 <TH className="w-28">Used</TH>
                 <TH className="w-32">Last used</TH>
                 <TH className="w-28">Expires</TH>
@@ -227,6 +283,29 @@ export default function ApiKeysPage() {
                         </Badge>
                       ))}
                     </div>
+                  </TD>
+                  <TD>
+                    {key.is_active ? (
+                      <Select
+                        value={key.agent_profile_id ?? ""}
+                        onChange={(event) =>
+                          bind.mutate({ keyId: key.id, agentProfileId: event.target.value })
+                        }
+                        className="h-7 text-[11px]"
+                        title="The agent profile this key acts as"
+                      >
+                        <option value="">none</option>
+                        {profiles.data?.map((profile) => (
+                          <option key={profile.id} value={profile.id}>
+                            {profile.name}
+                          </option>
+                        ))}
+                      </Select>
+                    ) : (
+                      <span className="label">
+                        {key.agent_profile_id ? profileName(key.agent_profile_id) : "—"}
+                      </span>
+                    )}
                   </TD>
                   <TD className="numeric text-[11px] text-muted-foreground">{key.use_count}</TD>
                   <TD className="label whitespace-nowrap">{formatRelative(key.last_used_at)}</TD>
@@ -255,6 +334,7 @@ export default function ApiKeysPage() {
           </Table>
         )}
         {revoke.error && <ErrorState error={revoke.error} />}
+        {bind.error && <ErrorState error={bind.error} />}
       </Card>
     </div>
   );

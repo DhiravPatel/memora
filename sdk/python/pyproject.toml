@@ -6,6 +6,9 @@ requires-python = ">=3.10"
 dependencies = ["httpx>=0.27.0"]
 readme = "README.md"
 
+[project.scripts]
+ai-memory-mcp = "ai_memory.mcp.__main__:main"
+
 [project.optional-dependencies]
 dev = ["pytest>=8.3.0", "pytest-asyncio>=0.24.0", "respx>=0.21.0"]
 

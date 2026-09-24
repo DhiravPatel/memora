@@ -6,6 +6,8 @@ hold a project API key in the browser.
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from fastapi import APIRouter, Query
 
 from app.api.customers import _sections
@@ -13,6 +15,7 @@ from app.core.dependencies import (
     Clearance,
     CurrentUserDep,
     DBSession,
+    EmbedderDep,
     Engine,
     UserProject,
 )
@@ -20,6 +23,16 @@ from app.core.queue import enqueue
 from app.schemas.agents import SessionOut
 from app.schemas.common import DeletionResult, Message, Page
 from app.schemas.customers import Customer360, CustomerOut, CustomerTimeline
+from app.schemas.evaluation import (
+    EvalCaseOut,
+    EvalCasesIn,
+    EvalRunIn,
+    EvalRunOut,
+    EvalSetDetail,
+    EvalSetIn,
+    EvalSetOut,
+    EvalSuggestion,
+)
 from app.schemas.events import EventExplanationOut, EventOut, EventPreviewIn
 from app.schemas.goals import GoalOut, GoalSummaryOut, GoalUpdate
 from app.schemas.health import (
@@ -38,6 +51,7 @@ from app.schemas.memories import (
     MemoryOut,
     VocabularyOut,
 )
+from app.schemas.quality import QualityReport
 from app.schemas.query import (
     ContextRequest,
     ContextResponse,
@@ -51,15 +65,35 @@ from app.schemas.signals import (
     RecommendationsOut,
     SignalReportOut,
 )
+from app.schemas.state import (
+    ConditionEvaluateIn,
+    ConditionEvaluationOut,
+    ConditionIn,
+    ConditionValidation,
+    CurrentStateOut,
+    CustomerFactsOut,
+    CustomerStateOut,
+    FactCatalogOut,
+    LifecycleOut,
+    SnapshotOut,
+    SnapshotSummaryOut,
+    StateRefreshOut,
+    StateSetIn,
+)
+from app.services import evaluation_views, state_views
 from app.services.agent_service import AgentService
 from app.services.customer360_service import Customer360Service
+from app.services.customer_state_service import CustomerStateService
 from app.services.deletion_service import DeletionService
+from app.services.evaluation_service import EvaluationService
 from app.services.event_service import EventService
 from app.services.export_service import ExportService
 from app.services.feedback_service import FeedbackService
 from app.services.goal_service import GoalService
 from app.services.health_service import HealthService
 from app.services.memory_service import MemoryService
+from app.services.quality_service import QualityService
+from app.services.reader import Reader
 from app.services.serializers import (
     customer_out,
     event_out,
@@ -81,6 +115,7 @@ from common.enums import (
     VocabularyStatus,
 )
 from common.errors import NotFoundError
+from common.time import ensure_utc
 from database.repositories import (
     AuditRepository,
     CustomerRepository,
@@ -278,10 +313,11 @@ async def customer_signals(
     customer_id: str,
     project: UserProject,
     session: DBSession,
+    cleared: Clearance,
     series: bool = Query(default=True),
 ) -> SignalReportOut:
     customer = await _resolve_customer(session, project.id, customer_id)
-    result = await SignalService(session).for_customer(
+    result = await SignalService(session, cleared=cleared).for_customer(
         project=project, customer=customer, include_series=series
     )
     return signal_report_out(result)
@@ -289,10 +325,10 @@ async def customer_signals(
 
 @router.get("/customers/{customer_id}/recommendations", response_model=RecommendationsOut)
 async def customer_recommendations(
-    customer_id: str, project: UserProject, session: DBSession
+    customer_id: str, project: UserProject, session: DBSession, cleared: Clearance
 ) -> RecommendationsOut:
     customer = await _resolve_customer(session, project.id, customer_id)
-    actions, report = await SignalService(session).recommendations(
+    actions, report = await SignalService(session, cleared=cleared).recommendations(
         project=project, customer=customer
     )
     return RecommendationsOut(
@@ -310,6 +346,7 @@ async def customer_recommendations(
 async def portfolio_signals(
     project: UserProject,
     session: DBSession,
+    cleared: Clearance,
     trajectories: str = Query(
         default="", description="Comma-separated: improving, steady, declining"
     ),
@@ -317,7 +354,7 @@ async def portfolio_signals(
 ) -> PortfolioSignalsOut:
     """Every customer's forecast, declining first — the list somebody works through."""
     wanted = tuple(item.strip() for item in trajectories.split(",") if item.strip())
-    portfolio = await SignalService(session).portfolio(
+    portfolio = await SignalService(session, cleared=cleared).portfolio(
         project=project, trajectories=wanted, limit=limit
     )
     return PortfolioSignalsOut(
@@ -332,12 +369,13 @@ async def customer_goals(
     customer_id: str,
     project: UserProject,
     session: DBSession,
+    cleared: Clearance,
     status: GoalStatus | None = None,
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
 ) -> Page[GoalOut]:
     customer = await _resolve_customer(session, project.id, customer_id)
-    goals, total = await GoalService(session).list_for_customer(
+    goals, total = await GoalService(session, cleared=cleared).list_for_customer(
         project=project, customer=customer, status=status, limit=limit, offset=offset
     )
     return Page[GoalOut](
@@ -349,11 +387,12 @@ async def customer_goals(
 async def list_goals(
     project: UserProject,
     session: DBSession,
+    cleared: Clearance,
     status: GoalStatus | None = None,
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
 ) -> Page[GoalOut]:
-    goals, total = await GoalService(session).list_for_project(
+    goals, total = await GoalService(session, cleared=cleared).list_for_project(
         project=project, status=status, limit=limit, offset=offset
     )
     return Page[GoalOut](
@@ -374,10 +413,11 @@ async def override_goal(
     project: UserProject,
     session: DBSession,
     user: CurrentUserDep,
+    cleared: Clearance,
 ) -> GoalOut:
     """A person's verdict on a goal. The tracker leaves overridden goals alone."""
     user.require(UserRole.MEMBER)
-    goal = await GoalService(session).override(
+    goal = await GoalService(session, cleared=cleared).override(
         project=project,
         goal_id=goal_id,
         status=GoalStatus(payload.status),
@@ -401,8 +441,9 @@ async def list_agent_sessions(
     sessions, total = await AgentService(session, engine).list(
         project=project, customer_id=customer_id, status=status, limit=limit, offset=offset
     )
+    mask = await Reader(session, cleared=engine.cleared).session_mask(project.id, sessions)
     return Page[SessionOut](
-        data=[session_out(item) for item in sessions], total=total, limit=limit, offset=offset
+        data=[session_out(item, mask=mask) for item in sessions], total=total, limit=limit, offset=offset
     )
 
 
@@ -411,7 +452,10 @@ async def agent_session_detail(
     session_id: str, project: UserProject, session: DBSession, engine: Engine
 ) -> SessionOut:
     view = await AgentService(session, engine).detail(project=project, session_id=session_id)
-    return session_out(view.session, turns=view.turns, prior=view.prior_sessions)
+    mask = await Reader(session, cleared=engine.cleared).session_mask(
+        project.id, [view.session], view.turns
+    )
+    return session_out(view.session, turns=view.turns, prior=view.prior_sessions, mask=mask)
 
 
 @router.post("/memories/{memory_id}/feedback", response_model=FeedbackOut)
@@ -422,9 +466,10 @@ async def memory_feedback(
     session: DBSession,
     cleared: Clearance,
     current_user: CurrentUserDep,
+    embedder: EmbedderDep,
 ) -> FeedbackOut:
     current_user.require(UserRole.MEMBER)
-    result = await FeedbackService(session, cleared=cleared).submit(
+    result = await FeedbackService(session, cleared=cleared, embedder=embedder).submit(
         project=project,
         memory_id=memory_id,
         verdict=payload.verdict,
@@ -440,6 +485,7 @@ async def memory_feedback(
 async def list_events(
     project: UserProject,
     session: DBSession,
+    cleared: Clearance,
     customer_id: str | None = None,
     event_type: str | None = None,
     status: EventStatus | None = None,
@@ -457,8 +503,9 @@ async def list_events(
         limit=limit,
         offset=offset,
     )
+    mask = await Reader(session, cleared=cleared).event_mask(project.id, events)
     return Page[EventOut](
-        data=[event_out(event) for event in events], total=total, limit=limit, offset=offset
+        data=[event_out(event, mask) for event in events], total=total, limit=limit, offset=offset
     )
 
 
@@ -719,4 +766,288 @@ async def playground_context(
         prompt_text=context.to_prompt_text(),
         token_count=context.token_count,
         truncated=context.truncated,
+    )
+
+
+# ------------------------------------------------------------ conditions & facts
+
+
+@router.get("/conditions/catalog", response_model=FactCatalogOut)
+async def dashboard_fact_catalog(project: UserProject) -> FactCatalogOut:
+    return state_views.catalog()
+
+
+@router.post("/conditions/validate", response_model=ConditionValidation)
+async def dashboard_validate_condition(payload: ConditionIn, project: UserProject) -> ConditionValidation:
+    return state_views.validate(payload.condition)
+
+
+@router.post("/conditions/evaluate", response_model=ConditionEvaluationOut)
+async def dashboard_evaluate_condition(
+    payload: ConditionEvaluateIn, project: UserProject, session: DBSession, cleared: Clearance
+) -> ConditionEvaluationOut:
+    customer = await _resolve_customer(session, project.id, payload.customer_id)
+    return await state_views.evaluate(
+        session, project=project, customer=customer, condition=payload.condition, cleared=cleared
+    )
+
+
+@router.get("/customers/{customer_id}/facts", response_model=CustomerFactsOut)
+async def dashboard_customer_facts(
+    customer_id: str, project: UserProject, session: DBSession, cleared: Clearance
+) -> CustomerFactsOut:
+    customer = await _resolve_customer(session, project.id, customer_id)
+    return await state_views.customer_facts(session, project=project, customer=customer, cleared=cleared)
+
+
+# --------------------------------------------------------------------- lifecycle
+
+
+@router.get("/lifecycle", response_model=LifecycleOut)
+async def dashboard_lifecycle(project: UserProject, session: DBSession) -> LifecycleOut:
+    return await state_views.lifecycle(session, project=project)
+
+
+@router.get("/lifecycle/customers", response_model=Page[CustomerOut])
+async def dashboard_customers_in_state(
+    project: UserProject,
+    session: DBSession,
+    state: str = Query(min_length=1, max_length=64),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+) -> Page[CustomerOut]:
+    from app.api.lifecycle import customers_in_state
+
+    return await customers_in_state(project, session, state=state, limit=limit, offset=offset)
+
+
+@router.get("/customers/{customer_id}/state", response_model=CurrentStateOut)
+async def dashboard_customer_state(
+    customer_id: str, project: UserProject, session: DBSession, cleared: Clearance
+) -> CurrentStateOut:
+    customer = await _resolve_customer(session, project.id, customer_id)
+    return await state_views.current_state(session, project=project, customer=customer, cleared=cleared)
+
+
+@router.get("/customers/{customer_id}/state/history", response_model=Page[CustomerStateOut])
+async def dashboard_customer_state_history(
+    customer_id: str,
+    project: UserProject,
+    session: DBSession,
+    cleared: Clearance,
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+) -> Page[CustomerStateOut]:
+    customer = await _resolve_customer(session, project.id, customer_id)
+    return await state_views.state_history(
+        session, project=project, customer=customer, cleared=cleared, limit=limit, offset=offset
+    )
+
+
+@router.put("/customers/{customer_id}/state", response_model=CustomerStateOut)
+async def dashboard_set_customer_state(
+    customer_id: str,
+    payload: StateSetIn,
+    project: UserProject,
+    session: DBSession,
+    current_user: CurrentUserDep,
+) -> CustomerStateOut:
+    current_user.require(UserRole.MEMBER)
+    customer = await _resolve_customer(session, project.id, customer_id)
+    row = await CustomerStateService(session).set_state(
+        project=project,
+        customer=customer,
+        state=payload.state,
+        pin=payload.pin,
+        pin_days=payload.pin_days,
+        note=payload.note,
+        actor_type="user",
+        actor_id=current_user.user.id,
+    )
+    return state_views.state_out(row, sanitize=False)
+
+
+@router.delete("/customers/{customer_id}/state/pin", response_model=CustomerStateOut)
+async def dashboard_release_customer_state(
+    customer_id: str, project: UserProject, session: DBSession, current_user: CurrentUserDep
+) -> CustomerStateOut:
+    current_user.require(UserRole.MEMBER)
+    customer = await _resolve_customer(session, project.id, customer_id)
+    row = await CustomerStateService(session).release(
+        project=project, customer=customer, actor_type="user", actor_id=current_user.user.id
+    )
+    return state_views.state_out(row, sanitize=False)
+
+
+@router.post("/customers/{customer_id}/state/refresh", response_model=StateRefreshOut)
+async def dashboard_refresh_customer_state(
+    customer_id: str, project: UserProject, session: DBSession, current_user: CurrentUserDep
+) -> StateRefreshOut:
+    current_user.require(UserRole.MEMBER)
+    customer = await _resolve_customer(session, project.id, customer_id)
+    return await state_views.refresh_state(session, project=project, customer=customer)
+
+
+# --------------------------------------------------------------------- snapshots
+
+
+@router.get("/customers/{customer_id}/snapshots", response_model=Page[SnapshotSummaryOut])
+async def dashboard_customer_snapshots(
+    customer_id: str,
+    project: UserProject,
+    session: DBSession,
+    cleared: Clearance,
+    since: datetime | None = None,
+    until: datetime | None = None,
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+) -> Page[SnapshotSummaryOut]:
+    customer = await _resolve_customer(session, project.id, customer_id)
+    return await state_views.snapshots(
+        session,
+        project=project,
+        customer=customer,
+        cleared=cleared,
+        since=since,
+        until=until,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.get("/customers/{customer_id}/snapshots/at", response_model=SnapshotOut)
+async def dashboard_customer_snapshot_at(
+    customer_id: str,
+    project: UserProject,
+    session: DBSession,
+    cleared: Clearance,
+    time: datetime = Query(),
+) -> SnapshotOut:
+    customer = await _resolve_customer(session, project.id, customer_id)
+    return await state_views.snapshot_at(
+        session, project=project, customer=customer, moment=ensure_utc(time), cleared=cleared
+    )
+
+
+@router.get("/customers/{customer_id}/snapshots/{snapshot_id}", response_model=SnapshotOut)
+async def dashboard_customer_snapshot(
+    customer_id: str, snapshot_id: str, project: UserProject, session: DBSession, cleared: Clearance
+) -> SnapshotOut:
+    customer = await _resolve_customer(session, project.id, customer_id)
+    return await state_views.snapshot_detail(
+        session, project=project, customer=customer, snapshot_id=snapshot_id, cleared=cleared
+    )
+
+
+# -------------------------------------------------------------------- evaluation
+
+
+@router.get("/evals", response_model=list[EvalSetOut])
+async def dashboard_eval_sets(project: UserProject, session: DBSession) -> list[EvalSetOut]:
+    return await evaluation_views.list_sets(session, project=project)
+
+
+@router.post("/evals", response_model=EvalSetOut, status_code=201)
+async def dashboard_create_eval_set(
+    payload: EvalSetIn, project: UserProject, session: DBSession, current_user: CurrentUserDep
+) -> EvalSetOut:
+    current_user.require(UserRole.MEMBER)
+    return await evaluation_views.create_set(
+        session, project=project, name=payload.name, description=payload.description, actor_id=current_user.user.id
+    )
+
+
+@router.get("/evals/suggestions", response_model=list[EvalSuggestion])
+async def dashboard_eval_suggestions(
+    project: UserProject,
+    session: DBSession,
+    cleared: Clearance,
+    limit: int = Query(default=20, ge=1, le=100),
+) -> list[EvalSuggestion]:
+    return await evaluation_views.suggestions(session, project=project, limit=limit, cleared=cleared)
+
+
+@router.get("/evals/runs/{run_id}", response_model=EvalRunOut)
+async def dashboard_eval_run(
+    run_id: str, project: UserProject, session: DBSession, cleared: Clearance
+) -> EvalRunOut:
+    return await evaluation_views.get_run(session, project=project, run_id=run_id, cleared=cleared)
+
+
+@router.get("/evals/{set_id}", response_model=EvalSetDetail)
+async def dashboard_eval_set(set_id: str, project: UserProject, session: DBSession) -> EvalSetDetail:
+    return await evaluation_views.set_detail(session, project=project, set_id=set_id)
+
+
+@router.delete("/evals/{set_id}", response_model=Message)
+async def dashboard_delete_eval_set(
+    set_id: str, project: UserProject, session: DBSession, current_user: CurrentUserDep
+) -> Message:
+    current_user.require(UserRole.MEMBER)
+    await EvaluationService(session).delete_set(
+        project=project, set_id=set_id, actor_type="user", actor_id=current_user.user.id
+    )
+    return Message(message="Evaluation set deleted.")
+
+
+@router.post("/evals/{set_id}/cases", response_model=list[EvalCaseOut], status_code=201)
+async def dashboard_add_eval_cases(
+    set_id: str,
+    payload: EvalCasesIn,
+    project: UserProject,
+    session: DBSession,
+    cleared: Clearance,
+    current_user: CurrentUserDep,
+) -> list[EvalCaseOut]:
+    current_user.require(UserRole.MEMBER)
+    return await evaluation_views.add_cases(
+        session, project=project, set_id=set_id, cases=payload.cases, cleared=cleared
+    )
+
+
+@router.delete("/evals/{set_id}/cases/{case_id}", response_model=Message)
+async def dashboard_delete_eval_case(
+    set_id: str, case_id: str, project: UserProject, session: DBSession, current_user: CurrentUserDep
+) -> Message:
+    current_user.require(UserRole.MEMBER)
+    service = EvaluationService(session)
+    row = await service.get_set(project=project, set_id=set_id)
+    await service.delete_case(project=project, eval_set=row, case_id=case_id)
+    return Message(message="Case deleted.")
+
+
+@router.post("/evals/{set_id}/runs", response_model=EvalRunOut, status_code=201)
+async def dashboard_start_eval_run(
+    set_id: str,
+    payload: EvalRunIn,
+    project: UserProject,
+    session: DBSession,
+    cleared: Clearance,
+    embedder: EmbedderDep,
+    current_user: CurrentUserDep,
+) -> EvalRunOut:
+    current_user.require(UserRole.MEMBER)
+    return await evaluation_views.start_run(
+        session,
+        project=project,
+        set_id=set_id,
+        payload=payload,
+        cleared=cleared,
+        actor_id=current_user.user.id,
+        embedder=embedder,
+    )
+
+
+# ----------------------------------------------------------------------- quality
+
+
+@router.get("/quality", response_model=QualityReport)
+async def dashboard_quality(
+    project: UserProject,
+    session: DBSession,
+    cleared: Clearance,
+    days: int = Query(default=30, ge=1, le=365),
+) -> QualityReport:
+    return QualityReport(
+        **await QualityService(session, cleared=cleared).report(project=project, days=days)
     )

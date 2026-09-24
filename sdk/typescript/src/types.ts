@@ -26,6 +26,9 @@ export interface ClientOptions {
   /** Extra headers sent with every request. */
   headers?: Record<string, string>;
   fetch?: typeof globalThis.fetch;
+  /** Labels this client's runs and checks. A key bound to an agent profile is labelled by
+   *  the profile instead. */
+  agentName?: string;
 }
 
 export interface TrackEventInput {
@@ -80,6 +83,8 @@ export interface QueryResult {
   memories: QueriedMemory[];
   sources: { eventId: string }[];
   trace?: Record<string, unknown>;
+  /** The recorded agent run: `memory.guardrails.explainRun(runId)`. */
+  runId: string | null;
 }
 
 export interface ContextResult {
@@ -96,6 +101,7 @@ export interface ContextResult {
   promptText?: string | null;
   tokenCount: number;
   truncated: boolean;
+  runId: string | null;
 }
 
 export interface Customer {
@@ -415,4 +421,130 @@ export interface Customer360 {
   /** Memories this caller's clearance hid, across every section. */
   withheld: number;
   generatedAt: string;
+}
+
+/** A condition evaluated against one customer. Act on `matched`; unknown counts as false. */
+export interface ConditionResult {
+  condition: string;
+  outcome: "true" | "false" | "unknown";
+  matched: boolean;
+  explanation: string;
+  evidence: string[];
+  leaves: unknown[];
+  withheldFacts: string[];
+}
+
+/** Where a customer is in the project's lifecycle, and why. */
+export interface LifecycleState {
+  state: string;
+  previousState: string | null;
+  enteredAt: string;
+  source: string;
+  transition: string | null;
+  reason: string | null;
+  evidence: string[];
+  pinned: boolean;
+  pinnedUntil: string | null;
+}
+
+// ------------------------------------------------------------------ agents (§26 3)
+
+export type Decision = "allow" | "require_approval" | "deny";
+export type ApprovalStatus = "pending" | "approved" | "rejected" | "expired" | "used";
+
+export interface GuardrailReason {
+  rule: string;
+  /** profile, builtin, project or approval */
+  source: string;
+  decision: Decision;
+  explanation: string;
+  evidence: string[];
+  evaluation?: Record<string, unknown> | null;
+}
+
+export interface Approval {
+  id: string;
+  customerId: string;
+  checkId: string;
+  agent: string | null;
+  action: string;
+  request: Record<string, unknown>;
+  reasons: GuardrailReason[];
+  status: ApprovalStatus;
+  note: string | null;
+  decidedBy: string | null;
+  decidedAt: string | null;
+  usedAt: string | null;
+  expiresAt: string;
+  createdAt: string;
+}
+
+export interface ActionCheck {
+  id: string;
+  customerId: string;
+  action: string;
+  decision: Decision;
+  allowed: boolean;
+  /** The sentence to tell a person — or the model — why. */
+  summary: string;
+  reasons: GuardrailReason[];
+  evidence: string[];
+  approval: Approval | null;
+  agent: string | null;
+  profile: string | null;
+  request: Record<string, unknown>;
+  checkedAt: string;
+}
+
+export interface AgentRun {
+  id: string;
+  kind: "query" | "context";
+  customerId: string | null;
+  query: string;
+  answer: string | null;
+  agent: string | null;
+  sessionId: string | null;
+  snapshotId: string | null;
+  memoryCount: number;
+  citedCount: number;
+  withheld: number;
+  createdAt: string;
+  memoryIds?: string[];
+  trace?: Record<string, unknown>;
+}
+
+export interface RunMemory {
+  id: string;
+  rank: number;
+  type: string | null;
+  score: number;
+  strategies: string[];
+  cited: boolean;
+  scores: Record<string, unknown>;
+  visible: boolean;
+  /** The words as they were when the agent saw them. */
+  contentThen: string | null;
+  contentNow: string | null;
+  statusNow: string | null;
+  changedSince: { at: string; reason: string; content: string | null }[];
+}
+
+export interface RunExplanation {
+  run: AgentRun;
+  narrative: string[];
+  memories: RunMemory[];
+  heldBack: Record<string, unknown>;
+  stateThen: Record<string, unknown> | null;
+  checks: ActionCheck[];
+}
+
+export interface AgentProfile {
+  id: string;
+  name: string;
+  description: string | null;
+  readableTypes: string[];
+  canReadRestricted: boolean;
+  allowedActions: string[];
+  deniedActions: string[];
+  keys: number;
 }

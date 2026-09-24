@@ -18,6 +18,8 @@ from memory_engine.protocols import Embedder
 from memory_engine.ranking.ranker import MemoryRanker, RankingWeights
 from memory_engine.retrieval.query_analysis import QueryAnalysis, analyze
 from memory_engine.schemas import ScoredMemory
+from nlp.concepts import concepts_for_many, dice
+from nlp.tokenize import lemmatize, tokenize
 
 logger = get_logger(__name__)
 
@@ -63,6 +65,7 @@ class MemoryRetriever:
         limit: int = 10,
         types: Sequence[MemoryType] | None = None,
         include_semantic: bool = True,
+        include_concepts: bool = True,
         learned_synonyms: dict[str, tuple[str, ...]] | None = None,
     ) -> RetrievalResult:
         # The project's own mined vocabulary widens the keyword leg: a question about "the
@@ -93,6 +96,44 @@ class MemoryRetriever:
                 entry.similarity = max(entry.similarity, similarity)
                 entry.strategies.add("semantic")
             strategies.append("semantic")
+
+        async def concept() -> None:
+            """Paraphrase recall: memories about what was asked, in whatever words.
+
+            The question is widened with the project's learned vocabulary first, so a
+            synonym the project taught ("loader" for "importer") reaches the concept its
+            partner belongs to.
+            """
+            if not include_concepts or not query.strip():
+                return
+            words = [lemmatize(token) for token in tokenize(query)]
+            expansions = [
+                synonym
+                for word in words
+                for synonym in (learned_synonyms or {}).get(word, ())
+            ]
+            asked = concepts_for_many([query, " ".join(expansions)])
+            if not asked:
+                return
+            with observe(retrieval_latency, strategy="concept"):
+                rows = await self.memories.search_concepts(
+                    project_id=project_id,
+                    customer_id=customer_id,
+                    concepts=asked,
+                    limit=self.candidate_limit,
+                    types=explicit_types,
+                )
+            for memory in rows:
+                have = set(memory.concepts or [])
+                score = dice(asked, have)
+                if score <= 0:
+                    continue
+                entry = candidates.setdefault(memory.id, ScoredMemory(memory=memory))
+                if score > entry.concept_score:
+                    entry.concept_score = score
+                    entry.matched_concepts = sorted(have & set(asked))
+                entry.strategies.add("concept")
+            strategies.append("concept")
 
         async def keyword() -> None:
             with observe(retrieval_latency, strategy="keyword"):
@@ -167,6 +208,7 @@ class MemoryRetriever:
         # allow concurrent operations - so they run in sequence, cheapest constraint first.
         await semantic()
         await keyword()
+        await concept()
         await by_type()
         await temporal()
         entity_ids: list[str] = await entity()

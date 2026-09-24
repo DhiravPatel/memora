@@ -16,6 +16,11 @@ class MemoryQueryRequest(BaseModel):
     include_trace: bool = Field(
         default=False, description="Return why each memory was retrieved and ranked."
     )
+    session_id: str | None = Field(
+        default=None,
+        max_length=64,
+        description="The agent session this question belongs to, so its run is filed with it.",
+    )
 
 
 class MemorySearchRequest(BaseModel):
@@ -46,6 +51,9 @@ class MemoryQueryResponse(BaseModel):
     memories: list[QueriedMemory]
     sources: list[EvidenceOut]
     trace: dict[str, Any] | None = None
+    run_id: str | None = Field(
+        default=None, description="The recorded agent run — GET /v1/agent/runs/{run_id}/explain."
+    )
 
 
 class MemorySearchResponse(BaseModel):
@@ -60,6 +68,7 @@ class ContextRequest(BaseModel):
     limit: int = Field(default=20, ge=1, le=100)
     token_budget: int | None = Field(default=None, ge=200, le=20000)
     format: str = Field(default="json", pattern="^(json|text)$")
+    session_id: str | None = Field(default=None, max_length=64)
 
 
 class ContextResponse(BaseModel):
@@ -67,3 +76,4 @@ class ContextResponse(BaseModel):
     prompt_text: str | None = None
     token_count: int = 0
     truncated: bool = False
+    run_id: str | None = None

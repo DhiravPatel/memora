@@ -5,6 +5,8 @@ Kept in one place so a column rename cannot silently change the public API shape
 
 from __future__ import annotations
 
+from typing import Any
+
 from app.schemas.admin import (
     ApiKeyOut,
     InvitationOut,
@@ -45,6 +47,7 @@ from database.models import (
     WebhookDelivery,
     WebhookEndpoint,
 )
+from memory_engine.policy import WITHHELD
 
 
 def user_out(user: User) -> UserOut:
@@ -94,14 +97,21 @@ def customer_out(customer: Customer) -> CustomerOut:
     )
 
 
-def event_out(event: Event) -> EventOut:
+def event_out(event: Event, mask: Any = None) -> EventOut:
+    """``mask`` is a :class:`app.services.reader.EventMask` for a reader who may not see
+    everything: the payload of an event that fed a hidden memory is withheld, and so are
+    the words of hidden memories named in its outcome."""
+    withheld = mask is not None and event.id in mask.events
+    outcome = event.outcome
+    if outcome and mask is not None:
+        outcome = _masked_outcome(outcome, mask.memories)
     return EventOut(
         id=event.id,
         project_id=event.project_id,
         customer_id=event.customer_id,
         event_type=event.event_type,
         external_event_id=event.external_event_id,
-        data=event.data or {},
+        data={} if withheld else (event.data or {}),
         source=event.source,
         importance=event.importance,
         status=event.status,
@@ -109,8 +119,24 @@ def event_out(event: Event) -> EventOut:
         created_at=event.created_at,
         processed_at=event.processed_at,
         error=event.error,
-        outcome=EventExplanationOut(**event.outcome) if event.outcome else None,
+        outcome=EventExplanationOut(**outcome) if outcome else None,
+        withheld=withheld,
     )
+
+
+def _masked_outcome(outcome: dict[str, Any], hidden: frozenset[str]) -> dict[str, Any]:
+    if not hidden:
+        return outcome
+    plans = []
+    for plan in outcome.get("memories", []):
+        plan = dict(plan)
+        if plan.get("memory_id") in hidden:
+            plan["content"] = WITHHELD
+        if plan.get("closest_memory_id") in hidden:
+            plan["closest_memory_id"] = None
+            plan["closest_content"] = WITHHELD
+        plans.append(plan)
+    return {**outcome, "memories": plans}
 
 
 def memory_out(memory: Memory) -> MemoryOut:
@@ -196,6 +222,7 @@ def api_key_out(key: ApiKey) -> ApiKeyOut:
         name=key.name,
         key_prefix=key.key_prefix,
         scopes=list(key.scopes or []),
+        agent_profile_id=key.agent_profile_id,
         created_by=key.created_by,
         last_used_at=key.last_used_at,
         last_used_ip=key.last_used_ip,
@@ -317,36 +344,44 @@ def recommendation_out(recommendation) -> RecommendationOut:
     return RecommendationOut(**recommendation.as_dict())
 
 
-def turn_out(turn: AgentTurn) -> TurnOut:
+def turn_out(turn: AgentTurn, mask: Any = None) -> TurnOut:
     return TurnOut(
         id=turn.id,
         role=str(turn.role),
-        content=turn.content,
+        content=WITHHELD if mask is not None and turn.id in mask.turns else turn.content,
         occurred_at=turn.occurred_at,
         event_id=turn.event_id,
         retrieved_memory_ids=list(turn.retrieved_memory_ids or []),
     )
 
 
-def prior_session_out(session: AgentSession) -> PriorSessionOut:
+def prior_session_out(session: AgentSession, mask: Any = None) -> PriorSessionOut:
     return PriorSessionOut(
         id=session.id,
         agent=session.agent,
-        summary=session.summary or "",
+        summary=_session_summary(session, mask) or "",
         turn_count=session.turn_count,
         started_at=session.started_at,
         closed_at=session.closed_at,
     )
 
 
-def session_context_out(context, prior: list[AgentSession] | None = None) -> SessionContextOut:
+def session_context_out(
+    context, prior: list[AgentSession] | None = None, mask: Any = None
+) -> SessionContextOut:
     return SessionContextOut(
         text=context.to_prompt_text(),
         memory_ids=list(context.memory_ids),
         token_estimate=context.token_count,
         truncated=context.truncated,
-        prior_sessions=[prior_session_out(session) for session in (prior or [])],
+        prior_sessions=[prior_session_out(session, mask) for session in (prior or [])],
     )
+
+
+def _session_summary(session: AgentSession, mask: Any = None) -> str | None:
+    if session.summary and mask is not None and session.id in mask.summaries:
+        return WITHHELD
+    return session.summary
 
 
 def session_out(
@@ -356,7 +391,10 @@ def session_out(
     context=None,
     prior: list[AgentSession] | None = None,
     turns: list[AgentTurn] | None = None,
+    mask: Any = None,
 ) -> SessionOut:
+    """``mask`` is a :class:`app.services.reader.SessionMask` for a reader who may not see
+    everything."""
     return SessionOut(
         id=session.id,
         project_id=session.project_id,
@@ -369,10 +407,10 @@ def session_out(
         started_at=session.started_at,
         last_active_at=session.last_active_at,
         closed_at=session.closed_at,
-        summary=session.summary,
+        summary=_session_summary(session, mask),
         summary_memory_id=session.summary_memory_id,
         memory_ids=list(session.memory_ids or []),
         resumed=resumed,
-        context=session_context_out(context, prior) if context is not None else None,
-        turns=[turn_out(turn) for turn in (turns or [])],
+        context=session_context_out(context, prior, mask) if context is not None else None,
+        turns=[turn_out(turn, mask) for turn in (turns or [])],
     )

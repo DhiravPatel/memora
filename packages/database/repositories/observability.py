@@ -135,6 +135,12 @@ class QueryLogRepository(BaseRepository):
         prompt_tokens: int = 0,
         completion_tokens: int = 0,
         latency_ms: int = 0,
+        api_key_id: str | None = None,
+        agent: str | None = None,
+        session_id: str | None = None,
+        snapshot_id: str | None = None,
+        cleared: bool | None = None,
+        trace: dict[str, Any] | None = None,
     ) -> QueryLog:
         entry = QueryLog(
             id=new_id("qry"),
@@ -150,6 +156,12 @@ class QueryLogRepository(BaseRepository):
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             latency_ms=latency_ms,
+            api_key_id=api_key_id,
+            agent=agent,
+            session_id=session_id,
+            snapshot_id=snapshot_id,
+            cleared=cleared,
+            trace=trace,
             created_at=utcnow(),
         )
         self.session.add(entry)
@@ -166,6 +178,52 @@ class QueryLogRepository(BaseRepository):
             select(QueryLog).where(*conditions).order_by(QueryLog.created_at.desc()).limit(limit)
         )
         return list(result.scalars())
+
+    async def get(self, log_id: str, project_id: str) -> QueryLog | None:
+        result = await self.session.execute(
+            select(QueryLog).where(QueryLog.id == log_id, QueryLog.project_id == project_id)
+        )
+        return result.scalar_one_or_none()
+
+    async def runs(
+        self,
+        *,
+        project_id: str,
+        customer_id: str | None = None,
+        agent: str | None = None,
+        session_id: str | None = None,
+        api_key_id: str | None = None,
+        kind: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[list[QueryLog], int]:
+        """Query logs as agent runs, newest first, filtered the ways people debug by."""
+        conditions = [QueryLog.project_id == project_id]
+        if customer_id:
+            conditions.append(QueryLog.customer_id == customer_id)
+        if agent:
+            conditions.append(QueryLog.agent == agent)
+        if session_id:
+            conditions.append(QueryLog.session_id == session_id)
+        if api_key_id:
+            conditions.append(QueryLog.api_key_id == api_key_id)
+        if kind:
+            conditions.append(QueryLog.kind == kind)
+        if since:
+            conditions.append(QueryLog.created_at >= since)
+        if until:
+            conditions.append(QueryLog.created_at <= until)
+        total = await self.session.scalar(select(func.count()).select_from(QueryLog).where(*conditions))
+        result = await self.session.execute(
+            select(QueryLog)
+            .where(*conditions)
+            .order_by(QueryLog.created_at.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        return list(result.scalars()), int(total or 0)
 
     async def count_since(self, *, project_id: str, since: datetime) -> int:
         total = await self.session.scalar(

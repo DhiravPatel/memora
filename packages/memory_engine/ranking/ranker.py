@@ -56,6 +56,12 @@ class RankingWeights:
         ) or 1.0
 
 
+# A concept match is evidence the memory is *about* the question, not that it *says* it.
+# Discounted so that, at equal strength, the memory that uses the asker's own words ranks
+# first — the concept leg adds recall, it does not reorder what lexical matching found.
+CONCEPT_WEIGHT = 0.8
+
+
 class MemoryRanker:
     def __init__(self, weights: RankingWeights | None = None) -> None:
         self.weights = weights or RankingWeights()
@@ -63,7 +69,9 @@ class MemoryRanker:
     def score(self, candidate: ScoredMemory) -> float:
         memory = candidate.memory
         weights = self.weights
-        similarity = max(candidate.similarity, candidate.keyword_score)
+        similarity = max(
+            candidate.similarity, candidate.keyword_score, candidate.concept_score * CONCEPT_WEIGHT
+        )
         candidate.recency = candidate.recency or recency_score(
             memory.last_seen_at, memory.type
         )

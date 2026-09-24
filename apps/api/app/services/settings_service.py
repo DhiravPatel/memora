@@ -18,9 +18,17 @@ from common.settings import get_settings
 from database.models import Project
 from memory_engine.analytics.health import MAX_WEIGHT, MIN_WEIGHT
 from memory_engine.analytics.health import WEIGHTS as HEALTH_WEIGHTS
+from memory_engine.guardrails import BUILTIN_RULES, GuardrailError, compile_guardrails
+from memory_engine.lifecycle import DEFAULT_LIFECYCLE, LifecycleError, compile_lifecycle
 from memory_engine.policy import PolicyError, compile_policy
 
-FieldKind = Literal["number", "percent", "boolean", "map", "weights", "text", "policies"]
+FieldKind = Literal[
+    "number", "percent", "boolean", "map", "weights", "text", "policies", "lifecycle", "guardrails"
+]
+
+# How long a person has to answer an agent's request before it lapses, by default.
+DEFAULT_APPROVAL_TTL_HOURS = 24
+MAX_APPROVAL_TTL_HOURS = 720
 
 
 @dataclass(slots=True, frozen=True)
@@ -61,6 +69,8 @@ GROUPS: tuple[tuple[str, str], ...] = (
     ("limits", "Limits and quotas"),
     ("health", "Health scoring"),
     ("privacy", "Privacy and retention"),
+    ("lifecycle", "Lifecycle"),
+    ("agents", "Agents"),
 )
 
 RANKING_KEYS = ("similarity", "importance", "confidence", "recency", "relationship")
@@ -80,6 +90,9 @@ def defaults() -> dict[str, Any]:
         "pii_redaction_enabled": settings.pii_redaction_enabled,
         "health_weights": dict(HEALTH_WEIGHTS),
         "restriction_policies": [],
+        "lifecycle": DEFAULT_LIFECYCLE,
+        "concept_retrieval": True,
+        "guardrails": {"disabled": [], "rules": [], "approval_ttl_hours": DEFAULT_APPROVAL_TTL_HOURS},
         "ranking_weights": {
             "similarity": settings.rank_weight_similarity,
             "importance": settings.rank_weight_importance,
@@ -248,6 +261,46 @@ def schema() -> list[SettingField]:
             keys=[memory_type.value for memory_type in MemoryType],
         ),
         SettingField(
+            key="concept_retrieval",
+            label="Concept retrieval",
+            group="retrieval",
+            kind="boolean",
+            default=values["concept_retrieval"],
+            help=(
+                "Also find memories that are about what was asked in different words — "
+                "\"the connector stopped functioning\" for a question about the integration "
+                "being broken. Recall only: a concept match ranks below an exact lexical "
+                "match of the same strength. Measure it with an evaluation run."
+            ),
+        ),
+        SettingField(
+            key="lifecycle",
+            label="Lifecycle states",
+            group="lifecycle",
+            kind="lifecycle",
+            default=values["lifecycle"],
+            help=(
+                "The states a customer moves through and the rules that move them, written "
+                "in the condition language. Transitions are tried in order and the first "
+                "that matches wins. A state set by hand is pinned and left alone until "
+                "released. Set enabled to false to stop tracking lifecycle altogether."
+            ),
+        ),
+        SettingField(
+            key="guardrails",
+            label="Agent guardrails",
+            group="agents",
+            kind="guardrails",
+            default=values["guardrails"],
+            keys=tuple(BUILTIN_RULES),
+            help=(
+                "What an agent may do to a customer, checked with POST /v1/agent/check before "
+                "it acts. Built-in rules can be switched off; project rules are conditions over "
+                "customer facts plus request.* (action, channel, amount, topic, plan), each "
+                "denying or requiring a person's approval. Approvals lapse after the hours set."
+            ),
+        ),
+        SettingField(
             key="pii_redaction_enabled",
             label="Redact PII before extraction",
             group="privacy",
@@ -309,6 +362,10 @@ def validate(patch: dict[str, Any]) -> dict[str, Any]:
     _check_cross_field_rules(cleaned)
     if "restriction_policies" in cleaned:
         cleaned["restriction_policies"] = _validate_policies(cleaned["restriction_policies"])
+    if "lifecycle" in cleaned:
+        cleaned["lifecycle"] = _validate_lifecycle(cleaned["lifecycle"])
+    if "guardrails" in cleaned:
+        cleaned["guardrails"] = validate_guardrails(cleaned["guardrails"])
     if "integrations" in cleaned:
         cleaned["integrations"] = _encrypt_provider_secrets(cleaned["integrations"])
     return cleaned
@@ -325,6 +382,41 @@ def _validate_policies(raw: Any) -> Any:
     except PolicyError as exc:
         raise ValidationError(str(exc)) from exc
     return [rule.as_dict() for rule in compiled.rules]
+
+
+def _validate_lifecycle(raw: Any) -> Any:
+    """Compile the machine and store its canonical form.
+
+    Every ``when`` is validated against the fact catalog here, so a typo in a transition is
+    a 422 when the machine is saved rather than a customer who silently never moves.
+    """
+    if isinstance(raw, dict) and raw.get("enabled") is False:
+        return {**raw, "enabled": False}
+    try:
+        machine = compile_lifecycle(raw)
+    except LifecycleError as exc:
+        raise ValidationError(str(exc)) from exc
+    return {"enabled": True, **machine.as_dict()}
+
+
+def validate_guardrails(raw: Any) -> dict[str, Any]:
+    """Compile every rule's condition now, so a typo is a 422 when the rules are saved —
+    not an agent that is never stopped because its rule could not be read."""
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, dict):
+        raise ValidationError("Guardrails must be an object with 'disabled', 'rules' and 'approval_ttl_hours'.")
+    unknown = set(raw) - {"disabled", "rules", "approval_ttl_hours"}
+    if unknown:
+        raise ValidationError(f"Guardrails has unknown keys: {', '.join(sorted(unknown))}.")
+    try:
+        compiled = compile_guardrails(raw)
+    except GuardrailError as exc:
+        raise ValidationError(str(exc)) from exc
+    ttl = raw.get("approval_ttl_hours", DEFAULT_APPROVAL_TTL_HOURS)
+    if isinstance(ttl, bool) or not isinstance(ttl, (int, float)) or not 1 <= ttl <= MAX_APPROVAL_TTL_HOURS:
+        raise ValidationError(f"approval_ttl_hours must be between 1 and {MAX_APPROVAL_TTL_HOURS}.")
+    return {**compiled.as_dict(), "approval_ttl_hours": int(ttl)}
 
 
 def _encrypt_provider_secrets(integrations: Any) -> Any:

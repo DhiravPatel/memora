@@ -38,6 +38,29 @@ from database.repositories import (
     RelationshipRepository,
 )
 from memory_engine.policy import classify
+from nlp.entities import channels_mentioned
+from nlp.entities import extract as extract_entities
+
+
+def _manual_metadata(content: str, restricted_by: str | None) -> dict[str, Any] | None:
+    """What an extracted memory would carry, for one typed in by hand.
+
+    The event path records which products and integrations a statement mentions; a memory
+    written through the API used to carry nothing, so a hand-recorded "the Shopify sync
+    fails" was invisible to any rule asking about Shopify. Only strong evidence is used —
+    the gazetteer and id patterns — because a person's sentence has no payload to confirm a
+    guessed proper noun against.
+    """
+    meta: dict[str, Any] = {}
+    names = [hit.name for hit in extract_entities(text=content, include_proper_nouns=False)]
+    if names:
+        meta["entity_names"] = names
+    channels = channels_mentioned(content)
+    if channels:
+        meta["channels"] = channels
+    if restricted_by:
+        meta["restricted_by"] = restricted_by
+    return meta or None
 
 
 class MemoryService:
@@ -111,7 +134,9 @@ class MemoryService:
         versions = await self.memories.versions(memory.id)
         entity_map = await self.memories.entity_ids_for_memories([memory.id])
         entities = await self.entities.get_many(entity_map.get(memory.id, []), project.id)
-        links = await self.links.for_memory(project_id=project.id, memory_id=memory.id)
+        links = await self._visible_links(
+            project.id, await self.links.for_memory(project_id=project.id, memory_id=memory.id)
+        )
         hydrated = await self.links.hydrate(project_id=project.id, links=links)
         return MemoryDetail(
             **memory_out(memory).model_dump(),
@@ -124,8 +149,11 @@ class MemoryService:
         self, *, project: Project, customer: Customer, link_type: str | None = None
     ) -> CustomerLinks:
         """Every inferred link for a customer, plus the causal chains behind outcomes."""
-        links = await self.links.for_customer(
-            project_id=project.id, customer_id=customer.id, link_type=link_type
+        links = await self._visible_links(
+            project.id,
+            await self.links.for_customer(
+                project_id=project.id, customer_id=customer.id, link_type=link_type
+            ),
         )
         hydrated = await self.links.hydrate(project_id=project.id, links=links)
 
@@ -167,6 +195,20 @@ class MemoryService:
             chains=chains,
         )
 
+    async def _visible_links(self, project_id: str, links: list[Any]) -> list[Any]:
+        """Links whose two memories this reader may both see. A link shows the other
+        memory's words, so one end hidden hides the link."""
+        if self.memories.sees_everything or not links:
+            return links
+        hidden = await self.memories.hidden_among(
+            project_id, {i for link in links for i in (link.source_memory_id, link.target_memory_id)}
+        )
+        return [
+            link
+            for link in links
+            if link.source_memory_id not in hidden and link.target_memory_id not in hidden
+        ]
+
     async def create_manual(
         self,
         *,
@@ -176,8 +218,13 @@ class MemoryService:
         content: str,
         importance: float,
         confidence: float,
+        embedder: Any | None = None,
     ) -> MemoryOut:
-        """Operator-authored memory. Recorded with source=manual so it outranks inferences."""
+        """Operator-authored memory. Recorded with source=manual so it outranks inferences.
+
+        Embedded as it is written when an embedder is supplied (every route supplies one);
+        the nightly index backfill catches anything that was not.
+        """
         existing = await self.memories.get_by_content_hash(
             project_id=project.id, customer_id=customer.id, hash_value=content_hash(content)
         )
@@ -197,8 +244,10 @@ class MemoryService:
             confidence=confidence,
             source=MemorySource.MANUAL,
             sensitivity=Sensitivity(sensitivity),
-            metadata={"restricted_by": reason} if reason else None,
+            metadata=_manual_metadata(content, reason),
         )
+        if embedder is not None:
+            await self.memories.embed(memory, embedder)
         return memory_out(memory)
 
     async def timeline(
@@ -210,18 +259,25 @@ class MemoryService:
         memories, _ = await self.memories.list(
             project_id=project.id, customer_id=customer.id, status=None, limit=limit
         )
+        # An event that fed a memory this reader may not see carries that memory's words.
+        withheld: frozenset[str] = frozenset()
+        if not self.memories.sees_everything:
+            withheld = await self.memories.events_feeding_hidden(
+                project.id, [event.id for event in events], customer_ids=[customer.id]
+            )
 
         entries: list[TimelineEntry] = [
             TimelineEntry(
                 kind="event",
                 id=event.id,
                 title=event.event_type.replace("_", " "),
-                detail=_event_detail(event.data or {}),
+                detail=None if event.id in withheld else _event_detail(event.data or {}),
                 occurred_at=event.occurred_at,
                 metadata={
                     "status": str(event.status),
                     "importance": event.importance,
-                    "data": event.data or {},
+                    "data": {} if event.id in withheld else (event.data or {}),
+                    "withheld": event.id in withheld,
                 },
             )
             for event in events

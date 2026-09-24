@@ -5,6 +5,10 @@ import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useState } from "react";
 
+import { ApprovalsQueue } from "@/components/agents/approvals";
+import { ChecksLog } from "@/components/agents/checks";
+import { RunsExplorer } from "@/components/agents/runs";
+import { PolicySimulator } from "@/components/agents/simulator";
 import { AskMemory } from "@/components/ask-memory";
 import { CausalChains } from "@/components/causal-chains";
 import {
@@ -17,6 +21,8 @@ import {
 import { HealthBadge, HealthCard, HealthMeter } from "@/components/health-card";
 import { MemoryGraphView } from "@/components/memory-graph";
 import { Customer360View } from "@/components/customer-360";
+import { FactsPanel } from "@/components/facts-panel";
+import { StateBadge, StatePanel, useCustomerState } from "@/components/lifecycle";
 import { MemoryTable } from "@/components/memory-table";
 import { Timeline } from "@/components/timeline";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -42,6 +48,8 @@ import type {
 
 const TABS = [
   "Actions",
+  "State",
+  "Facts",
   "360",
   "Memories",
   "Goals",
@@ -49,6 +57,7 @@ const TABS = [
   "Timeline",
   "Why",
   "Graph",
+  "Agents",
   "Ask",
 ] as const;
 
@@ -66,6 +75,8 @@ export default function CustomerPage() {
     queryFn: () => api<Customer>(base),
     enabled: Boolean(projectId),
   });
+
+  const lifecycleState = useCustomerState(projectId, customerId);
 
   const memories = useQuery({
     queryKey: ["customer-memories", projectId, customerId],
@@ -152,6 +163,19 @@ export default function CustomerPage() {
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-3">
+            {lifecycleState.data?.enabled && (
+              <button
+                onClick={() => setTab("State")}
+                className="flex items-center gap-3 border border-border bg-surface px-4 py-2.5 hover:border-accent"
+                title="Lifecycle state — open the State tab"
+              >
+                <span className="label">Lifecycle</span>
+                <StateBadge
+                  state={lifecycleState.data.current?.state}
+                  pinned={lifecycleState.data.current?.pinned}
+                />
+              </button>
+            )}
             {signals.data && (
               <div className="flex items-center gap-3 border border-border bg-surface px-4 py-2.5">
                 <span className="label">Heading</span>
@@ -212,6 +236,10 @@ export default function CustomerPage() {
           </Card>
         </div>
       )}
+
+      {tab === "State" && <StatePanel projectId={projectId} customerId={customerId} />}
+
+      {tab === "Facts" && <FactsPanel projectId={projectId} customerId={customerId} />}
 
       {tab === "360" && (
         <>
@@ -294,6 +322,27 @@ export default function CustomerPage() {
           {graph.error && <ErrorState error={graph.error} />}
           {graph.data && <MemoryGraphView graph={graph.data} />}
         </Card>
+      )}
+
+      {tab === "Agents" && (
+        <div className="space-y-6">
+          <section className="space-y-3">
+            <p className="label-strong">Before an agent acts on this customer</p>
+            <PolicySimulator projectId={projectId} customerId={customerId} />
+          </section>
+          <section className="space-y-3">
+            <p className="label-strong">Requests waiting for a person</p>
+            <ApprovalsQueue projectId={projectId} customerId={customerId} />
+          </section>
+          <section className="space-y-3">
+            <p className="label-strong">What agents asked to do</p>
+            <ChecksLog projectId={projectId} customerId={customerId} />
+          </section>
+          <section className="space-y-3">
+            <p className="label-strong">What agents were told</p>
+            <RunsExplorer projectId={projectId} customerId={customerId} />
+          </section>
+        </div>
       )}
 
       {tab === "Ask" && <AskMemory customerId={customerId} />}

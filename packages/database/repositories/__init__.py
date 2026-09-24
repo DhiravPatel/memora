@@ -1,10 +1,20 @@
 """Repositories: the only place that builds SQL."""
 
+from database.repositories.agent_policy import (
+    AgentApprovalRepository,
+    AgentCheckRepository,
+    AgentProfileRepository,
+)
 from database.repositories.agents import AgentSessionRepository, AgentTurnRepository
 from database.repositories.api_keys import ApiKeyRepository
 from database.repositories.base import BaseRepository
+from database.repositories.customer_state import (
+    CustomerSnapshotRepository,
+    CustomerStateRepository,
+)
 from database.repositories.customers import CustomerRepository
 from database.repositories.entities import EntityRepository, RelationshipRepository, normalize_name
+from database.repositories.evaluation import EvalRepository
 from database.repositories.events import EventRepository
 from database.repositories.goals import GoalRepository
 from database.repositories.invitations import InvitationRepository
@@ -29,13 +39,19 @@ from database.repositories.webhooks import (
 __all__ = [
     "MAX_ATTEMPTS",
     "RETRY_DELAYS_SECONDS",
+    "AgentApprovalRepository",
+    "AgentCheckRepository",
+    "AgentProfileRepository",
     "AgentSessionRepository",
     "AgentTurnRepository",
     "ApiKeyRepository",
     "AuditRepository",
     "BaseRepository",
     "CustomerRepository",
+    "CustomerSnapshotRepository",
+    "CustomerStateRepository",
     "EntityRepository",
+    "EvalRepository",
     "EventRepository",
     "GoalRepository",
     "InvitationRepository",

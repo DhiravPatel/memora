@@ -12,13 +12,14 @@ The list is deliberately short. Ten recommendations is a backlog; three is a pla
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from collections.abc import Set as AbstractSet
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any
 
 from common.enums import MemoryType, SignalDirection
 from common.time import days_between, ensure_utc, utcnow
-from memory_engine.analytics.signals import GoalSnapshot, SignalReport
+from memory_engine.analytics.signals import GoalSnapshot, SignalReport, mask_quotes
 from nlp.answer import MemoryView
 from nlp.lexicon import CHANNELS
 
@@ -50,10 +51,30 @@ class Recommendation:
     goal_ids: tuple[str, ...] = ()
     signals: tuple[str, ...] = ()
     playbook: tuple[str, ...] = ()
+    # (id, words) for every memory or goal whose words appear in the action or rationale,
+    # so a reader who may not see that memory gets the recommendation without the quote.
+    quotes: tuple[tuple[str, str], ...] = ()
 
     @property
     def priority(self) -> str:
         return priority_for(self.urgency)
+
+    def cited_ids(self) -> set[str]:
+        return {*self.memory_ids, *self.goal_ids, *(ident for ident, _ in self.quotes)}
+
+    def redacted(self, hidden: AbstractSet[str]) -> Recommendation:
+        """As a reader who may not see ``hidden`` sees it: still recommended — the
+        judgement was made over everything — but without the hidden words or ids."""
+        if not hidden or not (self.cited_ids() & hidden):
+            return self
+        return replace(
+            self,
+            action=mask_quotes(self.action, self.quotes, hidden),
+            rationale=mask_quotes(self.rationale, self.quotes, hidden),
+            memory_ids=tuple(ident for ident in self.memory_ids if ident not in hidden),
+            goal_ids=tuple(ident for ident in self.goal_ids if ident not in hidden),
+            quotes=tuple(quote for quote in self.quotes if quote[0] not in hidden),
+        )
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -124,6 +145,7 @@ def resolve_open_problems(context: Context) -> list[Recommendation]:
         Recommendation(
             key="resolve_open_problem",
             action=f"Resolve: {_clip(worst.content)}",
+            quotes=((worst.id, _clip(worst.content)),),
             rationale=(
                 f"Reported {int(context.age_days(worst))} days ago and still open"
                 + (f", mentioned {worst.evidence_count} times" if worst.evidence_count > 1 else "")
@@ -155,6 +177,7 @@ def escalate_repeat_problems(context: Context) -> list[Recommendation]:
         Recommendation(
             key="escalate_repeat_problem",
             action=f"Escalate: {_clip(worst.content)}",
+            quotes=((worst.id, _clip(worst.content)),),
             rationale=(
                 f"Reported {worst.evidence_count} separate times without being closed out — "
                 "first-line support has not been enough."
@@ -180,6 +203,7 @@ def retention_outreach(context: Context) -> list[Recommendation]:
             key="retention_outreach",
             action="Get on a call about the renewal",
             rationale=f"{signal.rationale.capitalize()}.",
+            quotes=signal.quotes,
             category="retention",
             urgency=round(min(1.0, 0.7 + 0.3 * signal.strength), 3),
             memory_ids=signal.memory_ids,
@@ -204,6 +228,7 @@ def re_engage(context: Context) -> list[Recommendation]:
             key="re_engage",
             action="Reach out before the next renewal cycle",
             rationale=f"{signal.rationale.capitalize()}.",
+            quotes=signal.quotes,
             category="retention",
             urgency=round(min(0.8, 0.35 + 0.45 * signal.strength), 3),
             signals=(signal.key,),
@@ -226,6 +251,7 @@ def unblock_goals(context: Context) -> list[Recommendation]:
         Recommendation(
             key="unblock_goal",
             action=f"Help them finish: {_clip(goal.statement)}",
+            quotes=((goal.id, _clip(goal.statement)),),
             rationale=(
                 f"They said this {idle_days} days ago and nothing has moved it since "
                 f"({int(goal.progress * 100)}% of the way there)."
@@ -270,8 +296,10 @@ def ask_for_advocacy(context: Context) -> list[Recommendation]:
         return []
     achieved = [goal for goal in context.goals if goal.status == "achieved"]
     rationale = "They are happy and have nothing open."
+    quotes: tuple[tuple[str, str], ...] = ()
     if achieved:
         rationale = f"They reached “{_clip(achieved[0].statement, 50)}” and said so in feedback."
+        quotes = ((achieved[0].id, _clip(achieved[0].statement, 50)),)
     return [
         Recommendation(
             key="ask_for_advocacy",
@@ -282,6 +310,7 @@ def ask_for_advocacy(context: Context) -> list[Recommendation]:
             memory_ids=signal.memory_ids,
             goal_ids=tuple(goal.id for goal in achieved[:1]),
             signals=("advocacy", "goal_achieved") if achieved else ("advocacy",),
+            quotes=quotes,
             playbook=(
                 "Name the specific outcome you want them to talk about.",
                 "Offer to write the first draft for them.",
@@ -310,6 +339,7 @@ def close_the_loop(context: Context) -> list[Recommendation]:
         Recommendation(
             key="close_the_loop",
             action=f"Confirm the fix landed: {_clip(resolved[0].content)}",
+            quotes=((resolved[0].id, _clip(resolved[0].content)),),
             rationale="Recorded as resolved, but they have not said anything since.",
             category="support",
             urgency=0.3,
@@ -332,6 +362,7 @@ def respect_contact_preference(context: Context) -> list[Recommendation]:
         Recommendation(
             key="respect_contact_preference",
             action=f"Use their stated channel: {_clip(preferences[0].content, 60)}",
+            quotes=((preferences[0].id, _clip(preferences[0].content, 60)),),
             rationale="They have told us how they want to be contacted.",
             category="relationship",
             urgency=0.25,
@@ -354,6 +385,7 @@ def confirm_conflicts(context: Context) -> list[Recommendation]:
         Recommendation(
             key="confirm_conflict",
             action=f"Confirm which is current: {_clip(conflicted[0].content)}",
+            quotes=((conflicted[0].id, _clip(conflicted[0].content)),),
             rationale="Two memories disagree, so answers about this may be wrong either way.",
             category="data_quality",
             urgency=0.4,

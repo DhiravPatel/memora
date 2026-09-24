@@ -37,6 +37,69 @@ class TrackedEvent:
 
 
 @dataclass(slots=True)
+class ConditionResult:
+    """A condition evaluated against one customer, with the clauses that decided it.
+
+    ``outcome`` is ``"true"``, ``"false"`` or ``"unknown"`` — unknown when a fact the
+    condition reads has no value yet. Act on :attr:`matched`, which treats unknown as false;
+    the trace in :attr:`explanation` says which clause could not be decided.
+    """
+
+    condition: str
+    outcome: str
+    matched: bool
+    explanation: str
+    evidence: list[str] = field(default_factory=list)
+    leaves: list[dict[str, Any]] = field(default_factory=list)
+    withheld_facts: list[str] = field(default_factory=list)
+
+    def __bool__(self) -> bool:
+        return self.matched
+
+    @classmethod
+    def from_api(cls, data: dict[str, Any]) -> ConditionResult:
+        evaluation = data.get("evaluation") or {}
+        return cls(
+            condition=data.get("condition", ""),
+            outcome=evaluation.get("outcome", "unknown"),
+            matched=bool(evaluation.get("matched", False)),
+            explanation=evaluation.get("explanation", ""),
+            evidence=list(evaluation.get("evidence") or []),
+            leaves=list(evaluation.get("leaves") or []),
+            withheld_facts=list(data.get("withheld_facts") or []),
+        )
+
+
+@dataclass(slots=True)
+class LifecycleState:
+    """Where a customer is in the project's lifecycle, and why."""
+
+    state: str
+    previous_state: str | None = None
+    entered_at: str | None = None
+    source: str = "auto"
+    transition: str | None = None
+    reason: str | None = None
+    evidence: list[str] = field(default_factory=list)
+    pinned: bool = False
+    pinned_until: str | None = None
+
+    @classmethod
+    def from_api(cls, data: dict[str, Any]) -> LifecycleState:
+        return cls(
+            state=data.get("state", ""),
+            previous_state=data.get("previous_state"),
+            entered_at=data.get("entered_at"),
+            source=data.get("source", "auto"),
+            transition=data.get("transition"),
+            reason=data.get("reason"),
+            evidence=list(data.get("evidence") or []),
+            pinned=bool(data.get("pinned", False)),
+            pinned_until=data.get("pinned_until"),
+        )
+
+
+@dataclass(slots=True)
 class Customer360:
     """Everything worth knowing about one customer, from a single call.
 
@@ -212,6 +275,8 @@ class QueryResult:
     memories: list[Memory] = field(default_factory=list)
     source_event_ids: list[str] = field(default_factory=list)
     trace: dict[str, Any] | None = None
+    # The recorded agent run — ``client.explain_run(run_id)`` says why it answered so.
+    run_id: str | None = None
 
     @property
     def has_answer(self) -> bool:
@@ -225,6 +290,7 @@ class QueryResult:
             memories=[Memory.from_api(item) for item in data.get("memories", [])],
             source_event_ids=[item["event_id"] for item in data.get("sources", [])],
             trace=data.get("trace"),
+            run_id=data.get("run_id"),
         )
 
 
@@ -241,6 +307,7 @@ class CustomerContext:
     token_count: int = 0
     truncated: bool = False
     raw: dict[str, Any] = field(default_factory=dict)
+    run_id: str | None = None
 
     @classmethod
     def from_api(cls, data: dict[str, Any]) -> CustomerContext:
@@ -257,6 +324,7 @@ class CustomerContext:
             token_count=int(data.get("token_count", 0)),
             truncated=bool(data.get("truncated", False)),
             raw=data,
+            run_id=data.get("run_id") or context.get("run_id"),
         )
 
 
@@ -602,4 +670,216 @@ class TurnResult:
             answer_confidence=data.get("answer_confidence"),
             event_id=data.get("event_id"),
             turn_count=int(data.get("turn_count", 0)),
+        )
+
+
+# ------------------------------------------------------------------- agents (§26 3)
+
+
+@dataclass(slots=True)
+class Approval:
+    """A person's decision on an action an agent asked permission for."""
+
+    id: str
+    customer_id: str
+    action: str
+    status: str  # pending | approved | rejected | expired | used
+    request: dict[str, Any] = field(default_factory=dict)
+    reasons: list[dict[str, Any]] = field(default_factory=list)
+    agent: str | None = None
+    note: str | None = None
+    decided_by: str | None = None
+    decided_at: str | None = None
+    used_at: str | None = None
+    expires_at: str | None = None
+    created_at: str | None = None
+
+    @property
+    def is_pending(self) -> bool:
+        return self.status == "pending"
+
+    @property
+    def is_approved(self) -> bool:
+        return self.status == "approved"
+
+    @classmethod
+    def from_api(cls, data: dict[str, Any]) -> Approval:
+        return cls(
+            id=data["id"],
+            customer_id=data.get("customer_id", ""),
+            action=data.get("action", ""),
+            status=data.get("status", "pending"),
+            request=dict(data.get("request") or {}),
+            reasons=list(data.get("reasons") or []),
+            agent=data.get("agent"),
+            note=data.get("note"),
+            decided_by=data.get("decided_by"),
+            decided_at=data.get("decided_at"),
+            used_at=data.get("used_at"),
+            expires_at=data.get("expires_at"),
+            created_at=data.get("created_at"),
+        )
+
+
+@dataclass(slots=True)
+class ActionCheck:
+    """Whether an agent may take an action, and why. Truthy only when allowed.
+
+    ``decision`` is ``allow``, ``require_approval`` or ``deny``. Every rule that objected
+    is in :attr:`reasons`, with the memory ids behind it in :attr:`evidence`; :attr:`summary`
+    is the sentence to tell a person — or the model — why.
+    """
+
+    id: str
+    customer_id: str
+    action: str
+    decision: str
+    allowed: bool
+    summary: str
+    reasons: list[dict[str, Any]] = field(default_factory=list)
+    evidence: list[str] = field(default_factory=list)
+    approval: Approval | None = None
+    agent: str | None = None
+    profile: str | None = None
+    request: dict[str, Any] = field(default_factory=dict)
+    checked_at: str | None = None
+
+    def __bool__(self) -> bool:
+        return self.allowed
+
+    @property
+    def denied(self) -> bool:
+        return self.decision == "deny"
+
+    @property
+    def requires_approval(self) -> bool:
+        return self.decision == "require_approval"
+
+    @property
+    def rules(self) -> list[str]:
+        return [str(reason.get("rule")) for reason in self.reasons]
+
+    @classmethod
+    def from_api(cls, data: dict[str, Any]) -> ActionCheck:
+        approval = data.get("approval")
+        return cls(
+            id=data.get("id", ""),
+            customer_id=data.get("customer_id", ""),
+            action=data.get("action", ""),
+            decision=data.get("decision", "deny"),
+            allowed=bool(data.get("allowed", False)),
+            summary=data.get("summary", ""),
+            reasons=list(data.get("reasons") or []),
+            evidence=list(data.get("evidence") or []),
+            approval=Approval.from_api(approval) if approval else None,
+            agent=data.get("agent"),
+            profile=data.get("profile"),
+            request=dict(data.get("request") or {}),
+            checked_at=data.get("checked_at"),
+        )
+
+
+@dataclass(slots=True)
+class AgentRun:
+    """One answer or briefing an agent asked for, as it was recorded."""
+
+    id: str
+    kind: str  # query | context
+    query: str
+    customer_id: str | None = None
+    answer: str | None = None
+    agent: str | None = None
+    session_id: str | None = None
+    snapshot_id: str | None = None
+    memory_count: int = 0
+    cited_count: int = 0
+    withheld: int = 0
+    created_at: str | None = None
+    memory_ids: list[str] = field(default_factory=list)
+    trace: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_api(cls, data: dict[str, Any]) -> AgentRun:
+        return cls(
+            id=data["id"],
+            kind=data.get("kind", "query"),
+            query=data.get("query", ""),
+            customer_id=data.get("customer_id"),
+            answer=data.get("answer"),
+            agent=data.get("agent"),
+            session_id=data.get("session_id"),
+            snapshot_id=data.get("snapshot_id"),
+            memory_count=int(data.get("memory_count", 0)),
+            cited_count=int(data.get("cited_count", 0)),
+            withheld=int(data.get("withheld", 0)),
+            created_at=data.get("created_at"),
+            memory_ids=list(data.get("memory_ids") or []),
+            trace=dict(data.get("trace") or {}),
+        )
+
+
+@dataclass(slots=True)
+class RunExplanation:
+    """Why an agent said what it said: the memories as they were then and are now, what
+    was held back, the customer's recorded state at that moment, and the checks around it."""
+
+    run: AgentRun
+    narrative: list[str] = field(default_factory=list)
+    memories: list[dict[str, Any]] = field(default_factory=list)
+    held_back: dict[str, Any] = field(default_factory=dict)
+    state_then: dict[str, Any] | None = None
+    checks: list[ActionCheck] = field(default_factory=list)
+
+    @property
+    def text(self) -> str:
+        return "\n".join(self.narrative)
+
+    @property
+    def changed_since(self) -> list[dict[str, Any]]:
+        """The memories the run relied on that have changed since — the usual answer to
+        "why did it say that?" when it is no longer true."""
+        return [memory for memory in self.memories if memory.get("changed_since")]
+
+    @classmethod
+    def from_api(cls, data: dict[str, Any]) -> RunExplanation:
+        return cls(
+            run=AgentRun.from_api(data["run"]),
+            narrative=list(data.get("narrative") or []),
+            memories=list(data.get("memories") or []),
+            held_back=dict(data.get("held_back") or {}),
+            state_then=data.get("state_then"),
+            checks=[ActionCheck.from_api(item) for item in data.get("checks") or []],
+        )
+
+
+@dataclass(slots=True)
+class AgentProfile:
+    """What an agent is for: the memory it may read and the actions it may take."""
+
+    id: str
+    name: str
+    description: str | None = None
+    readable_types: list[str] = field(default_factory=list)
+    can_read_restricted: bool = False
+    allowed_actions: list[str] = field(default_factory=list)
+    denied_actions: list[str] = field(default_factory=list)
+    keys: int = 0
+
+    def may(self, action: str) -> bool:
+        """Whether the profile's own lists permit ``action`` — rules may still object."""
+        if action in self.denied_actions:
+            return False
+        return not self.allowed_actions or action in self.allowed_actions
+
+    @classmethod
+    def from_api(cls, data: dict[str, Any]) -> AgentProfile:
+        return cls(
+            id=data["id"],
+            name=data.get("name", ""),
+            description=data.get("description"),
+            readable_types=list(data.get("readable_types") or []),
+            can_read_restricted=bool(data.get("can_read_restricted", False)),
+            allowed_actions=list(data.get("allowed_actions") or []),
+            denied_actions=list(data.get("denied_actions") or []),
+            keys=int(data.get("keys", 0)),
         )

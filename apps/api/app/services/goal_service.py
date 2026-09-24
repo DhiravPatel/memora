@@ -46,9 +46,13 @@ class GoalCounts:
 
 
 class GoalService:
-    def __init__(self, session: AsyncSession) -> None:
+    def __init__(self, session: AsyncSession, *, cleared: bool | None = None) -> None:
+        """Pass ``cleared`` for a caller-facing service: goals born from a memory the caller
+        may not see are hidden, because a goal's statement is that memory's words. Counts
+        stay whole either way — a number is not a quote."""
         self.session = session
-        self.goals = GoalRepository(session)
+        self.goals = GoalRepository(session, cleared=cleared)
+        self.all_goals = GoalRepository(session)
         self.customers = CustomerRepository(session)
         self.audit = AuditRepository(session)
 
@@ -88,7 +92,7 @@ class GoalService:
         return goal
 
     async def counts(self, *, project: Project, customer: Customer | None = None) -> GoalCounts:
-        goals, total = await self.goals.list(
+        goals, total = await self.all_goals.list(
             project_id=project.id,
             customer_id=customer.id if customer else None,
             limit=500,

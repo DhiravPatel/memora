@@ -298,6 +298,7 @@ export interface ApiKey {
   name: string;
   key_prefix: string;
   scopes: string[];
+  agent_profile_id: string | null;
   created_by: string | null;
   last_used_at: string | null;
   last_used_ip: string | null;
@@ -389,7 +390,16 @@ export interface SettingField {
   key: string;
   label: string;
   group: string;
-  kind: "number" | "percent" | "boolean" | "map" | "weights" | "text" | "policies";
+  kind:
+    | "number"
+    | "percent"
+    | "boolean"
+    | "map"
+    | "weights"
+    | "text"
+    | "policies"
+    | "lifecycle"
+    | "guardrails";
   default: unknown;
   help: string;
   minimum: number | null;
@@ -601,4 +611,459 @@ export interface Customer360 {
   /** Memories this reader's clearance hid, across every section. */
   withheld: number;
   generated_at: string;
+}
+
+// ------------------------------------------------------- facts & conditions (§26 1.1)
+
+export interface FactSpec {
+  name: string;
+  type: "number" | "string" | "enum" | "boolean" | "list" | "terms" | "any";
+  description: string;
+  values: string[];
+  unit: string | null;
+  operators: string[];
+}
+
+export interface FactCatalog {
+  facts: FactSpec[];
+  metadata_prefix: string;
+  examples: string[];
+}
+
+export interface ConditionValidation {
+  valid: boolean;
+  text: string | null;
+  ast: Record<string, unknown> | null;
+  facts: string[];
+  error: string | null;
+  /** Character offset of a parse error, for underlining. */
+  position: number | null;
+}
+
+export interface ConditionLeaf {
+  fact: string;
+  op: string;
+  expected: unknown;
+  actual: unknown;
+  outcome: "true" | "false" | "unknown";
+  note: string;
+  evidence: string[];
+  description: string;
+}
+
+export interface ConditionEvaluation {
+  outcome: "true" | "false" | "unknown";
+  /** What to act on — unknown counts as not matched. */
+  matched: boolean;
+  explanation: string;
+  evidence: string[];
+  decisive: ConditionLeaf[];
+  leaves: ConditionLeaf[];
+}
+
+export interface ConditionEvaluationResult {
+  customer_id: string;
+  condition: string;
+  evaluation: ConditionEvaluation;
+  withheld_facts: string[];
+}
+
+export interface CustomerFacts {
+  customer_id: string;
+  values: Record<string, unknown>;
+  evidence: Record<string, string[]>;
+  withheld_facts: string[];
+  computed_at: string;
+}
+
+// -------------------------------------------------------------- lifecycle (§26 1.3)
+
+export interface CustomerStateRecord {
+  id: string;
+  state: string;
+  previous_state: string | null;
+  entered_at: string;
+  exited_at: string | null;
+  source: "initial" | "auto" | "manual";
+  transition: string | null;
+  reason: string | null;
+  evidence: string[];
+  pinned: boolean;
+  pinned_until: string | null;
+  actor_id: string | null;
+  evaluation: Partial<ConditionEvaluation>;
+}
+
+export interface CurrentState {
+  customer_id: string;
+  enabled: boolean;
+  current: CustomerStateRecord | null;
+  states: string[];
+}
+
+export interface LifecycleTransition {
+  name: string;
+  from: string[];
+  to: string;
+  when: string;
+}
+
+export interface LifecycleDefinition {
+  enabled?: boolean;
+  states: string[];
+  initial: string;
+  transitions: LifecycleTransition[];
+}
+
+export interface LifecycleOverview extends Partial<LifecycleDefinition> {
+  enabled: boolean;
+  counts: Record<string, number>;
+}
+
+export interface StateRefresh {
+  customer_id: string;
+  state: string | null;
+  moved: boolean;
+  transitions: { from: string | null; to: string; transition: string }[];
+  snapshot_id: string | null;
+}
+
+// -------------------------------------------------------------- snapshots (§26 1.2)
+
+export interface SnapshotChange {
+  fact: string;
+  before: unknown;
+  after: unknown;
+  added?: string[];
+  removed?: string[];
+}
+
+export interface SnapshotSummary {
+  id: string;
+  taken_at: string;
+  reason: string;
+  event_id: string | null;
+  health_score: number | null;
+  health_band: string | null;
+  state: string | null;
+  plan: string | null;
+  trajectory: string | null;
+  open_problems: number;
+  churn_risk: number | null;
+  expansion_score: number | null;
+  changes: SnapshotChange[];
+}
+
+export interface Snapshot extends SnapshotSummary {
+  facts: Record<string, unknown>;
+  evidence: Record<string, string[]>;
+  withheld_facts: string[];
+}
+
+// ------------------------------------------------------------ quality (§26 2.2)
+
+export interface QualityComponent {
+  key: string;
+  label: string;
+  score: number | null;
+  detail: string;
+}
+
+export interface QualityDiagnostic {
+  key: string;
+  severity: "info" | "warning" | "critical";
+  title: string;
+  detail: string;
+  fix: Record<string, any>;
+  examples: any[];
+}
+
+export interface EventTypeQuality {
+  event_type: string;
+  total: number;
+  processed: number;
+  produced: number;
+  below_threshold: number;
+  no_text: number;
+  failed: number;
+  importance: number;
+}
+
+export interface QualityReport {
+  window_days: number;
+  score: number | null;
+  components: QualityComponent[];
+  metrics: {
+    events: {
+      total: number;
+      processed: number;
+      skipped: number;
+      failed: number;
+      backlog: number;
+      produced: number;
+      yield: number | null;
+      by_type: EventTypeQuality[];
+    };
+    consolidation: {
+      statements: number;
+      creates: number;
+      merges: number;
+      conflicts: number;
+      near_miss_creates: number;
+      near_miss_rate: number | null;
+      conflict_rate: number | null;
+      near_miss_examples: { content: string; closest_content: string; similarity: number }[];
+    };
+    memories: {
+      active: number;
+      avg_confidence: number | null;
+      low_confidence: number;
+      stale: number;
+      expiring_soon: number;
+      restricted: number;
+    };
+    searches: {
+      total: number;
+      with_unknown_terms: number;
+      unknown_rate: number | null;
+      unknown_terms: string[];
+      examples: string[];
+    };
+    evaluation: {
+      set: string;
+      run_id: string;
+      recall_at_5: number | null;
+      mrr: number | null;
+      citation_hit_rate: number | null;
+      regressed: boolean;
+    } | null;
+    settings: { min_event_importance: number; consolidation_similarity: number };
+  };
+  diagnostics: QualityDiagnostic[];
+  computed_at: string;
+}
+
+// --------------------------------------------------------- evaluation (§26 2.1)
+
+export interface EvalRunSummary {
+  id: string;
+  set_id: string;
+  status: "queued" | "running" | "succeeded" | "failed";
+  label: string | null;
+  k: number;
+  metrics: {
+    cases?: number;
+    scored?: number;
+    recall?: Record<string, number>;
+    hit?: Record<string, number>;
+    mrr?: number;
+    citation_hit_rate?: number;
+    misses?: string[];
+  };
+  comparison: {
+    recall?: Record<string, number>;
+    hit?: Record<string, number>;
+    mrr?: number;
+    citation_hit_rate?: number;
+    newly_missed?: string[];
+    newly_found?: string[];
+    regressed?: boolean;
+  } | null;
+  error: string | null;
+  created_at: string;
+  finished_at: string | null;
+}
+
+export interface EvalCaseResult {
+  case_id: string;
+  question: string;
+  error: string | null;
+  first_rank: number | null;
+  cited_hit: boolean;
+  expected: {
+    kind: string;
+    target: string;
+    rank: number | null;
+    memory_id: string | null;
+    cited: boolean;
+  }[];
+  retrieved: { id: string; content: string; score: number; strategies: string[]; cited: boolean }[];
+  answer: string | null;
+}
+
+export interface EvalRun extends EvalRunSummary {
+  settings: Record<string, unknown>;
+  results: EvalCaseResult[];
+  baseline_run_id: string | null;
+}
+
+export interface EvalCase {
+  id: string;
+  customer_id: string;
+  question: string;
+  expected_memory_ids: string[];
+  expected_phrases: string[];
+  notes: string | null;
+  source: string;
+  created_at: string;
+}
+
+export interface EvalSet {
+  id: string;
+  name: string;
+  description: string | null;
+  cases: number;
+  latest_run: EvalRunSummary | null;
+  created_at: string;
+}
+
+export interface EvalSetDetail extends EvalSet {
+  case_list: EvalCase[];
+  runs: EvalRunSummary[];
+}
+
+export interface EvalSuggestion {
+  customer_id: string;
+  question: string;
+  asked_at: string;
+  answer: string | null;
+  retrieved: { id: string; type: string; content: string }[];
+}
+
+// ------------------------------------------------------------------ agents (§26 phase 3)
+
+export type Decision = "allow" | "require_approval" | "deny";
+export type ApprovalStatus = "pending" | "approved" | "rejected" | "expired" | "used";
+
+export interface GuardrailReason {
+  rule: string;
+  source: "profile" | "builtin" | "project" | "approval" | string;
+  decision: Decision;
+  explanation: string;
+  evidence: string[];
+  evaluation?: ConditionEvaluation | null;
+}
+
+export interface Approval {
+  id: string;
+  customer_id: string;
+  check_id: string;
+  agent: string | null;
+  action: string;
+  request: Record<string, unknown>;
+  reasons: GuardrailReason[];
+  status: ApprovalStatus;
+  note: string | null;
+  decided_by: string | null;
+  decided_at: string | null;
+  used_at: string | null;
+  expires_at: string;
+  created_at: string;
+}
+
+export interface AgentCheck {
+  id: string;
+  customer_id: string;
+  action: string;
+  decision: Decision;
+  allowed: boolean;
+  summary: string;
+  reasons: GuardrailReason[];
+  evidence: string[];
+  approval: Approval | null;
+  agent: string | null;
+  profile: string | null;
+  request: Record<string, unknown>;
+  snapshot_id: string | null;
+  session_id: string | null;
+  checked_at: string;
+}
+
+export interface AgentProfile {
+  id: string;
+  name: string;
+  description: string | null;
+  readable_types: string[];
+  can_read_restricted: boolean;
+  allowed_actions: string[];
+  denied_actions: string[];
+  keys: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface GuardrailCatalog {
+  actions: { action: string; family: string }[];
+  builtin_rules: { rule: string; description: string }[];
+  decisions: Decision[];
+}
+
+export interface GuardrailRule {
+  name: string;
+  actions: string[];
+  when: string;
+  decision: "deny" | "require_approval";
+  message: string;
+}
+
+export interface GuardrailSettings {
+  disabled: string[];
+  rules: GuardrailRule[];
+  approval_ttl_hours: number;
+}
+
+export interface AgentActivity {
+  window_days: number;
+  checks: Partial<Record<Decision, number>>;
+  approvals: Partial<Record<ApprovalStatus, number>>;
+  top_rules: { rule: string; count: number }[];
+  runs: number;
+}
+
+export interface AgentRunSummary {
+  id: string;
+  kind: "query" | "context";
+  customer_id: string | null;
+  query: string;
+  answer: string | null;
+  agent: string | null;
+  session_id: string | null;
+  api_key_id: string | null;
+  snapshot_id: string | null;
+  memory_count: number;
+  cited_count: number;
+  withheld: number;
+  latency_ms: number;
+  created_at: string;
+}
+
+export interface RunMemory {
+  id: string;
+  rank: number;
+  type: string | null;
+  score: number;
+  strategies: string[];
+  cited: boolean;
+  scores: Record<string, unknown>;
+  visible: boolean;
+  content_then: string | null;
+  content_now: string | null;
+  status_now: string | null;
+  changed_since: { at: string; reason: string; content: string | null }[];
+}
+
+export interface RunExplanation {
+  run: AgentRunSummary;
+  narrative: string[];
+  memories: RunMemory[];
+  held_back: {
+    withheld?: number;
+    cleared?: boolean | null;
+    readable_types?: string[] | null;
+    profile?: string | null;
+    hidden_from_you?: number;
+    dropped_by_budget?: string[];
+  };
+  state_then: Snapshot | null;
+  checks: AgentCheck[];
 }

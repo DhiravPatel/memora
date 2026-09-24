@@ -2,27 +2,49 @@
 
 import { useQuery } from "@tanstack/react-query";
 import Link from "next/link";
-import { useState } from "react";
+import { useSearchParams } from "next/navigation";
+import { Suspense, useState } from "react";
 
+import { StateBadge } from "@/components/lifecycle";
 import { Card } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
+import { Input, Select } from "@/components/ui/input";
 import { EmptyState, ErrorState, LoadingRow, PageHeader } from "@/components/ui/states";
 import { Table, TD, TH, THead, TR } from "@/components/ui/table";
 import { useSession } from "@/hooks/use-session";
 import { api } from "@/lib/api";
 import { formatRelative } from "@/lib/format";
-import type { Customer, Page } from "@/lib/types";
+import type { Customer, LifecycleOverview, Page } from "@/lib/types";
 
 export default function CustomersPage() {
+  return (
+    <Suspense fallback={<LoadingRow />}>
+      <Customers />
+    </Suspense>
+  );
+}
+
+function Customers() {
   const { projectId } = useSession();
   const [search, setSearch] = useState("");
+  // `?state=at_risk` arrives from the Overview's lifecycle card.
+  const [state, setState] = useState(useSearchParams().get("state") ?? "");
+
+  const lifecycle = useQuery({
+    queryKey: ["lifecycle", projectId],
+    queryFn: () => api<LifecycleOverview>(`/v1/projects/${projectId}/lifecycle`),
+    enabled: Boolean(projectId),
+  });
 
   const customers = useQuery({
-    queryKey: ["customers", projectId, search],
+    queryKey: ["customers", projectId, search, state],
     queryFn: () =>
-      api<Page<Customer>>(`/v1/projects/${projectId}/customers`, {
-        query: { search, limit: 100 },
-      }),
+      state
+        ? api<Page<Customer>>(`/v1/projects/${projectId}/lifecycle/customers`, {
+            query: { state, limit: 100 },
+          })
+        : api<Page<Customer>>(`/v1/projects/${projectId}/customers`, {
+            query: { search, limit: 100 },
+          }),
     enabled: Boolean(projectId),
   });
 
@@ -33,14 +55,40 @@ export default function CustomersPage() {
         title="Customer explorer"
         description="Search by id, email or name, then open a profile to see everything the memory holds."
         actions={
-          <Input
-            placeholder="SEARCH…"
-            className="w-64 uppercase tracking-label"
-            value={search}
-            onChange={(event) => setSearch(event.target.value)}
-          />
+          <>
+            {lifecycle.data?.enabled && (
+              <Select
+                value={state}
+                onChange={(event) => setState(event.target.value)}
+                className="w-44"
+              >
+                <option value="">Any lifecycle state</option>
+                {(lifecycle.data.states ?? []).map((item) => (
+                  <option key={item} value={item}>
+                    {item.replace(/_/g, " ")} · {lifecycle.data?.counts[item] ?? 0}
+                  </option>
+                ))}
+              </Select>
+            )}
+            <Input
+              placeholder="SEARCH…"
+              className="w-64 uppercase tracking-label"
+              value={search}
+              disabled={Boolean(state)}
+              onChange={(event) => setSearch(event.target.value)}
+            />
+          </>
         }
       />
+
+      {state && (
+        <p className="label">
+          Showing customers currently <StateBadge state={state} /> ·{" "}
+          <button className="hover:text-accent" onClick={() => setState("")}>
+            clear
+          </button>
+        </p>
+      )}
 
       <Card>
         {customers.isLoading && <LoadingRow />}

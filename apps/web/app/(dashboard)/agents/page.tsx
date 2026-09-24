@@ -1,188 +1,110 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
-import Link from "next/link";
-import { useState } from "react";
+import { useSearchParams } from "next/navigation";
+import { Suspense, useEffect, useState } from "react";
 
-import { Badge } from "@/components/ui/badge";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Select } from "@/components/ui/input";
-import { EmptyState, ErrorState, LoadingRow, PageHeader } from "@/components/ui/states";
-import { Table, TD, TH, THead, TR } from "@/components/ui/table";
+import { ApprovalsQueue } from "@/components/agents/approvals";
+import { ChecksLog } from "@/components/agents/checks";
+import { ProfilesManager } from "@/components/agents/profiles";
+import { RunsExplorer } from "@/components/agents/runs";
+import { SessionsList } from "@/components/agents/sessions";
+import { PolicySimulator } from "@/components/agents/simulator";
+import { StatTile } from "@/components/ui/card";
+import { LoadingRow, PageHeader } from "@/components/ui/states";
 import { useSession } from "@/hooks/use-session";
 import { api } from "@/lib/api";
-import { formatDate, formatRelative } from "@/lib/format";
 import { cn } from "@/lib/utils";
-import type { AgentSession, Page as Paged } from "@/lib/types";
+import type { AgentActivity } from "@/lib/types";
 
-const FILTERS = [
-  { label: "Every session", value: "" },
-  { label: "Open", value: "open" },
-  { label: "Closed", value: "closed" },
-  { label: "Expired", value: "expired" },
-];
-
-const STATUS_STYLES: Record<string, string> = {
-  open: "border-accent/70 bg-accent/10 text-accent",
-  closed: "border-success/70 bg-success/10 text-success",
-  expired: "border-warning/70 bg-warning/10 text-warning",
-};
+const TABS = ["Approvals", "Checks", "Runs", "Sessions", "Profiles", "Simulate"] as const;
+type Tab = (typeof TABS)[number];
 
 export default function AgentsPage() {
-  const { projectId } = useSession();
-  const [status, setStatus] = useState("");
-  const [selected, setSelected] = useState<string | null>(null);
+  // useSearchParams needs a boundary, or the page cannot be prerendered.
+  return (
+    <Suspense fallback={<LoadingRow />}>
+      <Agents />
+    </Suspense>
+  );
+}
 
-  const sessions = useQuery({
-    queryKey: ["agent-sessions", projectId, status],
+function Agents() {
+  const { projectId, user } = useSession();
+  const params = useSearchParams();
+  const [tab, setTab] = useState<Tab>("Approvals");
+  const runParam = params.get("run");
+
+  // Deep links from elsewhere: /agents?run=qry_… opens that run's explanation.
+  useEffect(() => {
+    const wanted = params.get("tab");
+    if (runParam) setTab("Runs");
+    else if (wanted && (TABS as readonly string[]).includes(wanted)) setTab(wanted as Tab);
+  }, [params, runParam]);
+
+  const activity = useQuery({
+    queryKey: ["agent-activity", projectId],
     queryFn: () =>
-      api<Paged<AgentSession>>(`/v1/projects/${projectId}/agent/sessions`, {
-        query: { status: status || undefined, limit: 100 },
-      }),
+      api<AgentActivity>(`/v1/projects/${projectId}/agent/activity`, { query: { days: 7 } }),
     enabled: Boolean(projectId),
+    refetchInterval: 30_000,
   });
-
-  const detail = useQuery({
-    queryKey: ["agent-session", projectId, selected],
-    queryFn: () => api<AgentSession>(`/v1/projects/${projectId}/agent/sessions/${selected}`),
-    enabled: Boolean(projectId && selected),
-  });
+  const stats = activity.data;
+  const pending = stats?.approvals.pending ?? 0;
+  const canEdit = ["owner", "admin"].includes(user?.role ?? "");
 
   return (
     <div className="space-y-6">
       <PageHeader
-        eyebrow="Pipeline"
-        title="Agent sessions"
-        description="Conversations an AI agent had with your customers. Each one is briefed from memory on the way in and writes a summary back on the way out — that summary is what the next conversation reads."
-        actions={
-          <Select
-            value={status}
-            onChange={(event) => setStatus(event.target.value)}
-            className="w-48"
-          >
-            {FILTERS.map((filter) => (
-              <option key={filter.label} value={filter.value}>
-                {filter.label}
-              </option>
-            ))}
-          </Select>
-        }
+        eyebrow="Agents"
+        title="Agents"
+        description="What your AI agents asked to do and were told, the requests waiting for a person, every answer they were given and why, and the profiles that decide what each one may read and do."
       />
 
-      <Card>
-        {sessions.isLoading && <LoadingRow />}
-        {sessions.error && <ErrorState error={sessions.error} />}
-        {sessions.data?.data.length === 0 && (
-          <EmptyState
-            title="No agent sessions yet"
-            description="Open one with POST /v1/agent/sessions, or memory.agent.open() in the SDK."
-          />
-        )}
-        {!!sessions.data?.data.length && (
-          <Table>
-            <THead>
-              <TR>
-                <TH className="w-40">Agent</TH>
-                <TH className="w-48">Customer</TH>
-                <TH className="w-24">Status</TH>
-                <TH className="w-20">Turns</TH>
-                <TH className="w-40">Last active</TH>
-                <TH>What it established</TH>
-              </TR>
-            </THead>
-            <tbody>
-              {sessions.data.data.map((session) => (
-                <TR
-                  key={session.id}
-                  className={cn("cursor-pointer", selected === session.id && "bg-surface-2")}
-                  onClick={() => setSelected(session.id === selected ? null : session.id)}
-                >
-                  <TD>
-                    <p className="font-mono text-xs text-foreground">{session.agent}</p>
-                    <p className="label mt-0.5">{session.channel ?? "api"}</p>
-                  </TD>
-                  <TD>
-                    <Link
-                      href={`/customers/${session.customer_id}`}
-                      onClick={(event) => event.stopPropagation()}
-                      className="font-mono text-xs hover:text-accent"
-                    >
-                      {session.customer_id}
-                    </Link>
-                  </TD>
-                  <TD>
-                    <Badge className={STATUS_STYLES[session.status] ?? ""}>{session.status}</Badge>
-                  </TD>
-                  <TD className="numeric text-sm">{session.turn_count}</TD>
-                  <TD className="label">{formatRelative(session.last_active_at)}</TD>
-                  <TD className="max-w-xl text-xs leading-relaxed text-muted-foreground">
-                    {session.summary ?? (
-                      <span className="label">
-                        {session.status === "open" ? "still open" : "no summary written"}
-                      </span>
-                    )}
-                  </TD>
-                </TR>
-              ))}
-            </tbody>
-          </Table>
-        )}
-      </Card>
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
+        <StatTile
+          label="Waiting for a person"
+          value={pending}
+          tone={pending ? "accent" : "default"}
+        />
+        <StatTile label="Allowed · 7 days" value={stats?.checks.allow ?? 0} />
+        <StatTile label="Needed approval · 7 days" value={stats?.checks.require_approval ?? 0} />
+        <StatTile
+          label="Denied · 7 days"
+          value={stats?.checks.deny ?? 0}
+          tone={stats?.checks.deny ? "danger" : "default"}
+        />
+        <StatTile
+          label="Runs · 7 days"
+          value={stats?.runs ?? 0}
+          hint={stats?.top_rules[0] ? `most hit: ${stats.top_rules[0].rule}` : undefined}
+        />
+      </div>
 
-      {selected && (
-        <Card>
-          <CardHeader className="flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <CardTitle>Transcript</CardTitle>
-              <p className="mt-1 text-xs text-muted-foreground">
-                Customer turns become memory; the agent&apos;s own words are recorded but never
-                learned from.
-              </p>
-            </div>
-            <button className="label hover:text-accent" onClick={() => setSelected(null)}>
-              Close
-            </button>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            {detail.isLoading && <LoadingRow />}
-            {detail.error && <ErrorState error={detail.error} />}
-            {detail.data?.turns.length === 0 && (
-              <p className="label">Nothing was said in this session.</p>
+      <div className="flex gap-px overflow-hidden rounded-md border border-border bg-border">
+        {TABS.map((item) => (
+          <button
+            key={item}
+            onClick={() => setTab(item)}
+            className={cn(
+              "flex-1 px-4 py-2.5 font-mono text-[11px] uppercase tracking-label",
+              tab === item
+                ? "bg-accent text-accent-foreground"
+                : "bg-surface text-muted-foreground hover:bg-surface-2",
             )}
-            {detail.data?.turns.map((turn) => (
-              <div
-                key={turn.id}
-                className={cn(
-                  "border-l-2 px-3 py-2",
-                  turn.role === "user" ? "border-accent bg-surface-2" : "border-border",
-                )}
-              >
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="label-strong">{turn.role}</span>
-                  <span className="label">{formatDate(turn.occurred_at)}</span>
-                  {turn.event_id && <span className="label text-success">remembered</span>}
-                  {turn.retrieved_memory_ids.length > 0 && (
-                    <span className="label">
-                      {turn.retrieved_memory_ids.length} memories retrieved
-                    </span>
-                  )}
-                </div>
-                <p className="mt-1.5 text-xs leading-relaxed">{turn.content}</p>
-              </div>
-            ))}
+          >
+            {item}
+            {item === "Approvals" && pending > 0 && <span className="ml-1.5">({pending})</span>}
+          </button>
+        ))}
+      </div>
 
-            {detail.data?.summary && (
-              <div className="border border-border-strong bg-surface-2 px-4 py-3">
-                <p className="label-strong">Written back to memory</p>
-                <p className="mt-1.5 text-xs leading-relaxed">{detail.data.summary}</p>
-                {detail.data.summary_memory_id && (
-                  <p className="label mt-2">{detail.data.summary_memory_id}</p>
-                )}
-              </div>
-            )}
-          </CardContent>
-        </Card>
-      )}
+      {tab === "Approvals" && <ApprovalsQueue projectId={projectId} />}
+      {tab === "Checks" && <ChecksLog projectId={projectId} />}
+      {tab === "Runs" && <RunsExplorer projectId={projectId} initialRun={runParam} />}
+      {tab === "Sessions" && <SessionsList projectId={projectId} />}
+      {tab === "Profiles" && <ProfilesManager projectId={projectId} canEdit={canEdit} />}
+      {tab === "Simulate" && <PolicySimulator projectId={projectId} />}
     </div>
   );
 }

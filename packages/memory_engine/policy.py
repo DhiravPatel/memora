@@ -30,6 +30,8 @@ from nlp.tokenize import content_words, lemmatize
 
 # What a reader without clearance sees in place of the content.
 MASK = "[restricted]"
+# What derived text shows in place of words quoted from something the reader may not see.
+WITHHELD = "[withheld]"
 MAX_RULES = 24
 MAX_TERMS_PER_RULE = 60
 # A pattern that takes this long is a denial of service, not a policy.

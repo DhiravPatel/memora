@@ -17,29 +17,44 @@ print(context.prompt_text)
 
 for action in memory.recommendations("cus_123"):
     print(action.priority, action.action, "—", action.rationale)
+
+# Before an agent acts: may it?
+check = memory.check_action("cus_123", "offer_upgrade")
+if not check:
+    print(check.decision, check.summary)
 ```
 """
 
+from ai_memory.agent import AsyncMemoryAgent, MemoryAgent, TurnContext
 from ai_memory.client import AsyncMemoryClient, MemoryClient
 from ai_memory.errors import (
+    ActionDenied,
+    ApprovalRequired,
     MemoryAPIError,
     MemoryConfigError,
     MemoryError,
     MemoryTimeoutError,
 )
 from ai_memory.models import (
+    ActionCheck,
+    AgentProfile,
+    AgentRun,
     AgentSession,
+    Approval,
+    ConditionResult,
     Customer,
     Customer360,
     CustomerContext,
     EventExplanation,
     Goal,
     Health,
+    LifecycleState,
     Memory,
     MemoryPlan,
     PriorSession,
     QueryResult,
     Recommendation,
+    RunExplanation,
     SessionContext,
     Signal,
     SignalReport,
@@ -65,9 +80,18 @@ __all__ = [
     "EVENT_HEADER",
     "SIGNATURE_HEADER",
     "TIMESTAMP_HEADER",
+    "ActionCheck",
+    "ActionDenied",
+    "AgentProfile",
+    "AgentRun",
     "AgentSession",
+    "Approval",
+    "ApprovalRequired",
+    "AsyncMemoryAgent",
     "AsyncMemoryClient",
     "Customer",
+    "LifecycleState",
+    "ConditionResult",
     "Customer360",
     "EventExplanation",
     "MemoryPlan",
@@ -76,6 +100,7 @@ __all__ = [
     "Health",
     "Memory",
     "MemoryAPIError",
+    "MemoryAgent",
     "MemoryClient",
     "MemoryConfigError",
     "MemoryError",
@@ -83,11 +108,13 @@ __all__ = [
     "PriorSession",
     "QueryResult",
     "Recommendation",
+    "RunExplanation",
     "SessionContext",
     "Signal",
     "SignalReport",
     "TrackedEvent",
     "Turn",
+    "TurnContext",
     "TurnResult",
     "WebhookEvent",
     "WebhookVerificationError",

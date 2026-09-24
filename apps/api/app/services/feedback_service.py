@@ -9,7 +9,7 @@ and when" is answerable months later.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -51,13 +51,15 @@ class FeedbackResult:
 
 
 class FeedbackService:
-    def __init__(self, session: AsyncSession, *, cleared: bool = True) -> None:
+    def __init__(self, session: AsyncSession, *, cleared: bool = True, embedder: Any | None = None) -> None:
         """``cleared=False`` hides memories the project's policy restricted.
 
-        You cannot correct a memory you are not allowed to read.
+        You cannot correct a memory you are not allowed to read. ``embedder`` embeds the
+        replacement a correction writes, so the corrected statement is findable at once.
         """
         self.session = session
         self.cleared = cleared
+        self.embedder = embedder
         self.memories = MemoryRepository(session, cleared=cleared)
         self.audit = AuditRepository(session)
 
@@ -175,6 +177,8 @@ class FeedbackService:
         await self.memories.supersede(
             memory, superseded_by=replacement.id, reason="feedback_corrected"
         )
+        if self.embedder is not None:
+            await self.memories.embed(replacement, self.embedder)
         await WebhookDispatcher(self.session).emit(
             memory_conflict(
                 project_id=memory.project_id,

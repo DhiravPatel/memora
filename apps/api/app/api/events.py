@@ -21,6 +21,7 @@ from app.schemas.events import (
     EventPreviewIn,
 )
 from app.services.event_service import EventService
+from app.services.reader import Reader
 from app.services.serializers import event_out
 from common.enums import ApiKeyScope, EventStatus
 from common.errors import ConflictError, NotFoundError
@@ -137,6 +138,7 @@ async def preview_event(
 async def list_events(
     project: ApiProject,
     session: DBSession,
+    cleared: Clearance,
     customer_id: str | None = None,
     event_type: str | None = None,
     event_status: EventStatus | None = Query(default=None, alias="status"),
@@ -158,8 +160,9 @@ async def list_events(
         limit=limit,
         offset=offset,
     )
+    mask = await Reader(session, cleared=cleared).event_mask(project.id, events)
     return Page[EventOut](
-        data=[event_out(event) for event in events], total=total, limit=limit, offset=offset
+        data=[event_out(event, mask) for event in events], total=total, limit=limit, offset=offset
     )
 
 
@@ -170,8 +173,12 @@ async def retry_event(event_id: str, project: ApiProject, session: DBSession) ->
 
 
 @router.get("/{event_id}", response_model=EventOut)
-async def get_event(event_id: str, project: ApiProject, session: DBSession) -> EventOut:
+async def get_event(
+    event_id: str, project: ApiProject, session: DBSession, cleared: Clearance
+) -> EventOut:
+    """An event and what became of it. The payload of an event that fed a memory this key
+    may not read is withheld (``withheld: true``), since it holds that memory's words."""
     event = await EventRepository(session).get(event_id, project.id)
     if event is None:
         raise NotFoundError("Event not found.")
-    return event_out(event)
+    return event_out(event, await Reader(session, cleared=cleared).event_mask(project.id, [event]))

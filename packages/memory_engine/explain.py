@@ -134,6 +134,9 @@ class EventExplanation:
     would_process: bool = False
     # Set when the pipeline stopped early. This is the field people are looking for.
     stop_reason: str | None = None
+    # The same, for machines: "below_threshold", "no_text" or "customer_missing". The
+    # quality report aggregates on this rather than parsing the sentence above.
+    stop_code: str | None = None
     # Stage 1: what the engine actually read, after redaction.
     text: str = ""
     text_length: int = 0
@@ -190,6 +193,7 @@ class EventExplanation:
         payload: dict[str, Any] = {
             "would_process": self.would_process,
             "stop_reason": self.stop_reason,
+            "stop_code": self.stop_code,
             "summary": self.summary(),
             "importance": round(self.importance, 3),
             "threshold": round(self.threshold, 3),

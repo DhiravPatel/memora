@@ -19,10 +19,13 @@ from database.session import dispose_engine
 from nlp import LocalEmbedder
 from worker.tasks import (
     apply_retention,
+    backfill_memory_indexes,
+    backfill_memory_indexes_all,
     check_key_rotation,
     close_idle_sessions,
     consolidate_customer_memories,
     deliver_webhooks,
+    expire_agent_approvals,
     generate_embeddings,
     link_memories,
     link_project,
@@ -32,10 +35,13 @@ from worker.tasks import (
     purge_old_deliveries,
     reclassify_memories,
     refresh_customer_foresight,
+    refresh_customer_states,
+    refresh_customer_states_all,
     report_queue_depth,
     reprocess_customer,
     reprocess_event,
     retry_failed_events,
+    run_evaluation,
     send_email,
     send_invitation_email,
     snapshot_signals,
@@ -111,6 +117,9 @@ class WorkerSettings:
         refresh_customer_foresight,
         mine_vocabulary,
         reclassify_memories,
+        refresh_customer_states,
+        run_evaluation,
+        backfill_memory_indexes,
         check_key_rotation,
         send_email,
         send_invitation_email,
@@ -127,12 +136,18 @@ class WorkerSettings:
         # so it is recomputed nightly rather than waiting for an event that never comes.
         cron(snapshot_signals_all, hour=4, minute=30),
         cron(sweep_stale_goals, hour=5, minute=0),
+        # After signals (04:30) and goals (05:00), because the lifecycle reads both.
+        cron(refresh_customer_states_all, hour=5, minute=15),
         # After the summaries, so a project's newest memories are in the corpus.
         cron(mine_vocabulary_all, hour=5, minute=30),
         cron(close_idle_sessions, minute={10, 40}),
         cron(report_queue_depth, minute=set(range(0, 60, 5))),
+        # Cheap when there is nothing to fill; catches up concepts and embeddings anything missed.
+        cron(backfill_memory_indexes_all, hour=2, minute=30, run_at_startup=True),
         # Early, before anyone is awake to be annoyed, and after the night's other work.
         cron(check_key_rotation, hour=6, minute=0),
+        # Every five minutes, so an agent waiting on a webhook hears "expired" promptly.
+        cron(expire_agent_approvals, minute=set(range(2, 60, 5))),
     ]
     on_startup = startup
     on_shutdown = shutdown
