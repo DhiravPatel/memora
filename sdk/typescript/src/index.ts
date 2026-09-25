@@ -11,6 +11,7 @@
  * });
  *
  * const context = await memory.context({ customerId: "cus_123", task: "support_response" });
+ * const brief = await memory.brief("cus_123"); // what to raise, what not to do
  * const { recommendations } = await memory.recommendations("cus_123");
  * ```
  */
@@ -28,6 +29,7 @@ import { State } from "./resources/state.js";
 import type {
   ClientOptions,
   ContextResult,
+  CustomerBrief,
   QueryResult,
   Recommendations,
   SignalReport,
@@ -98,6 +100,14 @@ export class MemoryClient {
     sessionId?: string;
   }): Promise<QueryResult> {
     return this.memories.query(input);
+  }
+
+  /** Shorthand for `customers.brief`: what to raise, what not to do and why. */
+  brief(
+    customerId: string,
+    options: { since?: Date | string; agent?: string } = {},
+  ): Promise<CustomerBrief> {
+    return this.customers.brief(customerId, options);
   }
 
   /** Shorthand for `foresight.signals`. */

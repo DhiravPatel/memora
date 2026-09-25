@@ -321,3 +321,33 @@ def test_every_recommendation_cites_something():
 )
 def test_priority_bands(urgency: float, expected: str):
     assert priority_for(urgency) == expected
+
+
+def test_days_read_as_words_and_a_recurrence_note_is_not_quoted_twice():
+    memories = [
+        memory(
+            "m1",
+            MemoryType.PROBLEM,
+            "The payroll export failed again last night. Reported 3 times since 04 Sep 2026.",
+            age_days=1.2,
+            evidence_count=3,
+            urgency=0.4,
+        )
+    ]
+    report = compute(memories=memories, health_score=50, now=NOW)
+    actions = {action.key: action for action in recommend(memories=memories, report=report, health_score=50, now=NOW)}
+    resolve = actions["resolve_open_problem"]
+    assert resolve.rationale == "Reported yesterday and still open, mentioned 3 times."
+    assert resolve.action == "Resolve: The payroll export failed again last night."
+    assert "Reported 3 times since" not in actions["escalate_repeat_problem"].action
+
+
+def test_a_summary_restating_churn_language_is_not_new_churn_language():
+    said = memory("m1", MemoryType.INTENT, "The customer is considering switching to a competitor.", age_days=40)
+    restated = memory("s1", MemoryType.SUMMARY, "Open problems: none. Intent: considering switching to a competitor.", age_days=0.1)
+    report = compute(memories=[said, restated], health_score=60, now=NOW)
+    assert "churn_language" not in keys(report), "only the 40-day-old statement is evidence, and it is outside the window"
+    fresh = memory("m2", MemoryType.INTENT, "We may cancel next month.", age_days=2)
+    report = compute(memories=[fresh, restated], health_score=60, now=NOW)
+    churn = next(signal for signal in report.signals if signal.key == "churn_language")
+    assert churn.memory_ids == ("m2",) and churn.rationale == "cancellation or competitor language 2 days ago"

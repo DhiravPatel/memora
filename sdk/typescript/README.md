@@ -14,6 +14,12 @@ const memory = new MemoryClient({
   baseUrl: process.env.MEMORY_API_URL, // optional, for self-hosted deployments
 });
 
+// Before a call or a reply: what to raise, what not to do and why, the next step
+const brief = await memory.brief("cus_123"); // since the last conversation, by default
+console.log(brief.headline, brief.talkingPoints);
+const noUpsell = brief.cautions.some((caution) => caution.actions.includes("offer_upgrade"));
+const page = await memory.customers.briefMarkdown("cus_123"); // the same brief, as Markdown
+
 // Everything worth knowing, in one call — what an agent reads before it replies
 const view = await memory.customers.get360("cus_123", {
   include: ["health", "active_problems", "goals"],

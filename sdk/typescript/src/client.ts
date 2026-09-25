@@ -73,6 +73,10 @@ export class HttpClient {
 
         if (response.ok) {
           if (response.status === 204) return undefined as T;
+          // A brief as Markdown is text; everything else is JSON.
+          if ((response.headers.get("content-type") ?? "").startsWith("text/")) {
+            return (await response.text()) as T;
+          }
           return (await response.json()) as T;
         }
 

@@ -18,6 +18,7 @@ from memory_engine.consolidation.rules import (
     merge_content,
     novelty,
     recurrence_note,
+    without_recurrence_note,
 )
 
 NOW = utcnow()
@@ -189,3 +190,63 @@ def test_novelty_and_recurrence_helpers():
     assert 0 < ratio <= 1 and "checkout" in words
     assert recurrence_note(existing("x", evidence=1), candidate("y")) is None
     assert recurrence_note(existing("x", evidence=5), candidate("y")).startswith("Reported 6 times")
+
+
+def test_a_second_recurrence_note_replaces_the_first():
+    decision = decide(
+        existing=existing(
+            "The Shopify integration keeps failing. Reported 3 times since 04 Sep 2026.", evidence=3, entities=("Shopify",)
+        ),
+        candidate=candidate("The Shopify sync failed again last night.", entities=("Shopify",)),
+        similarity=0.7,
+    )
+    assert decision.content.count("Reported") == 1
+    assert decision.content.endswith("Reported 4 times since " + (NOW - timedelta(days=10)).strftime("%d %b %Y") + ".")
+    # The note's words are not news: "reported", "times", "since" never count as novelty.
+    assert not {"report", "time", "since", "sep"} & set(decision.signals["new_words"])
+
+
+def test_the_recurrence_note_comes_off_cleanly():
+    assert without_recurrence_note("The export fails. Reported 3 times since 04 Sep 2026.") == "The export fails."
+    assert without_recurrence_note("The export fails.") == "The export fails."
+    # Only a trailing note in the exact form merge_content writes.
+    assert without_recurrence_note("Reported 3 times since the upgrade.") == "Reported 3 times since the upgrade."
+
+
+@pytest.mark.parametrize(
+    ("text", "plan"),
+    [
+        ("The customer is on the Enterprise plan.", "Enterprise"),
+        ("The customer is on the business plan.", "Business"),
+        ("They use Scale.", "Scale"),
+        ("The customer is on the Starter plan.", "Starter"),
+    ],
+)
+def test_every_plan_name_is_read_whatever_its_stem(text, plan):
+    assert current_plan(text) == plan
+
+
+def test_moving_between_plans_whose_names_stem_oddly_is_still_a_change():
+    contradicts, reason = detect_contradiction(
+        existing("The customer is on the Enterprise plan.", memory_type=MemoryType.SUBSCRIPTION),
+        candidate("The customer is on the Business plan.", memory_type=MemoryType.SUBSCRIPTION),
+    )
+    assert contradicts and reason == "current plan changed from Enterprise to Business"
+
+
+def test_a_preference_conflict_compares_what_each_statement_wants():
+    agree, _ = detect_contradiction(
+        existing("The customer prefers email.", memory_type=MemoryType.PREFERENCE),
+        candidate("Email, not WhatsApp, please.", memory_type=MemoryType.PREFERENCE),
+    )
+    assert agree is False
+    opt_out, _ = detect_contradiction(
+        existing("The customer prefers email.", memory_type=MemoryType.PREFERENCE),
+        candidate("Stop calling the customer.", memory_type=MemoryType.PREFERENCE),
+    )
+    assert opt_out is False, "turning a channel away is an opt-out, not a new preference"
+    moved, reason = detect_contradiction(
+        existing("The customer prefers email.", memory_type=MemoryType.PREFERENCE),
+        candidate("Please contact the customer on WhatsApp instead of email.", memory_type=MemoryType.PREFERENCE),
+    )
+    assert moved and reason == "contact channel changed from email to WhatsApp"

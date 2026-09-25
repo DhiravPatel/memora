@@ -218,6 +218,24 @@ def test_what_changed_through_the_sdk(memory):
     assert compared["now"]["live"] is True
 
 
+def test_the_brief_through_the_sdk(memory):
+    """§26 5.2 over a real socket: the judgement, typed, and the same page as Markdown."""
+    brief = memory.brief("cus_sdk", since="7d")
+    assert brief.customer["external_id"] == "cus_sdk"
+    assert brief.headline and brief.talking_points
+    assert brief.open_problems >= 1 and brief.health_score is not None
+    # An open problem refuses selling; the brief says so before the agent asks.
+    assert brief.forbids("offer_upgrade") and brief.forbids("offer-upgrade")
+    upsell = brief.caution_for("offer_upgrade")
+    assert upsell is not None and upsell.refused and upsell.text.startswith("Don't offer an upgrade")
+    assert brief.recent_changes["window"]["basis"] == "span"
+    assert brief.markdown.startswith("# ")
+
+    page = memory.brief_markdown("cus_sdk", since="7d")
+    assert isinstance(page, str) and page.splitlines()[0] == brief.markdown.splitlines()[0]
+    assert "## Don't" in page
+
+
 def test_manual_memory_query_and_context(memory):
     memory.remember(
         "cus_sdk",

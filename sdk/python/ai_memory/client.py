@@ -28,6 +28,7 @@ from ai_memory.models import (
     ConditionResult,
     Customer,
     Customer360,
+    CustomerBrief,
     CustomerChanges,
     CustomerContext,
     EventExplanation,
@@ -98,6 +99,15 @@ def _changes_params(
     return params
 
 
+def _brief_params(since: datetime | str | None, agent: str | None) -> dict[str, Any]:
+    params: dict[str, Any] = {}
+    if since:
+        params["since"] = _iso(since)
+    if agent:
+        params["agent"] = agent
+    return params
+
+
 def _event_payload(
     *,
     customer_id: str,
@@ -119,6 +129,15 @@ def _event_payload(
         "customer_name": customer_name,
         "source": source,
     }
+
+
+def _body(response: httpx.Response) -> Any:
+    """JSON, or the text of a text response (a brief as Markdown)."""
+    if not response.content:
+        return None
+    if response.headers.get("content-type", "").startswith("text/"):
+        return response.text
+    return response.json()
 
 
 def _raise_for_status(response: httpx.Response) -> None:
@@ -257,7 +276,7 @@ class MemoryClient(_BaseClient):
                     time.sleep(_backoff(attempt))
                     continue
                 _raise_for_status(response)
-                return response.json() if response.content else None
+                return _body(response)
             except httpx.TimeoutException as exc:
                 last_error = MemoryTimeoutError(f"Request timed out after {self.timeout}s")
                 if attempt >= self.max_retries:
@@ -561,6 +580,35 @@ class MemoryClient(_BaseClient):
         """The customer at two moments side by side ("then vs now"), with every fact that differs."""
         params = {"from": _iso(start), **({"to": _iso(end)} if end else {})}
         return self._request("GET", f"/v1/customers/{customer_id}/compare", params=params)
+
+    def brief(
+        self, customer_id: str, *, since: datetime | str | None = "last_session", agent: str | None = None
+    ) -> CustomerBrief:
+        """A decision-ready brief: the situation, what to raise and in what order, what not to
+        do and why, the open issues, goals and preferences, what changed since the last
+        conversation, and the next step — each with the memories behind it.
+
+        Cautions are the guardrails' own verdicts for this key's agent profile, so an agent
+        that follows the brief does not then get refused.
+
+            brief = client.brief("cus_1")
+            print(brief.headline)
+            if brief.forbids("offer_upgrade"):
+                ...
+        """
+        return CustomerBrief.from_api(
+            self._request("GET", f"/v1/customers/{customer_id}/brief", params=_brief_params(since, agent))
+        )
+
+    def brief_markdown(
+        self, customer_id: str, *, since: datetime | str | None = "last_session", agent: str | None = None
+    ) -> str:
+        """The brief as a Markdown page — ready for a system prompt or a ticket."""
+        return str(
+            self._request(
+                "GET", f"/v1/customers/{customer_id}/brief", params={**_brief_params(since, agent), "format": "markdown"}
+            )
+        )
 
     def customer_360(
         self, customer_id: str, *, include: Sequence[str] | None = None
@@ -1109,7 +1157,7 @@ class AsyncMemoryClient(_BaseClient):
                     await asyncio.sleep(_backoff(attempt))
                     continue
                 _raise_for_status(response)
-                return response.json() if response.content else None
+                return _body(response)
             except httpx.TimeoutException as exc:
                 last_error = MemoryTimeoutError(f"Request timed out after {self.timeout}s")
                 if attempt >= self.max_retries:
@@ -1325,6 +1373,24 @@ class AsyncMemoryClient(_BaseClient):
         """The customer at two moments side by side, with every fact that differs."""
         params = {"from": _iso(start), **({"to": _iso(end)} if end else {})}
         return await self._request("GET", f"/v1/customers/{customer_id}/compare", params=params)
+
+    async def brief(
+        self, customer_id: str, *, since: datetime | str | None = "last_session", agent: str | None = None
+    ) -> CustomerBrief:
+        """A decision-ready brief on the customer. See :meth:`MemoryClient.brief`."""
+        return CustomerBrief.from_api(
+            await self._request("GET", f"/v1/customers/{customer_id}/brief", params=_brief_params(since, agent))
+        )
+
+    async def brief_markdown(
+        self, customer_id: str, *, since: datetime | str | None = "last_session", agent: str | None = None
+    ) -> str:
+        """The brief as a Markdown page."""
+        return str(
+            await self._request(
+                "GET", f"/v1/customers/{customer_id}/brief", params={**_brief_params(since, agent), "format": "markdown"}
+            )
+        )
 
     async def customer_360(
         self, customer_id: str, *, include: Sequence[str] | None = None

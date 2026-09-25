@@ -17,10 +17,10 @@ from typing import Any
 from common.enums import ConsolidationAction, MemoryType
 from common.text import content_hash, jaccard
 from common.time import days_between, ensure_utc
-from nlp.entities import channels_mentioned
+from nlp.entities import channel_stance
 from nlp.lexicon import PLANS
 from nlp.sentiment import analyze as analyze_sentiment
-from nlp.tokenize import content_words, lemmatize
+from nlp.tokenize import content_words, lemmatize, tokenize
 
 # Blended similarity above which two statements are the same statement.
 AUTO_MERGE_SIMILARITY = 0.82
@@ -35,6 +35,17 @@ RECURRENCE_WINDOW_DAYS = 45
 RECURRENCE_MIN_REPORTS = 3
 
 MAX_CONTENT_LENGTH = 900
+
+# The note :func:`merge_content` appends, so it can be taken off again: a second note must
+# replace the first rather than follow it, its words are not evidence of anything new, and
+# a reader quoting the memory next to its count would otherwise say the count twice.
+_RECURRENCE_NOTE = re.compile(r"\s*Reported \d+ times since \d{1,2} [A-Z][a-z]{2} \d{4}\.?\s*$")
+
+
+def without_recurrence_note(text: str) -> str:
+    """"The export fails. Reported 3 times since 04 Sep 2026." → "The export fails."."""
+    stripped = _RECURRENCE_NOTE.sub("", text).rstrip()
+    return stripped or text
 
 
 @dataclass(slots=True)
@@ -93,7 +104,9 @@ def is_exact_duplicate(left: str, right: str) -> bool:
 
 
 def _plans_in(text: str) -> set[str]:
-    words = set(content_words(text))
+    # Raw tokens, not lemmas: lemmatising turns "enterprise", "business" and "starter" into
+    # stems the plan lexicon does not contain, and a change between them went unnoticed.
+    words = set(tokenize(text))
     return {display for key, display in PLANS.items() if key in words}
 
 
@@ -120,10 +133,12 @@ def detect_contradiction(existing: MemorySnapshot, candidate: CandidateSnapshot)
     """Do these two statements disagree about the same thing?"""
     overlap = topic_overlap(existing.content, candidate.content)
 
-    # 1. A stated preference moved to a different channel.
+    # 1. A stated preference moved to a different channel. Compared on the channels each
+    #    statement *wants*: "email, not WhatsApp" and "we prefer email" agree, and "stop
+    #    calling us" wants nothing, so it is an opt-out rather than a new preference.
     if existing.type == MemoryType.PREFERENCE and candidate.type == MemoryType.PREFERENCE:
-        existing_channels = set(channels_mentioned(existing.content))
-        candidate_channels = set(channels_mentioned(candidate.content))
+        existing_channels = set(channel_stance(existing.content)[0])
+        candidate_channels = set(channel_stance(candidate.content)[0])
         if existing_channels and candidate_channels and existing_channels != candidate_channels:
             return True, (
                 f"contact channel changed from {', '.join(sorted(existing_channels))} "
@@ -190,17 +205,18 @@ def merge_content(existing: MemorySnapshot, candidate: CandidateSnapshot, note: 
     context window, so the more informative sentence wins and the other is preserved as a
     version. The only thing added is a factual recurrence note derived from counts.
     """
-    existing_words = set(content_words(existing.content))
+    existing_text = without_recurrence_note(existing.content)
+    existing_words = set(content_words(existing_text))
     candidate_words = set(content_words(candidate.content))
 
     if existing_words and existing_words <= candidate_words:
         base = candidate.content  # strictly more specific
     elif candidate_words and candidate_words <= existing_words:
-        base = existing.content  # nothing new to add
+        base = existing_text  # nothing new to add
     elif len(candidate_words) > len(existing_words):
         base = candidate.content  # carries more detail
     elif len(candidate_words) < len(existing_words):
-        base = existing.content
+        base = existing_text
     else:
         base = candidate.content  # equally informative: prefer the newer wording
 
@@ -218,7 +234,9 @@ def decide(
     threshold: float = DEFAULT_THRESHOLD,
 ) -> Decision:
     """Decide how a candidate memory relates to the closest existing memory."""
-    overlap = topic_overlap(existing.content, candidate.content)
+    # What the memory says, without the count merge_content appended to it.
+    existing_text = without_recurrence_note(existing.content)
+    overlap = topic_overlap(existing_text, candidate.content)
     common_entities = shared_entities(existing.entities, candidate.entities)
     signals: dict[str, Any] = {
         "similarity": round(similarity, 4),
@@ -289,7 +307,7 @@ def decide(
         )
 
     note = recurrence_note(existing, candidate)
-    novelty_ratio, new_words = novelty(existing.content, candidate.content)
+    novelty_ratio, new_words = novelty(existing_text, candidate.content)
     signals.update({"novelty": round(novelty_ratio, 3), "new_words": new_words[:8]})
 
     if similarity >= AUTO_MERGE_SIMILARITY and novelty_ratio < NOVELTY_RATIO:

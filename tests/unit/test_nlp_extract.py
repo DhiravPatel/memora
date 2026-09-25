@@ -86,3 +86,24 @@ def test_helpers():
     assert attribute("integration never worked").startswith("The customer reported that")
     assert attribute("The customer prefers email") == "The customer prefers email"
     assert collect_segments({"message": "a", "reason": "b"}) == [("message", "a"), ("reason", "b")]
+
+
+def test_a_threat_on_a_condition_is_an_intent_and_the_problem_it_hangs_on():
+    output = extract(event_type="support_message", data={"message": "We will cancel if the payroll export keeps failing."})
+    found = [(memory.type, memory.content, memory.rule) for memory in output.memories]
+    assert (MemoryType.INTENT, "The customer will cancel if the payroll export keeps failing.", "text:intent:conditional_threat") in found
+    assert (MemoryType.PROBLEM, "The payroll export keeps failing.", "text:problem:condition") in found
+
+    first = extract(event_type="support_message", data={"message": "If the Shopify sync breaks again, we will switch to a competitor."})
+    assert {memory.type for memory in first.memories} == {MemoryType.INTENT, MemoryType.PROBLEM}
+    assert "The Shopify sync breaks again." in contents(first)
+
+
+def test_a_demand_or_a_request_is_not_split():
+    demand = extract(event_type="support_message", data={"message": "We will cancel unless you fix the export."})
+    assert [(memory.type, memory.content) for memory in demand.memories] == [
+        (MemoryType.INTENT, "The customer will cancel unless you fix the export.")
+    ]
+    request = extract(event_type="support_message", data={"message": "Please cancel the invoice if it was sent twice."})
+    assert all(memory.type is not MemoryType.INTENT for memory in request.memories)
+    assert not any(memory.rule.endswith("conditional_threat") for memory in request.memories)

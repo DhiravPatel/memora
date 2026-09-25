@@ -191,6 +191,121 @@ class CustomerChanges:
 
 
 @dataclass(slots=True)
+class BriefCaution:
+    """Something not to do, and why: the guardrails' own verdict on an action, right now."""
+
+    text: str
+    action: str
+    actions: list[str]
+    decision: str  # deny | require_approval
+    summary: str
+    rules: list[str] = field(default_factory=list)
+    evidence: list[str] = field(default_factory=list)
+
+    @property
+    def refused(self) -> bool:
+        return self.decision == "deny"
+
+    @classmethod
+    def from_api(cls, data: dict[str, Any]) -> BriefCaution:
+        return cls(
+            text=data.get("text", ""),
+            action=data.get("action", ""),
+            actions=list(data.get("actions") or [data.get("action", "")]),
+            decision=data.get("decision", "deny"),
+            summary=data.get("summary", ""),
+            rules=list(data.get("rules") or []),
+            evidence=list(data.get("evidence") or []),
+        )
+
+
+@dataclass(slots=True)
+class CustomerBrief:
+    """A decision-ready brief on one customer (§26 5.2).
+
+    ``headline`` is the situation in a few sentences; ``talking_points`` what to raise, most
+    important first; ``cautions`` what not to do and why; ``markdown`` the whole brief as a
+    page. Everything else is the evidence, shaped for the key that asked.
+    """
+
+    customer: dict[str, Any]
+    headline: str
+    talking_points: list[str]
+    cautions: list[BriefCaution]
+    markdown: str
+    situation: dict[str, Any] = field(default_factory=dict)
+    open_issues: list[dict[str, Any]] = field(default_factory=list)
+    goals: list[dict[str, Any]] = field(default_factory=list)
+    preferences: dict[str, Any] = field(default_factory=dict)
+    intents: list[dict[str, Any]] = field(default_factory=list)
+    risks: list[dict[str, Any]] = field(default_factory=list)
+    opportunities: list[dict[str, Any]] = field(default_factory=list)
+    recent_changes: dict[str, Any] = field(default_factory=dict)
+    last_conversation: dict[str, Any] | None = None
+    next_step: dict[str, Any] | None = None
+    set_aside: list[dict[str, Any]] = field(default_factory=list)
+    evidence: list[str] = field(default_factory=list)
+    withheld: int = 0
+    withheld_facts: list[str] = field(default_factory=list)
+    generated_at: str | None = None
+    raw: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def health_score(self) -> float | None:
+        health = (self.situation or {}).get("health") or {}
+        return float(health["score"]) if "score" in health else None
+
+    @property
+    def is_at_risk(self) -> bool:
+        health = (self.situation or {}).get("health") or {}
+        return health.get("band") in ("at_risk", "critical")
+
+    @property
+    def plan(self) -> str | None:
+        return ((self.situation or {}).get("plan") or {}).get("name")
+
+    @property
+    def open_problems(self) -> int:
+        return int((self.situation or {}).get("open_problems") or 0)
+
+    def caution_for(self, action: str) -> BriefCaution | None:
+        """The caution covering ``action``, if any."""
+        wanted = action.strip().lower().replace("-", "_").replace(" ", "_")
+        return next((caution for caution in self.cautions if wanted in caution.actions), None)
+
+    def forbids(self, action: str) -> bool:
+        """Whether the guardrails would refuse ``action`` outright right now."""
+        caution = self.caution_for(action)
+        return caution is not None and caution.refused
+
+    @classmethod
+    def from_api(cls, data: dict[str, Any]) -> CustomerBrief:
+        return cls(
+            customer=dict(data.get("customer") or {}),
+            headline=data.get("headline", ""),
+            talking_points=list(data.get("talking_points") or []),
+            cautions=[BriefCaution.from_api(item) for item in data.get("cautions") or []],
+            markdown=data.get("markdown", ""),
+            situation=dict(data.get("situation") or {}),
+            open_issues=list(data.get("open_issues") or []),
+            goals=list(data.get("goals") or []),
+            preferences=dict(data.get("preferences") or {}),
+            intents=list(data.get("intents") or []),
+            risks=list(data.get("risks") or []),
+            opportunities=list(data.get("opportunities") or []),
+            recent_changes=dict(data.get("recent_changes") or {}),
+            last_conversation=data.get("last_conversation"),
+            next_step=data.get("next_step"),
+            set_aside=list(data.get("set_aside") or []),
+            evidence=list(data.get("evidence") or []),
+            withheld=int(data.get("withheld") or 0),
+            withheld_facts=list(data.get("withheld_facts") or []),
+            generated_at=data.get("generated_at"),
+            raw=data,
+        )
+
+
+@dataclass(slots=True)
 class Customer360:
     """Everything worth knowing about one customer, from a single call.
 

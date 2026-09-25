@@ -9,8 +9,9 @@ from __future__ import annotations
 from datetime import datetime
 
 from fastapi import APIRouter, Query
+from fastapi.responses import PlainTextResponse
 
-from app.api.customers import _sections, _types
+from app.api.customers import MARKDOWN, _sections, _types
 from app.core.dependencies import (
     Clearance,
     CurrentUserDep,
@@ -21,6 +22,7 @@ from app.core.dependencies import (
 )
 from app.core.queue import enqueue
 from app.schemas.agents import SessionOut
+from app.schemas.brief import CustomerBriefOut
 from app.schemas.changes import ChangesOut, CompareOut
 from app.schemas.common import DeletionResult, Message, Page
 from app.schemas.customers import Customer360, CustomerOut, CustomerTimeline
@@ -86,6 +88,7 @@ from app.schemas.state import (
 )
 from app.services import evaluation_views, state_views
 from app.services.agent_service import AgentService
+from app.services.brief_service import BriefService
 from app.services.changes_service import ChangesService
 from app.services.customer360_service import Customer360Service
 from app.services.customer_state_service import CustomerStateService
@@ -978,6 +981,27 @@ async def dashboard_customer_changes(
     return await service.changes(
         project=project, customer=customer, window=window, types=_types(types), order=order, limit=limit
     )
+
+
+@router.get("/customers/{customer_id}/brief", response_model=CustomerBriefOut, responses=MARKDOWN)
+async def dashboard_customer_brief(
+    customer_id: str,
+    project: UserProject,
+    session: DBSession,
+    engine: Engine,
+    cleared: Clearance,
+    since: str | None = Query(default="last_session", max_length=64),
+    agent: str | None = Query(default=None, max_length=120),
+    fmt: str = Query(default="json", alias="format", pattern="^(json|markdown)$"),
+) -> CustomerBriefOut | PlainTextResponse:
+    """A decision-ready brief on this customer. See the API-key route."""
+    customer = await _resolve_customer(session, project.id, customer_id)
+    brief = await BriefService(session, engine, cleared=cleared).build(
+        project=project, customer=customer, since=since, agent=agent
+    )
+    if fmt == "markdown":
+        return PlainTextResponse(brief["markdown"], media_type="text/markdown; charset=utf-8")
+    return CustomerBriefOut(**brief)
 
 
 @router.get("/customers/{customer_id}/compare", response_model=CompareOut)

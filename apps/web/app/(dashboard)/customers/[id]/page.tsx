@@ -13,6 +13,7 @@ import { PolicySimulator } from "@/components/agents/simulator";
 import { AskMemory } from "@/components/ask-memory";
 import { CausalChains } from "@/components/causal-chains";
 import { ChangesPanel } from "@/components/changes-panel";
+import { CustomerBriefPanel } from "@/components/customer-brief";
 import {
   ForecastCard,
   GoalList,
@@ -49,6 +50,7 @@ import type {
 } from "@/lib/types";
 
 const TABS = [
+  "Brief",
   "Actions",
   "Changes",
   "State",
@@ -69,7 +71,7 @@ export default function CustomerPage() {
   const customerId = params.id;
   const { projectId } = useSession();
   const queryClient = useQueryClient();
-  const [tab, setTab] = useState<(typeof TABS)[number]>("Actions");
+  const [tab, setTab] = useState<(typeof TABS)[number]>("Brief");
 
   const base = `/v1/projects/${projectId}/customers/${customerId}`;
 
@@ -222,6 +224,10 @@ export default function CustomerPage() {
           </button>
         ))}
       </div>
+
+      {tab === "Brief" && (
+        <CustomerBriefPanel projectId={projectId} customerId={customerId} onOpenTab={setTab} />
+      )}
 
       {tab === "Actions" && (
         <div className="space-y-6">

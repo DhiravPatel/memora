@@ -158,37 +158,10 @@ def customer_360(client: Any, args: dict[str, Any]) -> ToolResult:
 
 
 def customer_brief(client: Any, args: dict[str, Any]) -> ToolResult:
-    """A readable page composed from the 360 — the same facts, arranged for a person."""
-    customer = _required(args, "customer_id")
-    view = client.customer_360(customer)
-    name = view.customer.get("name") or view.customer.get("external_id") or customer
-    health = view.sections.get("health") or {}
-    lines = [f"# {name}", "", view.summary]
-    if health:
-        # The explanation already states the score; the bare numbers are the fallback.
-        score_line = f"{float(health.get('score', 0)):.0f}/100 ({health.get('band')})"
-        lines += ["", f"**Health:** {health.get('explanation') or score_line}"]
-    subscription = view.sections.get("subscription")
-    if subscription:
-        lines.append(f"**Plan:** {subscription.get('content')}")
-    for title, key in (
-        ("Open problems", "active_problems"),
-        ("What they care about", "preferences"),
-        ("Goals", "goals"),
-    ):
-        items = view.sections.get(key) or []
-        if items:
-            lines += ["", f"## {title}", _bullets([_render_item(item) for item in items[:6]], "")]
-    conversations = view.sections.get("recent_conversations") or []
-    if conversations and conversations[0].get("summary"):
-        summary = str(conversations[0]["summary"])
-        if summary == "[withheld]":
-            summary = "A summary was written, but this key may not read it."
-        lines += ["", "## Last conversation", summary]
-    actions = view.sections.get("recommended_actions") or []
-    if actions:
-        lines += ["", "## Recommended next step", f"{actions[0].get('action')} — {actions[0].get('rationale')}"]
-    return ToolResult(text="\n".join(lines).strip(), data={"customer": view.customer, "summary": view.summary, "sections": view.sections})
+    """The server's brief: the judgement — what to raise, what not to do — not just the facts."""
+    since = str(args.get("since") or "last_session").strip()
+    brief = client.brief(_required(args, "customer_id"), since=since, agent=args.get("agent"))
+    return ToolResult(text=brief.markdown.strip(), data=brief.raw)
 
 
 def customer_timeline(client: Any, args: dict[str, Any]) -> ToolResult:
@@ -479,9 +452,21 @@ TOOLS: tuple[Tool, ...] = (
     Tool(
         "customer_brief",
         "Brief me on a customer",
-        "A short, readable briefing on a customer — who they are, how healthy the relationship is, what is open, "
-        "what they care about, the last conversation and the recommended next step. Use before a call or meeting.",
-        _schema({"customer_id": CUSTOMER_ID}, ["customer_id"]),
+        "A decision-ready brief on a customer: the situation in a sentence, what to raise and in what order, what "
+        "NOT to do and why (the guardrails' own verdicts for your key, so following it does not get you refused), open "
+        "issues, goals and preferences, what changed since the last conversation, and the next step — each from the "
+        "evidence. Call it before a call, a meeting or a reply.",
+        _schema(
+            {
+                "customer_id": CUSTOMER_ID,
+                "since": {
+                    "type": "string",
+                    "description": "What 'what changed' covers: last_session (default), last_run, a span such as 7d, or an ISO date.",
+                },
+                "agent": {"type": "string", "description": "With last_session/last_run: only this agent's."},
+            },
+            ["customer_id"],
+        ),
         customer_brief,
     ),
     Tool(

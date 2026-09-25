@@ -29,8 +29,9 @@ INTERNAL_ERROR = -32603
 
 INSTRUCTIONS = (
     "Memora is persistent memory about this product's customers. Before replying to a customer, "
-    "call customer_360 or customer_brief; to catch up since the last conversation, call "
-    "customer_changes with since=last_session. For a specific question, call ask_memory. Before "
+    "call customer_brief — it says what to raise, what not to do and why, and what changed since "
+    "the last conversation; customer_360 has everything else, customer_changes the full list of "
+    "changes. For a specific question, call ask_memory. Before "
     "taking any action that affects a customer — selling, contacting, discounting, refunding, "
     "closing a ticket, changing a plan — call request_action and never act when it says DENIED "
     "or NEEDS APPROVAL (call proceed_action later instead); after acting, call report_action. "

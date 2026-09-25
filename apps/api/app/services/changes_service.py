@@ -268,7 +268,10 @@ class ChangesService:
         types: set[str] | None = None,
         order: str = "time",
         limit: int = 50,
+        live: tuple[dict[str, Any], dict[str, str]] | None = None,
     ) -> ChangesOut:
+        """``live`` is the customer's visible fact values and signal labels, when the caller
+        already computed them (the brief does) — so they are not computed twice."""
         if types:
             unknown = types - set(TYPES)
             if unknown:
@@ -277,7 +280,7 @@ class ChangesService:
             raise ValidationError("'order' is time or importance.")
 
         then_at, then_values = await self._then(project, customer, window.since)
-        now_at, now_values, labels = await self._now(project, customer, window)
+        now_at, now_values, labels = await self._now(project, customer, window, live=live)
         inputs = await self._inputs(project, customer, window, then_values, now_values, labels)
         found = detect(inputs)
         hidden = await self.reader.hidden(project.id, cited_ids(found))
@@ -346,11 +349,20 @@ class ChangesService:
         )
 
     async def _now(
-        self, project: Project, customer: Customer, window: Window
+        self,
+        project: Project,
+        customer: Customer,
+        window: Window,
+        *,
+        live: tuple[dict[str, Any], dict[str, str]] | None = None,
     ) -> tuple[CustomerAtOut, dict[str, Any], dict[str, str]]:
         if not window.live:
             at, values = await self._then(project, customer, window.until)
             return at, values or {}, {}
+        if live is not None:
+            values, labels = dict(live[0]), dict(live[1])
+            state = state_of(values)
+            return CustomerAtOut(at=window.until, live=True, state=state, description=describe(state)), values, labels
         report = (
             await SignalService(self.session).for_customer(project=project, customer=customer, include_series=False)
         ).report

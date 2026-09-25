@@ -1,0 +1,154 @@
+"""The customer brief (§26 5.2): decision-ready, with the evidence behind each part."""
+
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Literal
+
+from pydantic import BaseModel, Field
+
+from app.schemas.changes import ChangeOut, WindowOut
+from app.schemas.signals import RecommendationOut, SignalOut, Trajectory
+
+
+class BriefCustomerOut(BaseModel):
+    id: str
+    external_id: str
+    name: str | None = None
+    email: str | None = None
+    customer_since: datetime | None = None
+    last_active_at: datetime | None = None
+
+
+class BriefHealthOut(BaseModel):
+    score: float = Field(ge=0, le=100)
+    band: str
+    churn_risk: float = Field(ge=0, le=1, description="The forecast's churn risk, 0–1.")
+    trajectory: Trajectory
+    explanation: str | None = None
+
+
+class BriefPlanOut(BaseModel):
+    name: str | None = Field(default=None, description="The current plan, lowercase; null when none is known.")
+    statement: str | None = Field(default=None, description="The subscription memory the plan was read from.")
+    changed_at: datetime | None = None
+    direction: str | None = Field(
+        default=None, description="How the latest statement changed it: upgraded, downgraded, cancelled, renewed, started or changed."
+    )
+    previous: str | None = Field(default=None, description="The plan before the latest change, lowercase.")
+
+
+class BriefTrackOut(BaseModel):
+    track: str
+    label: str
+    state: str
+    entered_at: datetime
+    pinned: bool = False
+    reasons: list[str] = Field(default_factory=list)
+
+
+class BriefSituationOut(BaseModel):
+    health: BriefHealthOut
+    plan: BriefPlanOut
+    lifecycle: list[BriefTrackOut] = Field(default_factory=list)
+    open_problems: int = Field(description="Every open problem — a count, so whole even when some are withheld.")
+    goals: dict[str, int] = Field(default_factory=dict, description="Goals by status: open, progressing, stalled, achieved.")
+
+
+class BriefCautionOut(BaseModel):
+    text: str = Field(description='What not to do, in words: "Don\'t call them: the customer asked not to be called."')
+    action: str = Field(description="The first action the caution covers.")
+    actions: list[str] = Field(description="Every action refused for the same reason.")
+    decision: Literal["deny", "require_approval"]
+    summary: str = Field(description="The guardrail's own explanation.")
+    rules: list[str] = Field(default_factory=list)
+    evidence: list[str] = Field(default_factory=list)
+
+
+class BriefIssueOut(BaseModel):
+    id: str
+    content: str
+    first_seen_at: datetime | None = None
+    age_days: int | None = None
+    times_reported: int = 1
+
+
+class BriefGoalOut(BaseModel):
+    id: str
+    statement: str
+    status: str
+    progress: float | None = None
+    last_signal_at: datetime | None = None
+
+
+class BriefOptOutOut(BaseModel):
+    kind: str
+    words: str
+
+
+class BriefStatementOut(BaseModel):
+    id: str
+    content: str
+
+
+class BriefPreferencesOut(BaseModel):
+    channel: str | None = Field(default=None, description='The preferred channel as written: "email", "WhatsApp", "SMS".')
+    opt_outs: list[BriefOptOutOut] = Field(default_factory=list)
+    statements: list[BriefStatementOut] = Field(default_factory=list)
+
+
+class BriefIntentOut(BaseModel):
+    id: str
+    type: str = Field(description="The memory's type — churn language filed as a problem still counts.")
+    content: str
+    kinds: list[str]
+    last_seen_at: datetime | None = None
+
+
+class BriefChangesOut(BaseModel):
+    window: WindowOut
+    summary: str
+    items: list[ChangeOut] = Field(default_factory=list, description="The most important changes, at most six.")
+    total: int = 0
+    withheld: int = 0
+
+
+class BriefConversationOut(BaseModel):
+    id: str
+    agent: str | None = None
+    summary: str
+    closed_at: datetime | None = None
+    turn_count: int | None = None
+
+
+class BriefSetAsideOut(BaseModel):
+    key: str
+    action: str
+    because: str = Field(description="The caution that forbids it.")
+
+
+class CustomerBriefOut(BaseModel):
+    customer: BriefCustomerOut
+    headline: str = Field(description="The situation in a few sentences.")
+    situation: BriefSituationOut
+    talking_points: list[str] = Field(default_factory=list, description="What to raise, most important first.")
+    cautions: list[BriefCautionOut] = Field(default_factory=list, description="What not to do, and why.")
+    open_issues: list[BriefIssueOut] = Field(default_factory=list)
+    goals: list[BriefGoalOut] = Field(default_factory=list)
+    preferences: BriefPreferencesOut
+    intents: list[BriefIntentOut] = Field(default_factory=list)
+    risks: list[SignalOut] = Field(default_factory=list)
+    opportunities: list[SignalOut] = Field(default_factory=list)
+    recent_changes: BriefChangesOut
+    last_conversation: BriefConversationOut | None = None
+    next_step: RecommendationOut | None = Field(
+        default=None, description="The most urgent recommendation none of the cautions forbids."
+    )
+    set_aside: list[BriefSetAsideOut] = Field(
+        default_factory=list, description="More urgent recommendations a caution forbids, and which caution."
+    )
+    evidence: list[str] = Field(default_factory=list, description="Every memory and goal id the brief rests on.")
+    withheld: int = Field(default=0, description="Memories this caller may not see.")
+    withheld_facts: list[str] = Field(default_factory=list, description="Facts shown without what came only from withheld memories.")
+    generated_at: datetime
+    markdown: str = Field(description="The brief as a page, for a person or a model's context.")

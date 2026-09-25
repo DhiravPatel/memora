@@ -151,17 +151,88 @@ def from_gazetteer(text: str) -> list[EntityHit]:
 
 
 def channels_mentioned(text: str) -> list[str]:
-    """Contact channels named in the text, used for preference conflicts.
+    """Contact channels named in the text, in the order they appear.
 
     Matched on tokens rather than raw text so trailing punctuation ("…prefers email.")
     cannot hide a channel and silently turn a conflict into a merge.
     """
-    padded = f" {' '.join(tokenize(text))} "
-    found: list[str] = []
+    wanted, avoided = _stance(text)
+    return _ordered([*wanted, *avoided])
+
+
+# What turns a channel into one the customer does *not* want, within its clause: "WhatsApp
+# instead of email", "call rather than email", "not by email", "don't email us", "stop
+# calling", "no longer by phone". One token, or two read together.
+_AVOID_ONE = frozenset({"not", "no", "never", "dont", "stop", "avoid", "without", "except", "nothing"})
+_AVOID_TWO = frozenset({("instead", "of"), ("rather", "than"), ("no", "longer"), ("no", "more")})
+_AVOID_REACH = 3
+_CLAUSE = re.compile(r"[,;:.!?]+|\s(?:but|however|whereas)\s", re.IGNORECASE)
+
+
+def _needles() -> list[tuple[tuple[str, ...], str]]:
+    """Every channel needle as tokens, with the inflections a sentence uses: "emails",
+    "emailing", "calls", "called". Not lemmas — "teams" must not become "team"."""
+    found: list[tuple[tuple[str, ...], str]] = []
     for needle, display in CHANNELS.items():
-        if f" {needle} " in padded and display not in found:
-            found.append(display)
-    return found
+        words = tuple(needle.split())
+        found.append((words, display))
+        if len(words) == 1:
+            found.extend(((words[0] + suffix,), display) for suffix in ("s", "ing", "ed"))
+        else:
+            found.append((words[:-1] + (words[-1] + "s",), display))
+    # Longest first, so "text message" is read before anything inside it.
+    return sorted(found, key=lambda item: -len(item[0]))
+
+
+_NEEDLES = _needles()
+
+
+def channel_stance(text: str) -> tuple[list[str], list[str]]:
+    """``(wanted, avoided)``: the contact channels the text asks for, and the ones it turns
+    away from, each in the order they appear.
+
+    "Please contact us on WhatsApp instead of email" wants WhatsApp and avoids email; a
+    preference that only avoids ("don't email us") wants nothing — which is not the same as
+    wanting whatever an older preference named.
+    """
+    wanted, avoided = _stance(text)
+    return _ordered(wanted), _ordered(avoided)
+
+
+def _stance(text: str) -> tuple[list[tuple[int, str]], list[tuple[int, str]]]:
+    wanted: list[tuple[int, str]] = []
+    avoided: list[tuple[int, str]] = []
+    offset = 0
+    for clause in _CLAUSE.split(text or ""):
+        if not clause or not clause.strip():
+            continue
+        tokens = tokenize(clause)
+        prefers = "prefer" in tokens or "prefers" in tokens or "preferred" in tokens
+        taken: set[int] = set()
+        for index in range(len(tokens)):
+            for words, display in _NEEDLES:
+                width = len(words)
+                if index in taken or tuple(tokens[index : index + width]) != words:
+                    continue
+                taken.update(range(index, index + width))
+                before = tokens[max(0, index - _AVOID_REACH) : index]
+                pairs = set(zip(before, before[1:], strict=False))
+                turned_away = bool(set(before) & _AVOID_ONE or pairs & _AVOID_TWO)
+                # "we prefer WhatsApp over email"
+                if prefers and before[-1:] == ["over"]:
+                    turned_away = True
+                (avoided if turned_away else wanted).append((offset + index, display))
+                break
+        offset += len(tokens) + 1
+    return wanted, avoided
+
+
+def _ordered(found: list[tuple[int, str]]) -> list[str]:
+    seen: list[str] = []
+    for _, display in sorted(found):
+        if display not in seen:
+            seen.append(display)
+    return seen
 
 
 def from_patterns(text: str) -> list[EntityHit]:

@@ -319,7 +319,7 @@ def compute(
             SignalDirection.RISK,
             min(1.0, oldest / 60),
             21,
-            f"a problem opened {int(oldest)} days ago is still unresolved",
+            f"a problem opened {ago(oldest)} is still unresolved",
             [m.id for m in ageing],
             observed=oldest,
         )
@@ -338,10 +338,13 @@ def compute(
         )
 
     # ------------------------------------------------------------- churn language
+    # Not summaries: a session or consolidation summary restates what was already said, and
+    # counting it would make month-old churn language read as "today" whenever one is written.
     churn_memories = [
         m
         for m in memories
-        if m.churn_risk >= 0.4 or CHURN_LEMMAS & set(content_words(m.content))
+        if str(m.type) != MemoryType.SUMMARY.value
+        and (m.churn_risk >= 0.4 or CHURN_LEMMAS & set(content_words(m.content)))
     ]
     recent_churn = recent(churn_memories) or [
         m for m in churn_memories if days_between(ensure_utc(m.last_seen_at), now) < WINDOW_DAYS
@@ -608,12 +611,16 @@ def compute(
     )
 
 
-def _ago(days: float) -> str:
+def ago(days: float) -> str:
+    """"today", "yesterday", "12 days ago" — never "1 days ago"."""
     if days < 1:
         return "today"
     if days < 2:
         return "yesterday"
     return f"{int(days)} days ago"
+
+
+_ago = ago
 
 
 def _clip(text: str, limit: int = 60) -> str:

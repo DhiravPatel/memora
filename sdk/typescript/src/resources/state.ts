@@ -42,7 +42,7 @@ function toState(raw: RawState): LifecycleState {
 
 const path = (customerId: string) => `/v1/customers/${encodeURIComponent(customerId)}`;
 
-function toChange(raw: any): Change {
+export function toChange(raw: any): Change {
   return {
     type: raw.type,
     kind: raw.kind,

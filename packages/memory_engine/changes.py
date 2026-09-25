@@ -94,6 +94,7 @@ RISK_STEP = 0.15
 ACTIVITY_STEP = 25.0
 STRONG_FEEDBACK = 0.5
 FEEDBACK_QUOTES = 5
+PASSED_THROUGH = 0.5
 
 
 @dataclass(slots=True)
@@ -116,7 +117,10 @@ class Change:
 
     @property
     def importance(self) -> float:
-        return _IMPORTANCE.get((self.type, self.kind), 0.4)
+        base = _IMPORTANCE.get((self.type, self.kind), 0.4)
+        # A state the customer only passed through on the way to another is history the
+        # later move already tells; it ranks below where they ended up.
+        return base * PASSED_THROUGH if self.detail.get("passed_through") else base
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -479,6 +483,18 @@ PLACEMENT_SECONDS = 1.0
 
 
 def _from_states(inputs: ChangeInputs) -> Iterable[Change]:
+    moves = list(_state_moves(inputs))
+    latest: dict[str, datetime] = {}
+    for move in moves:
+        track = move.track or "lifecycle"
+        latest[track] = max(latest.get(track, move.detected_at), move.detected_at)
+    for move in moves:
+        if move.detected_at < latest[move.track or "lifecycle"]:
+            move.detail["passed_through"] = True
+    return moves
+
+
+def _state_moves(inputs: ChangeInputs) -> Iterable[Change]:
     placed: dict[str, datetime] = {}
     for row, _ in inputs.states:
         if not row.previous_state:
@@ -692,7 +708,7 @@ def summarise(changes: Sequence[Change], *, lead: str) -> str:
         if track in moved:
             continue
         moved.add(track)
-        parts.append(f"{'' if track == 'lifecycle' else _words(track) + ' '}moved to {change.after}")
+        parts.append(f"{_words(track)} moved to {change.after}")
     health = first("health", "crossed", "fell", "rose")
     if health is not None:
         parts.append(_lower_first(health.title))

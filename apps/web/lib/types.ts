@@ -1374,3 +1374,105 @@ export interface CustomerChanges {
   then: CustomerAt;
   now: CustomerAt;
 }
+
+// -------------------------------------------------------------- customer brief (§26 5.2)
+
+export interface BriefCaution {
+  text: string;
+  action: string;
+  actions: string[];
+  decision: "deny" | "require_approval";
+  summary: string;
+  rules: string[];
+  evidence: string[];
+}
+
+export interface BriefTrack {
+  track: string;
+  label: string;
+  state: string;
+  entered_at: string;
+  pinned: boolean;
+  reasons: string[];
+}
+
+export interface CustomerBrief {
+  customer: {
+    id: string;
+    external_id: string;
+    name: string | null;
+    email: string | null;
+    customer_since: string | null;
+    last_active_at: string | null;
+  };
+  headline: string;
+  situation: {
+    health: {
+      score: number;
+      band: string;
+      churn_risk: number;
+      trajectory: Trajectory;
+      explanation: string | null;
+    };
+    plan: {
+      name: string | null;
+      statement: string | null;
+      changed_at: string | null;
+      direction: string | null;
+    };
+    lifecycle: BriefTrack[];
+    open_problems: number;
+    goals: Record<string, number>;
+  };
+  talking_points: string[];
+  cautions: BriefCaution[];
+  open_issues: {
+    id: string;
+    content: string;
+    first_seen_at: string | null;
+    age_days: number | null;
+    times_reported: number;
+  }[];
+  goals: {
+    id: string;
+    statement: string;
+    status: GoalStatus;
+    progress: number | null;
+    last_signal_at: string | null;
+  }[];
+  preferences: {
+    channel: string | null;
+    opt_outs: { kind: string; words: string }[];
+    statements: { id: string; content: string }[];
+  };
+  intents: {
+    id: string;
+    type: string;
+    content: string;
+    kinds: string[];
+    last_seen_at: string | null;
+  }[];
+  risks: Signal[];
+  opportunities: Signal[];
+  recent_changes: {
+    window: CustomerChanges["window"];
+    summary: string;
+    items: Change[];
+    total: number;
+    withheld: number;
+  };
+  last_conversation: {
+    id: string;
+    agent: string | null;
+    summary: string;
+    closed_at: string | null;
+    turn_count: number | null;
+  } | null;
+  next_step: Recommendation | null;
+  set_aside: { key: string; action: string; because: string }[];
+  evidence: string[];
+  withheld: number;
+  withheld_facts: string[];
+  generated_at: string;
+  markdown: string;
+}

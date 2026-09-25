@@ -253,6 +253,7 @@ class MemoryEngine:
                 decay_days=int(
                     project_settings.get("decay_days", self.settings.memory_default_decay_days)
                 ),
+                embedder=self.embedder,
             ),
         )
 

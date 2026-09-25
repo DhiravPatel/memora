@@ -43,6 +43,7 @@ from database.repositories import (
     MemoryRepository,
 )
 from memory_engine import MemoryEngine
+from memory_engine.consolidation.rules import current_plan
 from memory_engine.policy import WITHHELD
 
 # Per section, and deliberately modest. Raising these is a decision about somebody's
@@ -311,7 +312,9 @@ def _summarise(view: Customer360) -> str:
             parts.append(f"{len(open_goals)} active goal{'s' if len(open_goals) != 1 else ''}")
     subscription = view.sections.get("subscription")
     if subscription:
-        parts.append("a recorded subscription change")
+        # The plan the newest statement leaves them on, read as the rules read it.
+        plan = current_plan(str(subscription.get("content") or ""))
+        parts.append(f"on the {plan} plan" if plan else "a recorded subscription change")
     if not parts:
         return "Nothing recorded for this customer yet."
     name = view.customer.get("name") or view.customer.get("external_id")

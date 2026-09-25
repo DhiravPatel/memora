@@ -451,7 +451,7 @@ def _builtins(action: str, facts: CustomerFacts, visible: CustomerFacts, disable
     band = facts.get("health.band")
     state = facts.get("state.current")
     if on("at_risk_blocks_selling") and action in SELLING and (band in ("at_risk", "critical") or state == "at_risk"):
-        why = f"health is {band}" if band in ("at_risk", "critical") else "their lifecycle state is at_risk"
+        why = f"health is {str(band).replace('_', ' ')}" if band in ("at_risk", "critical") else "their lifecycle state is at risk"
         yield Reason(
             rule="at_risk_blocks_selling",
             source="builtin",

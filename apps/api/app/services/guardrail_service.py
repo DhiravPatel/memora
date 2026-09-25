@@ -15,7 +15,8 @@ or the ``approvals:decide`` scope, never the key that asked.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from collections.abc import Sequence
+from dataclasses import dataclass, replace
 from datetime import timedelta
 from typing import Any
 
@@ -60,6 +61,7 @@ from database.repositories.agent_policy import (
     REJECTED,
     USED,
 )
+from memory_engine.facts import CustomerFacts
 from memory_engine.guardrails import (
     ALLOW,
     DENY,
@@ -232,6 +234,47 @@ class GuardrailService:
             snapshot_id=snapshot.id if snapshot else None,
             session_id=session_id,
         )
+
+    async def preview(
+        self,
+        *,
+        project: Project,
+        actions: Sequence[str],
+        facts: CustomerFacts,
+        visible: CustomerFacts,
+        profile: AgentProfile | None = None,
+    ) -> list[dict[str, Any]]:
+        """What the rules would say to each action now — nothing recorded, no approval filed.
+
+        For a brief's cautions (§26 5.2): one fact document, judged per action on its own
+        copy, because a check writes the proposed action into the document as request.*.
+        Explained through what this reader may see, like any check.
+        """
+        guardrails, _ = self._configuration(project)
+        found: list[dict[str, Any]] = []
+        for action in actions:
+            full = replace(facts, values=dict(facts.values))
+            shown = full if visible is facts else replace(visible, values=dict(visible.values))
+            verdict = run_rules(
+                action=action,
+                request={},
+                facts=full,
+                visible=shown,
+                guardrails=guardrails,
+                profile=profile_rule(profile),
+                sanitize=not self.reader.sees_everything,
+            )
+            shaped = await self.reader.reasons(project.id, [reason.as_dict() for reason in verdict.reasons])
+            found.append(
+                {
+                    "action": normalise_action(action),
+                    "decision": verdict.decision,
+                    "summary": summary_of(verdict.decision, shaped),
+                    "rules": [reason.get("rule") for reason in shaped if reason.get("decision") != ALLOW],
+                    "evidence": _evidence(shaped),
+                }
+            )
+        return found
 
     def _configuration(self, project: Project) -> tuple[Guardrails, int]:
         raw = effective(project).get("guardrails") or {}

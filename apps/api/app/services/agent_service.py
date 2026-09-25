@@ -387,18 +387,26 @@ def compose_summary(turns: list[AgentTurn], *, outcome: str | None = None) -> st
     selected = rank_sentences(transcript, limit=SUMMARY_SENTENCES)
     if not selected:
         # Too short to rank (a one-line conversation); keep it verbatim rather than lose it.
-        body = transcript.strip()
+        body = _ended(transcript)
         if not body:
             return None
     else:
         selected.sort(key=lambda item: item.index)
-        body = " ".join(item.text.strip().rstrip(".") + "." for item in selected)
+        body = " ".join(_ended(item.text) for item in selected)
 
     started = ensure_utc(customer_turns[0].occurred_at).date().isoformat()
     summary = f"In a conversation on {started}, the customer said: {body}"
     if outcome:
         summary += f" Outcome: {outcome.strip().rstrip('.')}."
     return summary
+
+
+def _ended(sentence: str) -> str:
+    """The sentence with one closing mark: a question keeps its "?" rather than gaining "?."."""
+    words = sentence.strip()
+    if not words or words[-1] in ".?!…":
+        return words
+    return words + "."
 
 
 def idle_cutoff(now: datetime | None = None) -> datetime:

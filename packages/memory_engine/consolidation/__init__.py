@@ -13,6 +13,7 @@ from memory_engine.consolidation.rules import (
     merge_content,
     novelty,
     recurrence_note,
+    without_recurrence_note,
 )
 from memory_engine.consolidation.similarity import (
     combined_similarity,
@@ -41,4 +42,5 @@ __all__ = [
     "recurrence_note",
     "resolve",
     "text_similarity",
+    "without_recurrence_note",
 ]

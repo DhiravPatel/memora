@@ -552,7 +552,12 @@ export interface Approval {
   expiresAt: string;
   createdAt: string;
   /** The memories the reasons cite, in their own words, as the reviewer may read them. */
-  evidenceMemories?: { id: string; type: string | null; content: string | null; status: string | null }[];
+  evidenceMemories?: {
+    id: string;
+    type: string | null;
+    content: string | null;
+    status: string | null;
+  }[];
   withheldEvidence?: number;
   customer?: Record<string, unknown> | null;
   /** The gateway action waiting on this approval, if any. */
@@ -698,4 +703,116 @@ export interface AgentProfile {
   allowedActions: string[];
   deniedActions: string[];
   keys: number;
+}
+
+// -------------------------------------------------------------- customer brief (§26 5.2)
+
+/** Something not to do, and why: the guardrails' own verdict on an action, right now. */
+export interface BriefCaution {
+  /** "Don't call them: the customer asked not to be called." */
+  text: string;
+  action: string;
+  /** Every action refused for the same reason. */
+  actions: string[];
+  decision: "deny" | "require_approval";
+  /** The guardrail's own explanation. */
+  summary: string;
+  rules: string[];
+  evidence: string[];
+}
+
+/** A decision-ready brief on one customer. */
+export interface CustomerBrief {
+  customer: {
+    id: string;
+    externalId: string;
+    name: string | null;
+    email: string | null;
+    customerSince: string | null;
+    lastActiveAt: string | null;
+  };
+  /** The situation in a few sentences. */
+  headline: string;
+  situation: {
+    health: {
+      score: number;
+      band: string;
+      churnRisk: number;
+      trajectory: Trajectory;
+      explanation: string | null;
+    };
+    plan: {
+      name: string | null;
+      statement: string | null;
+      changedAt: string | null;
+      direction: string | null;
+    };
+    lifecycle: {
+      track: string;
+      label: string;
+      state: string;
+      enteredAt: string;
+      pinned: boolean;
+      reasons: string[];
+    }[];
+    /** Every open problem — a count, whole even when some are withheld from this key. */
+    openProblems: number;
+    goals: Record<string, number>;
+  };
+  /** What to raise, most important first. */
+  talkingPoints: string[];
+  /** What not to do, and why. */
+  cautions: BriefCaution[];
+  openIssues: {
+    id: string;
+    content: string;
+    firstSeenAt: string | null;
+    ageDays: number | null;
+    timesReported: number;
+  }[];
+  goals: {
+    id: string;
+    statement: string;
+    status: string;
+    progress: number | null;
+    lastSignalAt: string | null;
+  }[];
+  preferences: {
+    channel: string | null;
+    optOuts: { kind: string; words: string }[];
+    statements: { id: string; content: string }[];
+  };
+  intents: {
+    id: string;
+    type: string;
+    content: string;
+    kinds: string[];
+    lastSeenAt: string | null;
+  }[];
+  risks: Signal[];
+  opportunities: Signal[];
+  recentChanges: {
+    window: CustomerChanges["window"];
+    summary: string;
+    items: Change[];
+    total: number;
+    withheld: number;
+  };
+  lastConversation: {
+    id: string;
+    agent: string | null;
+    summary: string;
+    closedAt: string | null;
+    turnCount: number | null;
+  } | null;
+  /** The most urgent recommendation none of the cautions forbids. */
+  nextStep: Recommendation | null;
+  /** More urgent recommendations a caution forbids, and which one. */
+  setAside: { key: string; action: string; because: string }[];
+  evidence: string[];
+  withheld: number;
+  withheldFacts: string[];
+  generatedAt: string;
+  /** The whole brief as a Markdown page. */
+  markdown: string;
 }

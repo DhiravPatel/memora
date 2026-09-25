@@ -27,7 +27,7 @@ from datetime import datetime
 from typing import Any
 
 from common.time import ensure_utc, utcnow
-from nlp.entities import channels_mentioned
+from nlp.entities import channel_stance
 from nlp.intents import KINDS as INTENT_KINDS
 from nlp.intents import intent_kinds
 from nlp.lexicon import PLANS
@@ -440,6 +440,9 @@ _INTENT_MARKERS = frozenset(
 _INTENT_PHRASES = frozenset({("plans", "to"), ("about", "to"), ("may", "cancel")})
 
 
+_DONE = frozenset(direction for direction, _ in _COMPLETED)
+
+
 def _direction_from(text: str) -> str | None:
     tokens = tokenize(text)
     if _INTENT_MARKERS & set(tokens) or _INTENT_PHRASES & set(zip(tokens, tokens[1:], strict=False)):
@@ -642,13 +645,20 @@ def build_facts(inputs: FactInputs) -> CustomerFacts:
     channel_index: dict[str, list[str]] = {}
     preferred: str | None = None
     preferred_id: str | None = None
+    # Read for stance, not just mention: "WhatsApp instead of email" prefers WhatsApp, and a
+    # newer "stop emailing us" rules email out even where an older preference named it.
+    turned_away: set[str] = set()
     for memory in newest_first:
-        channels = _meta(memory).get("channels") or channels_mentioned(memory.content)
-        for channel in channels:
-            key = str(channel).lower()
-            channel_index.setdefault(key, []).append(memory.id)
-            if preferred is None:
-                preferred, preferred_id = key, memory.id
+        wanted, avoided = channel_stance(memory.content)
+        if not wanted and not avoided:
+            wanted = [str(channel) for channel in _meta(memory).get("channels") or []]
+        for channel in [*wanted, *avoided]:
+            channel_index.setdefault(str(channel).lower(), []).append(memory.id)
+        if preferred is None:
+            choice = next((str(channel).lower() for channel in wanted if str(channel).lower() not in turned_away), None)
+            if choice is not None:
+                preferred, preferred_id = choice, memory.id
+        turned_away.update(str(channel).lower() for channel in avoided)
     values["preferences.channel"] = preferred
     values["preferences.channels"] = sorted(channel_index)
     # Opt-outs live in preferences and in feedback ("stop calling us" is often a complaint).
@@ -680,7 +690,12 @@ def build_facts(inputs: FactInputs) -> CustomerFacts:
     # and a rule asking whether the customer intends to cancel must not miss it for that.
     # Only the high-stakes kinds: an "integration" intent read off every Shopify problem
     # would make the kind meaningless.
+    # A subscription statement recording a change that *happened* ("downgraded from Pro to
+    # Starter") is history, read by subscription.direction — not something they intend.
+    happened = {memory.id for memory in subscriptions if plan_of(memory)[1] in _DONE}
     for memory in [*grouped.get("problem", []), *grouped.get("feedback", []), *subscriptions]:
+        if memory.id in happened:
+            continue
         for kind in ("cancellation", "downgrade"):
             if kind in intent_kinds(memory.content) and memory.id not in kind_index.get(kind, []):
                 kind_index.setdefault(kind, []).append(memory.id)

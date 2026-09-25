@@ -18,6 +18,12 @@ print(context.prompt_text)
 for action in memory.recommendations("cus_123"):
     print(action.priority, action.action, "—", action.rationale)
 
+# Before a call: what to raise, and what not to do.
+brief = memory.brief("cus_123")
+print(brief.headline)
+for caution in brief.cautions:
+    print("-", caution.text)
+
 # Before an agent acts: may it?
 check = memory.check_action("cus_123", "offer_upgrade")
 if not check:
@@ -42,10 +48,12 @@ from ai_memory.models import (
     AgentRun,
     AgentSession,
     Approval,
+    BriefCaution,
     Change,
     ConditionResult,
     Customer,
     Customer360,
+    CustomerBrief,
     CustomerChanges,
     CustomerContext,
     EventExplanation,
@@ -94,8 +102,10 @@ __all__ = [
     "ApprovalRequired",
     "AsyncMemoryAgent",
     "AsyncMemoryClient",
+    "BriefCaution",
     "Change",
     "Customer",
+    "CustomerBrief",
     "CustomerChanges",
     "LifecycleState",
     "ConditionResult",

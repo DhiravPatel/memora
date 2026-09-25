@@ -19,7 +19,8 @@ from typing import Any
 
 from common.enums import MemoryType, SignalDirection
 from common.time import days_between, ensure_utc, utcnow
-from memory_engine.analytics.signals import GoalSnapshot, SignalReport, mask_quotes
+from memory_engine.analytics.signals import GoalSnapshot, SignalReport, ago, mask_quotes
+from memory_engine.consolidation.rules import without_recurrence_note
 from nlp.answer import MemoryView
 from nlp.lexicon import CHANNELS
 
@@ -122,7 +123,8 @@ Rule = Callable[[Context], list[Recommendation]]
 
 
 def _clip(text: str, limit: int = 70) -> str:
-    text = " ".join(text.split())
+    # The recurrence note repeats what a rationale says with the count.
+    text = " ".join(without_recurrence_note(text).split())
     return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
 
 
@@ -147,7 +149,7 @@ def resolve_open_problems(context: Context) -> list[Recommendation]:
             action=f"Resolve: {_clip(worst.content)}",
             quotes=((worst.id, _clip(worst.content)),),
             rationale=(
-                f"Reported {int(context.age_days(worst))} days ago and still open"
+                f"Reported {ago(context.age_days(worst))} and still open"
                 + (f", mentioned {worst.evidence_count} times" if worst.evidence_count > 1 else "")
                 + "."
             ),
@@ -253,7 +255,7 @@ def unblock_goals(context: Context) -> list[Recommendation]:
             action=f"Help them finish: {_clip(goal.statement)}",
             quotes=((goal.id, _clip(goal.statement)),),
             rationale=(
-                f"They said this {idle_days} days ago and nothing has moved it since "
+                f"They said this {ago(idle_days)} and nothing has moved it since "
                 f"({int(goal.progress * 100)}% of the way there)."
             ),
             category="onboarding",

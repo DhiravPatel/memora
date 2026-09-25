@@ -364,3 +364,27 @@ def test_a_duplicate_the_sweep_merged_is_not_a_change_of_its_own():
         inputs(memories=[survivor, duplicate], related={"p1": survivor}, versions=[(version("offline_consolidation"), duplicate)])
     )
     assert [change.subject for change in found] == ["p1"]
+
+
+def test_a_state_only_passed_through_ranks_below_where_the_customer_ended_up():
+    found = detect(
+        inputs(
+            states=[
+                state("engagement", "new", "activated", days_ago=5, transition="activated"),
+                state("engagement", "activated", "at_risk", days_ago=2, transition="at_risk"),
+                state("lifecycle", "onboarding", "at_risk", days_ago=2, transition="at_risk"),
+            ],
+            track_labels={"engagement": "Engagement", "lifecycle": "Lifecycle"},
+        )
+    )
+    by_title = {change.title: change for change in found}
+    passed = by_title["Engagement: new → activated"]
+    landed = by_title["Engagement: activated → at risk"]
+    assert passed.detail["passed_through"] is True and "passed_through" not in landed.detail
+    assert passed.importance == landed.importance / 2
+    assert by_title["Lifecycle: onboarding → at risk"].importance == landed.importance
+    # Each track is named, the primary one included, with where it ended up.
+    ordered = sorted(found, key=lambda change: (change.importance, change.detected_at), reverse=True)
+    text = summarise(ordered, lead="In the last 7 days")
+    assert "engagement moved to at risk" in text and "lifecycle moved to at risk" in text
+    assert "moved to activated" not in text

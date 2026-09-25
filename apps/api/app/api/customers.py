@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
+from fastapi.responses import PlainTextResponse
 
 from app.core.dependencies import (
     ApiCustomer,
@@ -20,6 +21,7 @@ from app.schemas.admin import (
     CustomerMergeRequest,
     CustomerMergeResult,
 )
+from app.schemas.brief import CustomerBriefOut
 from app.schemas.changes import ChangesOut, CompareOut
 from app.schemas.common import DeletionResult, Page
 from app.schemas.customers import (
@@ -42,6 +44,7 @@ from app.schemas.state import (
     StateSetIn,
 )
 from app.services import state_views
+from app.services.brief_service import BriefService
 from app.services.changes_service import ChangesService
 from app.services.customer360_service import SECTIONS, Customer360Service
 from app.services.customer_service import CustomerService
@@ -483,6 +486,46 @@ async def compare_customer(
     return await ChangesService(session, cleared=cleared).compare(
         project=project, customer=customer, start=start, end=end
     )
+
+
+BRIEF_SINCE = (
+    "What 'recent changes' covers: a span (7d, 2w), an ISO time, a snapshot id, `last_session` "
+    "(the default — everything since the last conversation ended) or `last_run`."
+)
+MARKDOWN = {200: {"content": {"text/markdown": {"schema": {"type": "string"}}}, "description": "The brief."}}
+
+
+@router.get(
+    "/{customer_id}/brief", response_model=CustomerBriefOut, dependencies=MEMORY_READ, responses=MARKDOWN
+)
+async def get_customer_brief(
+    request: Request,
+    customer: ApiCustomer,
+    project: ApiProject,
+    session: DBSession,
+    engine: Engine,
+    cleared: Clearance,
+    since: str | None = Query(default="last_session", max_length=64, description=BRIEF_SINCE),
+    agent: str | None = Query(default=None, max_length=120, description="With last_session/last_run: only this agent's."),
+    fmt: str = Query(default="json", alias="format", pattern="^(json|markdown)$"),
+) -> CustomerBriefOut | PlainTextResponse:
+    """A decision-ready brief: the situation in a sentence, what to raise and in what order,
+    what not to do and why (the guardrails' own verdicts), open issues, goals, preferences,
+    what changed since the last conversation, and the next step — each with its evidence.
+
+    Built for the moment before a call or a reply. `?format=markdown` returns the page on
+    its own, ready for a prompt. Cautions are judged for this key's agent profile.
+    """
+    brief = await BriefService(session, engine, cleared=cleared).build(
+        project=project,
+        customer=customer,
+        since=since,
+        agent=agent,
+        profile=getattr(request.state, "agent_profile", None),
+    )
+    if fmt == "markdown":
+        return PlainTextResponse(brief["markdown"], media_type="text/markdown; charset=utf-8")
+    return CustomerBriefOut(**brief)
 
 
 @router.get("/{customer_id}/export", summary="Export everything known about a customer")

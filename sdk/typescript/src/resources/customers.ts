@@ -1,7 +1,17 @@
 /** Customer profiles, memories and timelines. */
 
 import type { HttpClient } from "../client.js";
-import type { Customer, Customer360, Memory, Page, TimelineEntry } from "../types.js";
+import type {
+  BriefCaution,
+  Customer,
+  Customer360,
+  CustomerBrief,
+  Memory,
+  Page,
+  TimelineEntry,
+} from "../types.js";
+import { toRecommendation, toSignal } from "./foresight.js";
+import { toChange } from "./state.js";
 
 function toCustomer(raw: any): Customer {
   return {
@@ -40,8 +50,170 @@ interface RawCustomer360 {
   generated_at: string;
 }
 
+function toCaution(raw: any): BriefCaution {
+  return {
+    text: raw.text,
+    action: raw.action,
+    actions: raw.actions ?? [raw.action],
+    decision: raw.decision,
+    summary: raw.summary,
+    rules: raw.rules ?? [],
+    evidence: raw.evidence ?? [],
+  };
+}
+
+export function toBrief(raw: any): CustomerBrief {
+  const situation = raw.situation ?? {};
+  const health = situation.health ?? {};
+  const plan = situation.plan ?? {};
+  const preferences = raw.preferences ?? {};
+  const changes = raw.recent_changes ?? {};
+  const conversation = raw.last_conversation;
+  return {
+    customer: {
+      id: raw.customer.id,
+      externalId: raw.customer.external_id,
+      name: raw.customer.name ?? null,
+      email: raw.customer.email ?? null,
+      customerSince: raw.customer.customer_since ?? null,
+      lastActiveAt: raw.customer.last_active_at ?? null,
+    },
+    headline: raw.headline,
+    situation: {
+      health: {
+        score: health.score,
+        band: health.band,
+        churnRisk: health.churn_risk,
+        trajectory: health.trajectory,
+        explanation: health.explanation ?? null,
+      },
+      plan: {
+        name: plan.name ?? null,
+        statement: plan.statement ?? null,
+        changedAt: plan.changed_at ?? null,
+        direction: plan.direction ?? null,
+      },
+      lifecycle: (situation.lifecycle ?? []).map((track: any) => ({
+        track: track.track,
+        label: track.label,
+        state: track.state,
+        enteredAt: track.entered_at,
+        pinned: Boolean(track.pinned),
+        reasons: track.reasons ?? [],
+      })),
+      openProblems: situation.open_problems ?? 0,
+      goals: situation.goals ?? {},
+    },
+    talkingPoints: raw.talking_points ?? [],
+    cautions: (raw.cautions ?? []).map(toCaution),
+    openIssues: (raw.open_issues ?? []).map((issue: any) => ({
+      id: issue.id,
+      content: issue.content,
+      firstSeenAt: issue.first_seen_at ?? null,
+      ageDays: issue.age_days ?? null,
+      timesReported: issue.times_reported ?? 1,
+    })),
+    goals: (raw.goals ?? []).map((goal: any) => ({
+      id: goal.id,
+      statement: goal.statement,
+      status: goal.status,
+      progress: goal.progress ?? null,
+      lastSignalAt: goal.last_signal_at ?? null,
+    })),
+    preferences: {
+      channel: preferences.channel ?? null,
+      optOuts: preferences.opt_outs ?? [],
+      statements: preferences.statements ?? [],
+    },
+    intents: (raw.intents ?? []).map((intent: any) => ({
+      id: intent.id,
+      type: intent.type,
+      content: intent.content,
+      kinds: intent.kinds ?? [],
+      lastSeenAt: intent.last_seen_at ?? null,
+    })),
+    risks: (raw.risks ?? []).map(toSignal),
+    opportunities: (raw.opportunities ?? []).map(toSignal),
+    recentChanges: {
+      window: {
+        since: changes.window?.since,
+        until: changes.window?.until,
+        basis: changes.window?.basis,
+        value: changes.window?.value ?? null,
+        found: changes.window?.found ?? true,
+        note: changes.window?.note ?? null,
+        label: changes.window?.label,
+      },
+      summary: changes.summary ?? "",
+      items: (changes.items ?? []).map(toChange),
+      total: changes.total ?? 0,
+      withheld: changes.withheld ?? 0,
+    },
+    lastConversation: conversation
+      ? {
+          id: conversation.id,
+          agent: conversation.agent ?? null,
+          summary: conversation.summary,
+          closedAt: conversation.closed_at ?? null,
+          turnCount: conversation.turn_count ?? null,
+        }
+      : null,
+    nextStep: raw.next_step ? toRecommendation(raw.next_step) : null,
+    setAside: raw.set_aside ?? [],
+    evidence: raw.evidence ?? [],
+    withheld: raw.withheld ?? 0,
+    withheldFacts: raw.withheld_facts ?? [],
+    generatedAt: raw.generated_at,
+    markdown: raw.markdown,
+  };
+}
+
+const iso = (value: Date | string | undefined) =>
+  value instanceof Date ? value.toISOString() : value;
+
 export class Customers {
   constructor(private readonly http: HttpClient) {}
+
+  /** A decision-ready brief: the situation, what to raise and in what order, what not to
+   * do and why, open issues, goals and preferences, what changed since the last
+   * conversation (`since`, default `"last_session"`), and the next step.
+   *
+   * Cautions are the guardrails' own verdicts for this key's agent profile, so an agent
+   * that follows the brief is not then refused.
+   *
+   * ```ts
+   * const brief = await memora.customers.brief("cus_1");
+   * console.log(brief.headline);
+   * if (brief.cautions.some((c) => c.actions.includes("offer_upgrade"))) skipUpsell();
+   * ```
+   */
+  async brief(
+    customerId: string,
+    options: { since?: Date | string; agent?: string } = {},
+  ): Promise<CustomerBrief> {
+    const raw = await this.http.request<any>({
+      method: "GET",
+      path: `/v1/customers/${encodeURIComponent(customerId)}/brief`,
+      query: { since: iso(options.since) ?? "last_session", agent: options.agent },
+    });
+    return toBrief(raw);
+  }
+
+  /** The brief as a Markdown page — ready for a system prompt or a ticket. */
+  briefMarkdown(
+    customerId: string,
+    options: { since?: Date | string; agent?: string } = {},
+  ): Promise<string> {
+    return this.http.request<string>({
+      method: "GET",
+      path: `/v1/customers/${encodeURIComponent(customerId)}/brief`,
+      query: {
+        since: iso(options.since) ?? "last_session",
+        agent: options.agent,
+        format: "markdown",
+      },
+    });
+  }
 
   /** Everything worth knowing about a customer, in one call.
    *
@@ -59,10 +231,7 @@ export class Customers {
    * if (view.sections.health?.band === "critical") escalate(view.summary);
    * ```
    */
-  async get360(
-    customerId: string,
-    options: { include?: string[] } = {},
-  ): Promise<Customer360> {
+  async get360(customerId: string, options: { include?: string[] } = {}): Promise<Customer360> {
     const raw = await this.http.request<RawCustomer360>({
       method: "GET",
       path: `/v1/customers/${encodeURIComponent(customerId)}/360`,
@@ -106,9 +275,9 @@ export class Customers {
     );
   }
 
-  async list(params: { search?: string; limit?: number; offset?: number } = {}): Promise<
-    Page<Customer>
-  > {
+  async list(
+    params: { search?: string; limit?: number; offset?: number } = {},
+  ): Promise<Page<Customer>> {
     const raw = await this.http.request<any>({
       method: "GET",
       path: "/v1/customers",

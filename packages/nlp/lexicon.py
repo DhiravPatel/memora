@@ -254,7 +254,30 @@ VERB_AGREEMENT: dict[str, str] = {
     "love": "loves", "hate": "hates", "get": "gets", "see": "sees", "keep": "keeps",
     "run": "runs", "pay": "pays", "expect": "expects", "require": "requires", "wish": "wishes",
     "find": "finds", "know": "knows", "work": "works", "look": "looks", "wait": "waits",
+    # Base forms the general rule would get wrong: they end in -s or -ly already.
+    "process": "processes", "access": "accesses", "discuss": "discusses", "focus": "focuses",
+    "miss": "misses", "pass": "passes", "guess": "guesses", "address": "addresses",
+    "rely": "relies", "apply": "applies", "reply": "replies", "supply": "supplies",
 }
+
+# Past tenses that do not end in -ed, and verbs whose past is their base form ("we cut
+# costs" may be either). None takes an -s when the subject becomes "the customer": "the
+# customer lost access", never "losts".
+IRREGULAR_PAST: frozenset[str] = frozenset({
+    "was", "were", "had", "did", "went", "came", "saw", "took", "gave", "got", "made",
+    "said", "told", "knew", "thought", "found", "left", "kept", "meant", "felt", "lost",
+    "paid", "sent", "spent", "built", "bought", "brought", "caught", "taught", "fought",
+    "sought", "sold", "held", "stood", "understood", "broke", "chose", "wrote", "drove",
+    "rode", "spoke", "woke", "froze", "forgot", "began", "ran", "won", "swam", "sang",
+    "drank", "rang", "sank", "stole", "threw", "grew", "drew", "flew", "blew", "wore",
+    "tore", "swore", "hid", "bit", "lit", "fed", "led", "bled", "fled", "met", "slept",
+    "swept", "dealt", "heard", "dreamt", "learnt", "burnt", "spelt", "spilt", "shot", "sat",
+    "laid", "fell", "rose", "shook", "forgave", "became", "overcame", "withdrew", "arose",
+    "awoke", "bent", "lent", "rebuilt", "upheld", "withheld", "outgrew", "rewrote", "redid",
+    "undid", "overpaid", "underwent", "oversaw", "mistook", "undertook", "overtook", "sped",
+    "read", "set", "put", "cut", "hit", "let", "quit", "shut", "cost", "hurt", "spread",
+    "split", "bet", "cast", "broadcast", "upset",
+})
 
 # Standalone first-person subjects that trigger verb agreement after rewriting.
 SUBJECT_PRONOUNS: tuple[str, ...] = ("i", "we")

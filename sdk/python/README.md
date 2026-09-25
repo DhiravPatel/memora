@@ -28,6 +28,15 @@ if not preview:                      # nothing would be remembered
 for plan in preview.memories:
     print(plan.action, plan.type, plan.content, plan.reason)
 
+# Before a call or a reply: what to raise, what not to do and why, the next step
+brief = memory.brief("cus_123")                 # since the last conversation, by default
+print(brief.headline)    # "Acme: at risk (54), declining. On the Pro plan, customer for 8 months. …"
+for point in brief.talking_points:
+    print("-", point)
+if brief.forbids("offer_upgrade"):              # the guardrails' own verdict, for this key's profile
+    print(brief.caution_for("offer_upgrade").text)
+prompt = memory.brief_markdown("cus_123")        # the same brief as a page, for a system prompt
+
 # Everything worth knowing, in one call — what an agent reads before it replies
 view = memory.customer_360("cus_123", include=["health", "active_problems", "goals"])
 print(view.summary)

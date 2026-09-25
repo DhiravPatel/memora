@@ -38,8 +38,9 @@ from memory_engine.consolidation.rules import (
     shared_entities,
     topic_overlap,
 )
-from memory_engine.consolidation.similarity import combined_similarity
+from memory_engine.consolidation.similarity import combined_similarity, cosine_similarity
 from memory_engine.policy import Policy
+from memory_engine.protocols import Embedder
 from memory_engine.schemas import ExtractedMemory, NormalizedEvent
 from memory_engine.temporal.decay import expiry_for
 from nlp.tokenize import content_words, lemmatize
@@ -53,6 +54,10 @@ RESOLUTION_OVERLAP = 0.2
 # this many days before it — and only when there is exactly one: with two it could be
 # either, and closing the wrong one is worse than closing neither.
 BARE_RESOLUTION_DAYS = 14
+# A memory stands for every statement it absorbed, not only its newest wording. A new report
+# is compared with the latest few of them too, so "the export failed again last night"
+# still meets a problem whose text a later message rewrote into a threat to cancel.
+EARLIER_STATEMENTS = 4
 # Words a resolution uses whatever it resolves: what is left after them is its topic.
 _RESOLUTION_WORDS = frozenset(
     lemmatize(word)
@@ -124,11 +129,15 @@ class MemoryConsolidator:
         decay_days: int = 90,
         neighbours: int = 6,
         policy: Policy | None = None,
+        embedder: Embedder | None = None,
     ) -> None:
         self.repository = repository
         self.similarity_threshold = similarity_threshold
         self.decay_days = decay_days
         self.neighbours = neighbours
+        # For comparing with a memory's earlier statements; without one, only the current
+        # wording is compared.
+        self.embedder = embedder
         # The project's restriction policy, applied as a memory is written. Classifying
         # here rather than on read means the decision is made once, stored, and indexed.
         self.policy = policy or Policy()
@@ -177,7 +186,7 @@ class MemoryConsolidator:
             vector=vector,
             limit=self.neighbours,
         )
-        best_memory, best_similarity = self._best_match(candidate.content, rows)
+        best_memory, best_similarity, earlier = await self._match(candidate.content, vector, rows)
 
         if best_memory is None:
             return ConsolidationPlan(
@@ -194,12 +203,16 @@ class MemoryConsolidator:
             similarity=best_similarity,
             threshold=self.similarity_threshold,
         )
+        signals = dict(decision.signals)
+        if earlier is not None:
+            # Said so, so the decision can be replayed: it was the earlier wording that matched.
+            signals["matched_earlier_statement"] = earlier[:200]
         return ConsolidationPlan(
             action=decision.action,
             target=best_memory,
             reason=decision.reason,
             similarity=best_similarity,
-            signals=dict(decision.signals),
+            signals=signals,
             decision=decision,
         )
 
@@ -517,18 +530,49 @@ class MemoryConsolidator:
 
     # ------------------------------------------------------------------ utils
 
-    def _best_match(
-        self, content: str, rows: list[tuple[Memory, float]]
-    ) -> tuple[Memory | None, float]:
+    async def _match(
+        self, content: str, vector: list[float] | None, rows: list[tuple[Memory, float]]
+    ) -> tuple[Memory | None, float, str | None]:
+        """The closest active neighbour, its score, and the earlier statement of it that
+        matched when that scored higher than its current wording."""
+        earlier = await self._earlier_statements(rows) if self.embedder is not None and vector else []
+        earlier_vectors = (await self.embedder.embed([text for _, text in earlier])).vectors if earlier else []  # type: ignore[union-attr]
         best: Memory | None = None
         best_score = 0.0
+        best_via: str | None = None
         for memory, vector_similarity in rows:
             if memory.status != MemoryStatus.ACTIVE:
                 continue
             score = combined_similarity(vector_similarity, memory.content, content)
+            via: str | None = None
+            for (memory_id, statement), statement_vector in zip(earlier, earlier_vectors, strict=True):
+                if memory_id != memory.id:
+                    continue
+                earlier_score = combined_similarity(cosine_similarity(vector or [], statement_vector), statement, content)
+                if earlier_score > score:
+                    score, via = earlier_score, statement
             if score > best_score:
-                best, best_score = memory, score
-        return best, best_score
+                best, best_score, best_via = memory, score, via
+        return best, best_score, best_via
+
+    async def _earlier_statements(self, rows: list[tuple[Memory, float]]) -> list[tuple[str, str]]:
+        """(memory id, statement) for the latest few wordings each neighbour replaced."""
+        active = [memory for memory, _ in rows if memory.status == MemoryStatus.ACTIVE]
+        if not active:
+            return []
+        versions = await self.repository.versions_for([memory.id for memory in active])
+        found: list[tuple[str, str]] = []
+        for memory in active:
+            seen = {memory.content}
+            kept = 0
+            for version in reversed(versions.get(memory.id, [])):  # newest first
+                for statement in (version.new_content, version.previous_content):
+                    if not statement or statement in seen or kept >= EARLIER_STATEMENTS:
+                        continue
+                    seen.add(statement)
+                    found.append((memory.id, statement))
+                    kept += 1
+        return found
 
     @staticmethod
     def _snapshot(memory: Memory) -> MemorySnapshot:

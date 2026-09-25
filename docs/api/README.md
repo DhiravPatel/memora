@@ -174,6 +174,72 @@ gated, because it is a number about a customer rather than a quote from one.
 
 Needs `customers:read` and `memory:read`.
 
+## Customer brief
+
+### `GET /v1/customers/{customer_id}/brief`
+
+"Brief me on Acme" — the judgement, not the record: the situation in a few sentences, what
+to raise and in what order, what **not** to do and why, and the next step, each from the
+evidence. Built for the moment before a call or a reply.
+
+| Parameter | Meaning |
+| --- | --- |
+| `since` | what `recent_changes` covers — `last_session` (default: since the last conversation that ended), `last_run`, a span (`7d`), an ISO time or a snapshot id; see [What changed](#what-changed) |
+| `agent` | with `last_session`/`last_run`: only that agent's |
+| `format` | `json` (default) or `markdown` — the brief as a page, `text/markdown` |
+
+```json
+{
+  "customer": { "external_id": "acme", "name": "Acme", "customer_since": "…", "last_active_at": "…" },
+  "headline": "Acme: critical (34), declining. On the Pro plan (upgraded from Starter 2 days ago), customer for 2 weeks. 3 open problems; said they may cancel.",
+  "talking_points": [
+    "They said they may leave: “The customer will cancel if the payroll export keeps failing”. Acknowledge it before anything else.",
+    "Still open after 2 weeks, reported 3 times: “The payroll export failed again last night”.",
+    "Since the last conversation (19 Sep 2026): upgraded from Starter to Pro; a new problem; a problem reported again; said they may cancel — and 5 more changes.",
+    "Next step — Escalate: The payroll export failed again last night (reported 3 separate times without being closed out — first-line support has not been enough).",
+    "They prefer email."
+  ],
+  "cautions": [
+    { "text": "Don't offer an upgrade: the customer has 3 open problems; resolve them before selling.",
+      "action": "offer_upgrade", "actions": ["offer_upgrade"], "decision": "deny",
+      "summary": "The customer has 3 open problems; resolve them before selling.",
+      "rules": ["open_problem_blocks_selling", "at_risk_blocks_selling"], "evidence": ["mem_…"] },
+    { "text": "Don't call them: the customer asked not to be called.", "action": "call_customer",
+      "actions": ["call_customer"], "decision": "deny", "rules": ["respect_opt_out"], "evidence": ["mem_…"] }
+  ],
+  "next_step": { "key": "escalate_repeat_problem", "action": "Escalate: …", "rationale": "…", "priority": "now", "memory_ids": ["mem_…"] },
+  "set_aside": [{ "key": "retention_outreach", "action": "Get on a call about the renewal", "because": "The customer asked not to be called." }],
+  "situation": {
+    "health": { "score": 34.2, "band": "critical", "churn_risk": 0.78, "trajectory": "declining", "explanation": "…" },
+    "plan": { "name": "pro", "statement": "The customer upgraded from the Starter plan to the Pro plan.", "direction": "upgraded" },
+    "lifecycle": [{ "track": "lifecycle", "label": "Lifecycle", "state": "at_risk", "reasons": ["said they may cancel"] }],
+    "open_problems": 3,
+    "goals": { "open": 0, "progressing": 0, "stalled": 0, "achieved": 0 }
+  },
+  "open_issues": [{ "id": "mem_…", "content": "…", "age_days": 19, "times_reported": 3 }],
+  "goals": [], "intents": [{ "id": "mem_…", "type": "intent", "content": "…", "kinds": ["cancellation"] }],
+  "preferences": { "channel": "email", "opt_outs": [{ "kind": "phone", "words": "asked not to be called" }], "statements": [] },
+  "risks": [], "opportunities": [],
+  "recent_changes": { "window": { "basis": "last_session", "label": "Since the last conversation (19 Sep 2026)" }, "summary": "…", "items": [], "total": 15, "withheld": 0 },
+  "last_conversation": { "agent": "support-bot", "summary": "…", "closed_at": "…" },
+  "evidence": ["mem_…"],
+  "withheld": 0, "withheld_facts": [],
+  "markdown": "# Acme\n\nAcme: critical (34), declining. …"
+}
+```
+
+**Cautions** are the guardrails' own verdicts ([Guardrails](#guardrails)) on selling,
+marketing, asking for a review, unprompted contact, calling, emailing, discounts, credits
+and closing a ticket — judged for this customer and **the calling key's agent profile**,
+with nothing recorded and no approval filed. Actions refused for the same reason are one
+caution; approval policy that applies to every customer is left out. **`next_step`** is the
+most urgent recommendation no caution forbids; any more urgent one a caution rules out is in
+`set_aside` with the reason.
+
+Numbers are whole for every reader — a key without clearance is told how many problems are
+open — while words from memories it may not read are left out, their ids leave `evidence`,
+and `withheld` / `withheld_facts` say how much. Needs `memory:read`.
+
 ## Facts and conditions
 
 The language guardrails, the lifecycle, workflows and feature flags are written in.
@@ -668,6 +734,8 @@ Tools: `ask_memory`, `search_memory`, `customer_360`, `customer_brief`, `custome
 `customer_timeline`, `get_health`, `get_goals`, `get_recommendations`, `check_action`,
 `request_action`, `proceed_action`, `report_action`, `explain_answer`, `remember`. Over HTTP each caller sends their own key as
 `Authorization: Bearer mk_…`; the key's scopes, clearance and profile apply to every tool.
+`customer_brief` returns the [brief](#customer-brief)'s Markdown page (with the JSON as
+structured content) and takes `since` and `agent`.
 
 ## Asking
 

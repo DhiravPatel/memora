@@ -9,6 +9,13 @@ export function formatDate(value: string | Date | null | undefined): string {
   });
 }
 
+/** A day without its time: "Sep 10, 2026" — for dates where the hour means nothing. */
+export function formatDay(value: string | Date | null | undefined): string {
+  if (!value) return "—";
+  const date = typeof value === "string" ? new Date(value) : value;
+  return date.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+}
+
 /** "5m ago", or "in 23h" for a moment still to come — an expiry, a deadline. */
 export function formatRelative(value: string | null | undefined): string {
   if (!value) return "—";

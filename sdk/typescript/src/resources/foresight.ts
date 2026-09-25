@@ -12,7 +12,7 @@ import type {
   SignalReport,
 } from "../types.js";
 
-function toSignal(raw: any): Signal {
+export function toSignal(raw: any): Signal {
   return {
     key: raw.key,
     label: raw.label,
@@ -49,7 +49,7 @@ export function toSignalReport(raw: any): SignalReport {
   };
 }
 
-function toRecommendation(raw: any): Recommendation {
+export function toRecommendation(raw: any): Recommendation {
   return {
     key: raw.key,
     action: raw.action,

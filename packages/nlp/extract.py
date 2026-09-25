@@ -21,6 +21,7 @@ from common.text import content_hash
 from nlp import entities as entity_rules
 from nlp.classify import Classification, classify
 from nlp.entities import EntityHit
+from nlp.intents import intent_kinds
 from nlp.lexicon import FILLER_SENTENCES
 from nlp.rewrite import to_third_person
 from nlp.sentiment import Sentiment, analyze
@@ -215,6 +216,36 @@ def resolve_leading_pronoun(clause: str, topic: EntityHit | None) -> str:
     return f"{_topic_phrase(topic)} {remainder}"
 
 
+# A threat to leave or shrink that hangs on a problem — "we will cancel if the export keeps
+# failing" — says two things: what the customer intends (the whole sentence) and what is
+# wrong (the condition). Kept as one problem memory, the threat is lost the first time a
+# later report rewrites the problem; kept as one intent, the problem never meets its own
+# earlier reports.
+_THREAT_KINDS = frozenset({"cancellation", "downgrade"})
+_CONDITION_AFTER = re.compile(r"^(?P<main>.+?),?\s+(?:if|unless|until)\s+(?P<condition>.+)$", re.IGNORECASE)
+_CONDITION_FIRST = re.compile(r"^\s*(?:if|unless|until)\s+(?P<condition>[^,]+),\s*(?P<main>.+)$", re.IGNORECASE)
+# A condition addressed to the vendor ("unless you fix it") is a demand, not a problem.
+_DEMAND = re.compile(r"^\s*(?:you|they)\b", re.IGNORECASE)
+# A threat has the customer as its subject: "we will cancel", not "please cancel the invoice".
+_CUSTOMER_SUBJECT = re.compile(r"\b(?:we|i|we'll|i'll|our (?:team|company|business))\b", re.IGNORECASE)
+
+
+def conditional_threat(clause: str) -> tuple[list[str], str | None] | None:
+    """``(threat kinds, problem condition)`` when ``clause`` threatens to leave or shrink on
+    a condition; the condition is ``None`` when it is not a problem statement."""
+    match = _CONDITION_FIRST.match(clause) or _CONDITION_AFTER.match(clause)
+    if match is None:
+        return None
+    main = match.group("main")
+    kinds = [kind for kind in intent_kinds(main) if kind in _THREAT_KINDS]
+    if not kinds or not _CUSTOMER_SUBJECT.search(main):
+        return None
+    condition = match.group("condition").strip().rstrip(".!")
+    if _DEMAND.match(condition) or word_count(condition) < MIN_WORDS:
+        return kinds, None
+    return kinds, condition
+
+
 def extract_statements(
     text: str,
     *,
@@ -250,6 +281,40 @@ def extract_statements(
             if is_question(clause) and classification.type not in _QUESTION_KEEP_TYPES:
                 continue
 
+            threat = conditional_threat(clause)
+            rule_suffix = ""
+            if threat is not None:
+                kinds, condition = threat
+                if condition is not None:
+                    facet = classify(condition, event_type=event_type)
+                    if facet.type is MemoryType.PROBLEM:
+                        # The problem, on its own terms, so it meets its earlier reports.
+                        problem = _candidate(
+                            condition,
+                            facet,
+                            facet.sentiment or analyze(condition),
+                            hits=clause_hits or ([topic] if topic is not None else []),
+                            event_entities=event_entities,
+                            source_sentence=raw_clause,
+                            attribution=attribution,
+                            rule="text:problem:condition",
+                        )
+                        if problem is not None and problem.hash not in seen_hashes:
+                            seen_hashes.add(problem.hash)
+                            candidates.append(problem)
+                # The whole sentence is what they intend.
+                classification = Classification(
+                    type=MemoryType.INTENT,
+                    confidence=max(classification.confidence, 0.75),
+                    scores=classification.scores,
+                    cues=[*kinds, *classification.cues],
+                    negated_cues=classification.negated_cues,
+                    resolved=False,
+                    sentiment=sentiment,
+                    margin=classification.margin,
+                )
+                rule_suffix = ":conditional_threat"
+
             rewritten = to_third_person(clause)
             if not rewritten.text:
                 continue
@@ -272,7 +337,7 @@ def extract_statements(
                     importance=_importance_for(classification, sentiment),
                     confidence=round(min(0.99, confidence), 4),
                     source="text",
-                    rule=f"text:{classification.type.value}",
+                    rule=f"text:{classification.type.value}{rule_suffix}",
                     entities=hits or list(event_entities or []),
                     attributes={
                         "cues": classification.cues,
@@ -287,6 +352,47 @@ def extract_statements(
                 )
             )
     return candidates
+
+
+def _candidate(
+    clause: str,
+    classification: Classification,
+    sentiment: Sentiment,
+    *,
+    hits: list[EntityHit],
+    event_entities: list[EntityHit] | None,
+    source_sentence: str,
+    attribution: bool,
+    rule: str,
+) -> MemoryCandidate | None:
+    """One clause as a memory candidate — the path every prose statement takes."""
+    rewritten = to_third_person(clause)
+    if not rewritten.text:
+        return None
+    content = rewritten.text
+    if attribution and not rewritten.changed and not rewritten.quoted:
+        content = attribute(content)
+    content = content[:MAX_CONTENT_LENGTH]
+    confidence = classification.confidence * (0.9 if rewritten.quoted else 1.0)
+    return MemoryCandidate(
+        type=classification.type,
+        content=content,
+        importance=_importance_for(classification, sentiment),
+        confidence=round(min(0.99, confidence), 4),
+        source="text",
+        rule=rule,
+        entities=hits or list(event_entities or []),
+        attributes={
+            "cues": classification.cues,
+            "negated_cues": classification.negated_cues,
+            "resolved": classification.resolved,
+            "quoted": rewritten.quoted,
+            "sentiment": sentiment.as_dict(),
+            "measurements": entity_rules.measurements(clause),
+            "source_sentence": source_sentence[:MAX_CONTENT_LENGTH],
+            "channels": entity_rules.channels_mentioned(clause),
+        },
+    )
 
 
 def extract(

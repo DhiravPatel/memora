@@ -338,3 +338,43 @@ def test_a_threat_filed_as_a_subscription_is_still_intent():
     facts = build(subscription=[memory("mem_1", "The customer is going to cancel unless the sync is fixed.")])
     assert facts.get("subscription.direction") is None
     assert "cancellation" in facts.get("intents.kinds")
+
+
+def test_the_preferred_channel_is_read_for_stance_not_mention():
+    # "WhatsApp instead of email" names email first in the lexicon, and prefers WhatsApp.
+    facts = build(preference=[memory("mem_1", "Please contact the customer on WhatsApp instead of email.")])
+    assert facts.get("preferences.channel") == "whatsapp"
+    assert facts.get("preferences.channels") == ["email", "whatsapp"]
+
+    # A newer statement that only turns a channel away rules out an older preference for it.
+    facts = build(
+        preference=[
+            memory("mem_old", "The customer prefers email.", days_ago=20),
+            memory("mem_new", "Stop emailing the customer.", days_ago=1),
+        ]
+    )
+    assert facts.get("preferences.channel") is None
+    assert facts.get("preferences.channels") == ["email"]
+
+    # …but not one it did not mention.
+    facts = build(
+        preference=[
+            memory("mem_old", "The customer prefers email.", days_ago=20),
+            memory("mem_new", "Please do not call the customer.", days_ago=1),
+        ]
+    )
+    assert facts.get("preferences.channel") == "email"
+    assert facts.evidence["preferences.channel"] == ["mem_old"]
+
+
+def test_a_change_that_happened_is_not_an_intent():
+    facts = build(
+        subscription=[
+            memory("mem_done", "The customer downgraded from the Pro plan to the Starter plan, citing: the integration never worked.", direction="downgraded"),
+        ]
+    )
+    assert facts.get("subscription.direction") == "downgraded"
+    assert "downgrade" not in facts.get("intents.kinds")
+    # A threat filed as a subscription statement still is one.
+    threat = build(subscription=[memory("mem_threat", "The customer will cancel the Pro plan unless the sync is fixed.")])
+    assert "cancellation" in threat.get("intents.kinds")

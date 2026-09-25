@@ -102,6 +102,15 @@ CASES = [
         forbid=[{"type": "problem"}],
     ),
     {"customer_id": "acme", "kind": "extraction", "question": "Page views are noise", "event": {"event_type": "page_view", "data": {"path": "/dashboard"}}, "expect_nothing": True},
+    # A threat on a condition is an intent, and the problem it hangs on meets its earlier
+    # reports rather than becoming a second problem or a threat stored as a problem (§31.7).
+    extraction(
+        "support_message",
+        "We will cancel if the payroll export keeps failing.",
+        question="A threat and the problem it hangs on",
+        expect=[{"type": "intent", "contains": "will cancel"}, {"type": "problem", "contains": "payroll export", "action": "merge"}],
+        forbid=[{"type": "problem", "contains": "cancel"}, {"type": "problem", "action": "create"}],
+    ),
     # Deliberately wrong, to see what a failure explains.
     extraction(
         "support_message",
@@ -131,13 +140,13 @@ def test_a_mixed_set_measures_retrieval_and_extraction(client, world):
     added = client.post(f"/v1/evals/{world['set']}/cases", json={"cases": CASES}, headers=h(world))
     assert added.status_code == 201, added.text
     kinds = [case["kind"] for case in added.json()]
-    assert kinds.count("extraction") == 6 and kinds.count("retrieval") == 1
+    assert kinds.count("extraction") == 7 and kinds.count("retrieval") == 1
 
     run = client.post(f"/v1/evals/{world['set']}/runs", json={"label": "baseline"}, headers=h(world)).json()
     assert run["status"] == "succeeded", run
     extraction_metrics = run["metrics"]["extraction"]
-    assert extraction_metrics["cases"] == 6
-    assert extraction_metrics["passed"] == 5, run["results"]
+    assert extraction_metrics["cases"] == 7
+    assert extraction_metrics["passed"] == 6, run["results"]
     assert extraction_metrics["false_memory_rate"] == 0.0
     assert run["metrics"]["recall"]["@5"] == 1.0  # the retrieval question still scores as before
 
@@ -147,6 +156,7 @@ def test_a_mixed_set_measures_retrieval_and_extraction(client, world):
     assert wrong["expected"][0]["near_miss"] == "typed problem, expected goal"
     assert by_label["Payroll fixed"]["passed"] is True, "the resolution supersedes the problem"
     assert by_label["Page views are noise"]["stop_reason"]
+    assert by_label["A threat and the problem it hangs on"]["passed"] is True, by_label["A threat and the problem it hangs on"]
     assert "closest_content" not in by_label["Payroll fixed"]["planned"][0], "an existing memory's words are not stored"
 
 
@@ -183,8 +193,8 @@ def test_a_regression_names_what_a_proposed_setting_would_break(client, world):
 
 def test_the_scorecard_brings_it_together(client, world):
     card = client.get("/v1/evals/scorecard", headers=h(world)).json()
-    assert card["extraction"]["cases"] == 6
-    assert card["extraction"]["accuracy"] == round(5 / 6, 4)
+    assert card["extraction"]["cases"] == 7
+    assert card["extraction"]["accuracy"] == round(6 / 7, 4)
     assert card["extraction"]["type_accuracy"] is not None
     assert card["retrieval"]["questions"] == 1 and card["retrieval"]["recall_at_5"] == 1.0
     assert set(card["memory"]) >= {"duplicate_control", "consistency", "quality_score"}
