@@ -475,6 +475,8 @@ export interface Change {
   reasons: string[];
   detail: Record<string, unknown>;
   importance: number;
+  /** What it is about: the products, integrations and features its memory names. */
+  topics: string[];
 }
 
 /** The customer at one end of a window. `state` is null when nothing was recorded yet. */
@@ -485,6 +487,70 @@ export interface CustomerAt {
   takenAt: string | null;
   state: Record<string, unknown> | null;
   description: string | null;
+}
+
+/** One moment in a customer's journey that changed something (§26 6.6). */
+export interface Milestone {
+  id: string;
+  /** When it happened — the time of the event behind it. */
+  at: string;
+  /** When Memora recorded it, when that is a day or more later (imported history). */
+  recordedAt: string | null;
+  category:
+    | "account"
+    | "usage"
+    | "problem"
+    | "plan"
+    | "intent"
+    | "preference"
+    | "goal"
+    | "health"
+    | "lifecycle"
+    | "activity"
+    | "feedback"
+    | "relationship";
+  kind: string;
+  title: string;
+  tone: "positive" | "negative" | "neutral";
+  importance: number;
+  topics: string[];
+  whatHappened: string;
+  whyItMatters: string | null;
+  /** Which memories changed. */
+  memories: { id: string; type: string; content: string | null; change: string }[];
+  /** What happened to health: the snapshot its event led to, against the one before. */
+  health: {
+    before: { score: number | null; band: string | null } | null;
+    after: { score: number | null; band: string | null } | null;
+    delta: number | null;
+    drivers: string[];
+    snapshotId: string | null;
+  } | null;
+  /** Which lifecycle transitions followed. */
+  transitions: {
+    id: string;
+    track: string;
+    label: string;
+    before: string | null;
+    after: string;
+    reasons: string[];
+    manual: boolean;
+  }[];
+  evidence: { memories: string[]; goals: string[]; events: string[]; snapshots: string[]; states: string[] };
+  detail: Record<string, unknown>;
+}
+
+/** A customer's history as milestones, oldest first. */
+export interface CustomerJourney {
+  customerId: string;
+  customerSince: string | null;
+  summary: string;
+  milestones: Milestone[];
+  counts: Record<string, number>;
+  total: number;
+  truncated: boolean;
+  withheld: number;
+  window: { since: string | null; until: string; basis: string; label: string; note: string | null };
 }
 
 export interface CustomerChanges {
@@ -757,12 +823,36 @@ export interface CustomerBrief {
       state: string;
       enteredAt: string;
       pinned: boolean;
+      /** Why they entered the state, when they did. */
       reasons: string[];
+      /** Why they are in it now — null when a person set it or it is the initial state. */
+      reasonsNow: string[] | null;
+      /** Whether the transition that brought them here would still fire. */
+      holds: boolean | null;
+      /** When it would not: the way out they are closest to. */
+      heldBy: string | null;
+      /** Nothing keeps them here and a way out would fire: where the next refresh moves them. */
+      movingTo: string | null;
     }[];
     /** Every open problem — a count, whole even when some are withheld from this key. */
     openProblems: number;
     goals: Record<string, number>;
+    /** Why they are where they are now: the lifecycle reasons that still hold, what pulls
+     * health down, risks. */
+    why: string[];
   };
+  /** Their goals, then the products and features they talk about most. */
+  caresAbout: { topic: string; detail: string; evidence: string[] }[];
+  /** The evidence by kind. */
+  evidenceRefs: {
+    memories: string[];
+    goals: string[];
+    snapshots: string[];
+    states: string[];
+    drift: string[];
+  };
+  /** What evidence says may be out of date — to ask about, not to act on. */
+  drift: { id: string; kind: string; summary: string; memoryId: string }[];
   /** What to raise, most important first. */
   talkingPoints: string[];
   /** What not to do, and why. */
@@ -851,7 +941,9 @@ export interface DriftFlag {
   id: string;
   kind: DriftKind;
   kindLabel: string;
-  status: "open" | "confirmed" | "dismissed" | "cleared";
+  /** confirmed: the change was written · kept: the memory was vouched for · dismissed: the
+   * evidence was set aside · cleared: the system closed it. */
+  status: "open" | "confirmed" | "kept" | "dismissed" | "cleared";
   /** What the memory says: a channel, a plan (lowercase), a feature, a problem. */
   stated: string;
   /** What the evidence says instead, where it is one thing. */

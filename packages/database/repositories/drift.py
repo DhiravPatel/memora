@@ -1,4 +1,10 @@
-"""Drift flags (§26 5.5): open, confirmed, dismissed or cleared."""
+"""Drift flags (§26 5.5): open, then confirmed, kept, dismissed or cleared.
+
+* ``confirmed`` — a person agreed with the evidence; the change was written.
+* ``kept`` — a person vouched for the memory; it was confirmed (new evidence).
+* ``dismissed`` — a person set the evidence aside; the memory is unchanged.
+* ``cleared`` — the system closed it: the evidence stopped holding, or the memory went.
+"""
 
 from __future__ import annotations
 
@@ -13,8 +19,10 @@ from common.time import utcnow
 from database.models import MemoryDrift
 from database.repositories.base import BaseRepository
 
-OPEN, CONFIRMED, DISMISSED, CLEARED = "open", "confirmed", "dismissed", "cleared"
-STATUSES = (OPEN, CONFIRMED, DISMISSED, CLEARED)
+OPEN, CONFIRMED, KEPT, DISMISSED, CLEARED = "open", "confirmed", "kept", "dismissed", "cleared"
+STATUSES = (OPEN, CONFIRMED, KEPT, DISMISSED, CLEARED)
+# A person decided the memory stands: only evidence newer than that decision counts again.
+SET_ASIDE = (KEPT, DISMISSED)
 
 
 class DriftRepository(BaseRepository):
@@ -52,13 +60,14 @@ class DriftRepository(BaseRepository):
         return found
 
     async def last_dismissals(self, *, project_id: str, customer_id: str) -> dict[tuple[str, str], datetime]:
-        """When each (memory, kind) was last dismissed, so only newer evidence counts."""
+        """When a person last decided each (memory, kind) stands — kept or dismissed — so only
+        newer evidence counts."""
         result = await self.session.execute(
             select(MemoryDrift.memory_id, MemoryDrift.kind, func.max(MemoryDrift.resolved_at))
             .where(
                 MemoryDrift.project_id == project_id,
                 MemoryDrift.customer_id == customer_id,
-                MemoryDrift.status == DISMISSED,
+                MemoryDrift.status.in_(SET_ASIDE),
             )
             .group_by(MemoryDrift.memory_id, MemoryDrift.kind)
         )

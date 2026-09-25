@@ -6,6 +6,7 @@ import pytest
 
 from memory_engine.facts import CustomerFacts
 from memory_engine.lifecycle import MAX_HOPS, LifecycleError, compile_lifecycle
+from memory_engine.reasons import reasons
 from memory_engine.snapshots import changes, fingerprint
 
 
@@ -48,6 +49,37 @@ def test_hysteresis_keeps_a_borderline_customer_from_flapping():
 def test_recovery_needs_every_condition():
     recovered = facts(health__band="healthy", signals__churn_risk=0.2, intents__kinds=[])
     assert [step.target for step in DEFAULT.settle("at_risk", recovered)] == ["active"]
+
+
+def test_why_now_is_what_still_holds_not_what_held_on_entry():
+    """Entered at risk on a critical score; health recovered, the threat to cancel did not."""
+    now = facts(health__band="watch", signals__churn_risk=0.19, intents__kinds=["cancellation", "evaluation"])
+    standing = DEFAULT.standing("at_risk", now, entered_by="at_risk", came_from="active")
+    assert standing is not None and standing.holds and standing.transition == "at_risk"
+    assert reasons(standing.evaluation) == ["said they may cancel; is evaluating"]
+
+
+def test_held_by_hysteresis_the_reasons_are_what_keeps_them():
+    """Nothing that put them at risk holds, and the way out is stricter: say what blocks it."""
+    borderline = facts(
+        health__band="watch", signals__churn_risk=0.5, intents__kinds=[], subscription__direction="upgraded"
+    )
+    standing = DEFAULT.standing("at_risk", borderline, entered_by="at_risk", came_from="active")
+    assert standing is not None and not standing.holds and not standing.moving
+    assert standing.transition == "recovered", "the way out they are closest to"
+    assert reasons(standing.evaluation) == ["forecast churn risk 0.50"]
+
+
+def test_a_way_out_that_would_fire_means_they_are_moving():
+    recovered = facts(health__band="healthy", signals__churn_risk=0.2, intents__kinds=[])
+    standing = DEFAULT.standing("at_risk", recovered, entered_by="at_risk")
+    assert standing is not None and standing.moving and standing.transition == "recovered"
+
+
+def test_nothing_to_recheck_for_a_person_or_the_initial_state():
+    assert DEFAULT.standing("at_risk", facts(), entered_by=None) is None
+    assert DEFAULT.standing("at_risk", facts(), entered_by="no_such_transition") is None
+    assert DEFAULT.standing("active", facts(), entered_by="at_risk") is None, "a transition that leads elsewhere"
 
 
 def test_an_unknown_fact_never_moves_a_customer():

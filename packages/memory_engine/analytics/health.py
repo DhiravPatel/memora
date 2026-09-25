@@ -19,6 +19,7 @@ from typing import Any
 from common.enums import MemoryType
 from common.time import days_between, ensure_utc, utcnow
 from nlp.answer import MemoryView
+from nlp.sentiment import feedback_tone
 from nlp.tokenize import content_words, lemmatize
 
 BASELINE = 70.0
@@ -264,8 +265,11 @@ def compute(
         add("upgrade", "an upgrade or renewal", WEIGHTS["upgrade"], [memory.id for memory in upgrades])
 
     feedback = [memory for memory in memories if str(memory.type) == MemoryType.FEEDBACK.value]
-    negative_feedback = [memory for memory in feedback if memory.importance >= 0.7]
-    positive_feedback = [memory for memory in feedback if memory.importance < 0.7]
+    # By what was said — a score's band, else its sentiment — never by importance: an NPS
+    # promoter's 9 and a furious one-liner can carry the same importance.
+    tones = {memory.id: feedback_tone(memory.content, memory.attributes) for memory in feedback}
+    negative_feedback = [memory for memory in feedback if tones[memory.id] == "negative"]
+    positive_feedback = [memory for memory in feedback if tones[memory.id] == "positive"]
     if negative_feedback:
         add(
             "negative_feedback",

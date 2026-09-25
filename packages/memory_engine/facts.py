@@ -33,6 +33,7 @@ from nlp.intents import intent_kinds
 from nlp.lexicon import PLANS
 from nlp.optouts import KINDS as OPT_OUT_KINDS
 from nlp.optouts import opt_outs
+from nlp.sentiment import feedback_tone
 from nlp.tokenize import root, surface_words, tokenize
 
 METADATA_PREFIX = "customer.metadata."
@@ -523,7 +524,9 @@ def _action_facts(values: dict[str, Any], history: Sequence[tuple[str, datetime,
 
 
 def _is_negative(memory: Any) -> bool:
-    return polarity(memory) < -0.1
+    """Negative feedback — by a score's band where there is one, else by its sentiment.
+    The rule health, "what changed" and the journey share (``nlp.sentiment.feedback_tone``)."""
+    return feedback_tone(getattr(memory, "content", "") or "", _meta(memory)) == "negative"
 
 
 is_negative = _is_negative

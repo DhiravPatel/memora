@@ -24,12 +24,15 @@ class ChangeOut(BaseModel):
     reasons: list[str] = Field(default_factory=list)
     detail: dict[str, Any] = Field(default_factory=dict)
     importance: float
+    topics: list[str] = Field(default_factory=list, description="What it is about: the products, integrations and features its memory names.")
 
 
 class WindowOut(BaseModel):
     since: datetime
     until: datetime
-    basis: str = Field(description="How `since` was chosen: span, time, snapshot, last_session, last_run or default.")
+    basis: str = Field(
+        description="How `since` was chosen: span, time, snapshot, last_session, last_run, last_view or default."
+    )
     value: str | None = None
     found: bool = Field(default=True, description="False when `last_session`/`last_run` had nothing to go back to.")
     note: str | None = None

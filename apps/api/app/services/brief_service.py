@@ -27,7 +27,13 @@ from app.services.signal_service import SignalService
 from app.services.state_views import sanitizing, state_out
 from common.time import ensure_utc, utcnow
 from database.models import AgentProfile, Customer, Project
-from database.repositories import CustomerStateRepository, EventRepository, MemoryRepository
+from database.repositories import (
+    CustomerSnapshotRepository,
+    CustomerStateRepository,
+    EntityRepository,
+    EventRepository,
+    MemoryRepository,
+)
 from memory_engine import MemoryEngine
 from memory_engine.analytics.health import explain
 from memory_engine.brief import (
@@ -39,8 +45,11 @@ from memory_engine.brief import (
     markdown,
     opt_out_words,
 )
+from memory_engine.conditions import sanitize_evaluation
 from memory_engine.facts import CustomerFacts
 from memory_engine.policy import WITHHELD
+from memory_engine.reasons import reasons as reasons_in_words
+from memory_engine.topics import topics_of
 from nlp.intents import intent_kinds
 
 OPEN_ISSUES = 6
@@ -70,6 +79,7 @@ class BriefService:
         since: str | None = "last_session",
         agent: str | None = None,
         profile: AgentProfile | None = None,
+        viewer: tuple[str, str] | None = None,
     ) -> dict[str, Any]:
         now = utcnow()
         # Decisions are made over everything, and each is computed once…
@@ -89,7 +99,7 @@ class BriefService:
         )
 
         changes_service = ChangesService(self.session, cleared=self.cleared)
-        window = await changes_service.window(project=project, customer=customer, since=since, agent=agent)
+        window = await changes_service.window(project=project, customer=customer, since=since, agent=agent, viewer=viewer)
         changes = await changes_service.changes(
             project=project,
             customer=customer,
@@ -104,7 +114,7 @@ class BriefService:
         # before the record was created.
         first_event = await EventRepository(self.session).first_occurred_at(project_id=project.id, customer_id=customer.id)
         since_when = min((moment for moment in (customer.created_at, first_event) if moment), key=ensure_utc, default=None)
-        lifecycle = await self._lifecycle(project, customer)
+        lifecycle = await self._lifecycle(project, customer, facts)
         intents = await self._intents(project, visible)
         goals = _live_goals(sections.get("goals") or [], now)
         problems = (sections.get("active_problems") or [])[:OPEN_ISSUES]
@@ -126,6 +136,8 @@ class BriefService:
                 await FreshnessService(self.session, cleared=self.cleared).annotate(project=project, memories=quoted_rows)
             ).items()
         }
+        topics = await self._topics(project, customer)
+        snapshot = await CustomerSnapshotRepository(self.session).latest(project_id=project.id, customer_id=customer.id)
 
         parts = BriefParts(
             name=customer.name or customer.external_id,
@@ -167,6 +179,8 @@ class BriefService:
                 }
                 for flag in flags
             ],
+            health_factors=[factor.as_dict() for factor in health.factors],
+            topics=topics,
         )
         judged = compose(parts)
         brief: dict[str, Any] = {
@@ -195,12 +209,14 @@ class BriefService:
                     "previous": visible.get("subscription.previous_plan"),
                 },
                 "lifecycle": lifecycle,
+                "why": judged["why"],
                 "open_problems": parts.open_problems,
                 "goals": {
                     status: int(visible.get(f"goals.{status}_count") or 0)
                     for status in ("open", "progressing", "stalled", "achieved")
                 },
             },
+            "cares_about": judged["cares_about"],
             "talking_points": judged["talking_points"],
             "cautions": judged["cautions"],
             "open_issues": [
@@ -261,6 +277,17 @@ class BriefService:
             "next_step": judged["next_step"],
             "set_aside": judged["set_aside"],
             "evidence": _evidence(parts, judged["next_step"], judged["cautions"]),
+            "evidence_refs": {
+                "memories": [
+                    ident
+                    for ident in _evidence(parts, judged["next_step"], judged["cautions"])
+                    if not ident.startswith("goal_")
+                ],
+                "goals": [str(goal["id"]) for goal in goals if goal.get("id")],
+                "snapshots": [snapshot.id] if snapshot is not None else [],
+                "states": [str(track["id"]) for track in lifecycle if track.get("id")],
+                "drift": [flag["id"] for flag in flags],
+            },
             "withheld": view.withheld,
             "withheld_facts": list(visible.withheld_facts),
             "generated_at": now,
@@ -268,30 +295,80 @@ class BriefService:
         brief["markdown"] = markdown(brief)
         return brief
 
-    async def _lifecycle(self, project: Project, customer: Customer) -> list[dict[str, Any]]:
-        """Where the customer stands on every track, with the reasons in words."""
+    async def _lifecycle(self, project: Project, customer: Customer, facts: CustomerFacts) -> list[dict[str, Any]]:
+        """Where the customer stands on every track: the reasons they entered it, and the
+        reasons that hold now.
+
+        They differ more than one would think. A customer who went at risk on a critical
+        health score stays at risk after health recovers if they still say they may cancel —
+        and one whose every reason has gone stays because leaving is stricter than entering.
+        A brief that quoted the entry reasons would say "health is critical" beside a health
+        of 78. So the transition that brought them is checked again on the facts as they are
+        now (decided over everything, shown as this reader may see it).
+        """
         machines = machines_for(project)
         if not machines:
             return []
         currents = await CustomerStateRepository(self.session).currents(project_id=project.id, customer_id=customer.id)
         sanitize = await sanitizing(self.session, project, customer, self.cleared)
         found = []
-        for name in machines:
+        for name, machine in machines.items():
             row = currents.get(name)
             if row is None:
                 continue
             shaped = state_out(row, sanitize=sanitize)
+            standing = machine.standing(
+                row.state,
+                facts,
+                entered_by=row.transition if row.source == "auto" else None,
+                came_from=row.previous_state,
+            )
+            reasons_now: list[str] | None = None
+            if standing is not None:
+                trace = standing.evaluation.as_dict()
+                reasons_now = [] if standing.moving else reasons_in_words(sanitize_evaluation(trace) if sanitize else trace)
             found.append(
                 {
+                    "id": row.id,
                     "track": name,
                     "label": track_label(project, name),
                     "state": shaped.state,
                     "entered_at": shaped.entered_at,
                     "pinned": shaped.pinned,
                     "reasons": shaped.reasons,
+                    "reasons_now": reasons_now,
+                    "holds": standing.holds if standing is not None else None,
+                    "held_by": (
+                        standing.transition
+                        if standing is not None and not standing.holds and not standing.moving
+                        else None
+                    ),
+                    # Nothing keeps them here and a way out would fire: the next refresh moves them.
+                    "moving_to": standing.target if standing is not None and standing.moving else None,
                 }
             )
         return found
+
+    async def _topics(self, project: Project, customer: Customer) -> list[dict[str, Any]]:
+        """The products, integrations and features their memories name, by how many do —
+        over the memories this reader may see."""
+        grouped = await MemoryRepository(self.session, cleared=self.cleared).top_by_type(
+            project_id=project.id, customer_id=customer.id, per_type=40
+        )
+        rows = [row for kind, found in grouped.items() if kind != "summary" for row in found]
+        # A summary restates; it is not the customer bringing something up. And only the
+        # graph's products, integrations and features are topics (memory_engine.topics).
+        types = await EntityRepository(self.session).types_of(
+            project_id=project.id,
+            names=sorted({str(name) for row in rows for name in (row.meta or {}).get("entity_names") or []}),
+        )
+        named: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            for name in topics_of(row, types, exclude=customer.name or customer.external_id, limit=10):
+                entry = named.setdefault(name.lower(), {"name": name, "mentions": 0, "memory_ids": []})
+                entry["mentions"] += 1
+                entry["memory_ids"].append(row.id)
+        return list(named.values())
 
     async def _intents(self, project: Project, visible: CustomerFacts) -> list[dict[str, Any]]:
         """The newest statement behind each intent worth raising.

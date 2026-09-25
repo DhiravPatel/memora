@@ -50,6 +50,18 @@ class CustomerSnapshotRepository(BaseRepository):
         )
         return result.scalar_one_or_none()
 
+    async def chronological(
+        self, *, project_id: str, customer_id: str, limit: int = 2000
+    ) -> list[CustomerSnapshot]:
+        """A customer's snapshots, oldest first — the newest ``limit`` of them."""
+        result = await self.session.execute(
+            select(CustomerSnapshot)
+            .where(CustomerSnapshot.project_id == project_id, CustomerSnapshot.customer_id == customer_id)
+            .order_by(CustomerSnapshot.taken_at.desc())
+            .limit(limit)
+        )
+        return sorted(result.scalars(), key=lambda row: row.taken_at)
+
     async def list(
         self,
         *,

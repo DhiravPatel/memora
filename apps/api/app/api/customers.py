@@ -33,6 +33,7 @@ from app.schemas.customers import (
 from app.schemas.freshness import CustomerFreshnessOut, DriftOut, DriftRunOut
 from app.schemas.goals import GoalOut
 from app.schemas.health import HealthOut
+from app.schemas.journey import CustomerJourneyOut
 from app.schemas.memories import CustomerLinks, MemoryGraph, MemoryOut
 from app.schemas.signals import RecommendationsOut, SignalReportOut
 from app.schemas.state import (
@@ -56,6 +57,7 @@ from app.services.export_service import ExportService
 from app.services.freshness_service import FreshnessService
 from app.services.goal_service import GoalService
 from app.services.health_service import HealthService
+from app.services.journey_service import JourneyService
 from app.services.memory_service import MemoryService
 from app.services.serializers import (
     customer_out,
@@ -67,7 +69,7 @@ from app.services.signal_service import SignalService
 from common.enums import ApiKeyScope, GoalStatus, MemoryStatus, MemoryType
 from common.errors import ValidationError
 from common.time import ensure_utc
-from database.repositories import CustomerRepository
+from database.repositories import CustomerRepository, CustomerViewRepository
 
 WRITE = [Depends(require_scope(ApiKeyScope.CUSTOMERS_WRITE))]
 
@@ -273,8 +275,23 @@ async def get_customer_goals(
     )
 
 
+def _viewer(request: Request) -> tuple[str, str] | None:
+    """The key asking, as a viewer — for "since I last looked" (``since=last_view``)."""
+    key = getattr(request.state, "api_key", None)
+    return ("api_key", key.id) if key is not None else None
+
+
+async def _looked(session, request: Request, customer) -> None:
+    viewer = _viewer(request)
+    if viewer is not None:
+        await CustomerViewRepository(session).record(
+            project_id=customer.project_id, customer_id=customer.id, viewer_type=viewer[0], viewer_id=viewer[1]
+        )
+
+
 @router.get("/{customer_id}/360", response_model=Customer360)
 async def get_customer_360(
+    request: Request,
     customer: ApiCustomer,
     project: ApiProject,
     session: DBSession,
@@ -298,6 +315,7 @@ async def get_customer_360(
     view = await Customer360Service(session, engine, cleared=cleared).build(
         project=project, customer=customer, include=_sections(include)
     )
+    await _looked(session, request, customer)
     return Customer360(
         customer=view.customer,
         summary=view.summary,
@@ -451,6 +469,7 @@ def _types(types: str | None) -> set[str] | None:
 
 @router.get("/{customer_id}/changes", response_model=ChangesOut, dependencies=MEMORY_READ)
 async def get_customer_changes(
+    request: Request,
     customer: ApiCustomer,
     project: ApiProject,
     session: DBSession,
@@ -458,7 +477,10 @@ async def get_customer_changes(
     since: str | None = Query(
         default=None,
         max_length=64,
-        description="A span (7d, 12h, 2w, 3mo), an ISO time, a snapshot id, `last_session` or `last_run`. Default 30d.",
+        description=(
+            "A span (7d, 12h, 2w, 3mo), an ISO time, a snapshot id, `last_session`, `last_run` or "
+            "`last_view` (since this key last read the customer's brief or 360). Default 30d."
+        ),
     ),
     until: str | None = Query(default=None, max_length=64, description="An ISO time, a span back from now, or a snapshot id. Default now."),
     agent: str | None = Query(default=None, max_length=120, description="With last_session/last_run: only this agent's."),
@@ -470,7 +492,9 @@ async def get_customer_changes(
     preference changes with before and after, lifecycle moves with reasons, health crossing
     a band, goals, intents, signals and activity — and what they looked like then and now."""
     service = ChangesService(session, cleared=cleared)
-    window = await service.window(project=project, customer=customer, since=since, until=until, agent=agent)
+    window = await service.window(
+        project=project, customer=customer, since=since, until=until, agent=agent, viewer=_viewer(request)
+    )
     return await service.changes(
         project=project, customer=customer, window=window, types=_types(types), order=order, limit=limit
     )
@@ -493,7 +517,8 @@ async def compare_customer(
 
 BRIEF_SINCE = (
     "What 'recent changes' covers: a span (7d, 2w), an ISO time, a snapshot id, `last_session` "
-    "(the default — everything since the last conversation ended) or `last_run`."
+    "(the default — everything since the last conversation ended), `last_run`, or `last_view` "
+    "(since this key last read the customer's brief or 360)."
 )
 MARKDOWN = {200: {"content": {"text/markdown": {"schema": {"type": "string"}}}, "description": "The brief."}}
 
@@ -525,10 +550,69 @@ async def get_customer_brief(
         since=since,
         agent=agent,
         profile=getattr(request.state, "agent_profile", None),
+        viewer=_viewer(request),
     )
+    await _looked(session, request, customer)
     if fmt == "markdown":
         return PlainTextResponse(brief["markdown"], media_type="text/markdown; charset=utf-8")
     return CustomerBriefOut(**brief)
+
+
+# ------------------------------------------------------------------- journey
+
+JOURNEY_SINCE = (
+    "Only milestones from this moment: a span (90d, 6mo), an ISO time, a snapshot id, "
+    "`last_session`, `last_run` or `last_view`. Default: the whole history."
+)
+JOURNEY_MARKDOWN = {200: {"content": {"text/markdown": {"schema": {"type": "string"}}}, "description": "The journey."}}
+
+
+def _categories(value: str | None) -> set[str] | None:
+    return {name.strip().lower() for name in value.split(",") if name.strip()} if value else None
+
+
+@router.get(
+    "/{customer_id}/journey", response_model=CustomerJourneyOut, dependencies=MEMORY_READ, responses=JOURNEY_MARKDOWN
+)
+async def get_customer_journey(
+    customer: ApiCustomer,
+    project: ApiProject,
+    session: DBSession,
+    cleared: Clearance,
+    since: str | None = Query(default=None, max_length=64, description=JOURNEY_SINCE),
+    until: str | None = Query(default=None, max_length=64, description="An ISO time, a span back from now, or a snapshot id."),
+    categories: str | None = Query(
+        default=None,
+        max_length=300,
+        description="Comma-separated: account, usage, problem, plan, intent, preference, goal, health, lifecycle, "
+        "activity, feedback, relationship.",
+    ),
+    min_importance: float = Query(default=0.0, ge=0.0, le=1.0, description="Only milestones at least this important."),
+    limit: int = Query(default=100, ge=1, le=500, description="At most this many — the most important, in order."),
+    fmt: str = Query(default="json", alias="format", pattern="^(json|markdown)$"),
+) -> CustomerJourneyOut | PlainTextResponse:
+    """The customer's journey as milestones, not rows: where it began, first uses, the first
+    report of a problem and its repeats, plan changes, goals, health crossing a band,
+    lifecycle moves, silences and returns. Each says what happened, why it mattered, which
+    memories changed, what happened to health and which transition followed.
+
+    `?format=markdown` returns it as a page, grouped by month.
+    """
+    service = JourneyService(session, cleared=cleared)
+    journey = await service.build(
+        project=project,
+        customer=customer,
+        since=since,
+        until=until,
+        categories=_categories(categories),
+        limit=limit,
+        min_importance=min_importance,
+    )
+    if fmt == "markdown":
+        from memory_engine.journey import markdown as journey_markdown
+
+        return PlainTextResponse(journey_markdown(journey), media_type="text/markdown; charset=utf-8")
+    return CustomerJourneyOut(**journey)
 
 
 # ------------------------------------------------------------ freshness and drift

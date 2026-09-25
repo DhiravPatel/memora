@@ -6,9 +6,14 @@ the event stream for "stayed active" — over *everything*, like the fact docume
 is a statement about the customer, and a reader who may not see the memory is simply not
 shown the flag.
 
-Nothing here changes a memory on its own. Confirming a flag writes the change through the
-memory repository — a new statement, the old one superseded or expired, versions and audit
-included — and dismissing it keeps the memory and restarts the count from the dismissal.
+Nothing here changes a memory on its own. A person decides, three ways:
+
+* confirm — the evidence is right: the change is written through the memory repository (a
+  new statement, the old one superseded or expired, versions and audit included);
+* keep — the memory is right: it is confirmed like any feedback (more confidence, new
+  evidence), and the count restarts from then;
+* dismiss — not on this evidence: the memory is left exactly as it was, and the count
+  restarts from the dismissal.
 """
 
 from __future__ import annotations
@@ -34,7 +39,7 @@ from database.repositories import (
     EventRepository,
     MemoryRepository,
 )
-from database.repositories.drift import CLEARED, CONFIRMED, DISMISSED, OPEN, STATUSES
+from database.repositories.drift import CLEARED, CONFIRMED, DISMISSED, KEPT, OPEN, STATUSES
 from memory_engine.consolidation.rules import is_transition
 from memory_engine.drift import (
     KIND_LABELS,
@@ -230,16 +235,16 @@ class DriftService:
 
         found = {(finding.memory_id, finding.kind) for finding in findings}
         open_flags = await self.drift.open_for_customer(project_id=project.id, customer_id=customer.id)
-        standing = {
+        live = {
             row.id
             for row in await self.memories.get_many([flag.memory_id for flag in open_flags], project.id)
-            if str(row.status) == MemoryStatus.ACTIVE.value
+            if standing(row, now=now)
         }
         for flag in open_flags:
             key = (flag.memory_id, flag.kind)
             if key in found:
                 continue
-            if flag.memory_id not in standing:
+            if flag.memory_id not in live:
                 note = "The memory it was about is no longer standing."
             elif key in considered:
                 note = "The evidence no longer points the other way."
@@ -376,9 +381,8 @@ class DriftService:
             raise ConflictError(f"This flag is already {flag.status}.")
         memory = await self.memories.get(flag.memory_id, project.id)
         customer = await self.customers.get(flag.customer_id, project.id)
-        if memory is None or customer is None or str(memory.status) != MemoryStatus.ACTIVE.value:
-            await self.drift.resolve(flag, status=CLEARED, by=None, by_type="system", note="The memory it was about is no longer standing.")
-            raise ConflictError("The memory this flag was about is no longer standing; the flag was cleared.")
+        if memory is None or customer is None or not standing(memory):
+            return await self._gone(project, flag, customer)
 
         replacement = await self._apply(project, customer, memory, flag, note=note)
         await self.drift.resolve(
@@ -429,6 +433,53 @@ class DriftService:
         await WebhookDispatcher(self.session).emit(memory_drift_resolved(project_id=project.id, customer=customer, drift=flag))
         return (await self._out(project, [flag]))[0]
 
+    async def keep(
+        self,
+        *,
+        project: Project,
+        drift_id: str,
+        note: str | None = None,
+        actor_type: str = "user",
+        actor_id: str | None = None,
+    ) -> dict[str, Any]:
+        """The memory still holds, and a person vouches for it: the memory is confirmed — more
+        confidence, and new evidence, so the count restarts from now — and this flag, with any
+        other open on the same memory, is closed as kept. Stronger than dismissing, which only
+        says "not on this evidence" and leaves the memory exactly as it was."""
+        flag = await self._visible(project, drift_id, for_update=True)
+        if flag.status != OPEN:
+            raise ConflictError(f"This flag is already {flag.status}.")
+        memory = await self.memories.get(flag.memory_id, project.id)
+        customer = await self.customers.get(flag.customer_id, project.id)
+        if memory is None or customer is None or not standing(memory):
+            return await self._gone(project, flag, customer)
+
+        await self.drift.resolve(flag, status=KEPT, by=actor_id, by_type=actor_type, note=note or "A person kept the memory.")
+        from app.services.feedback_service import FeedbackService
+
+        # The confirmation itself goes through feedback — confidence, confirmed_at, versions,
+        # audit — and settles any other open flag on the memory.
+        await FeedbackService(self.session, cleared=self.cleared).submit(
+            project=project,
+            memory_id=flag.memory_id,
+            verdict="confirm",
+            note=note or f"Kept after review: {flag.summary}",
+            actor_type=actor_type,
+            actor_id=actor_id,
+        )
+        await self._audit(project, flag, "kept", actor_type=actor_type, actor_id=actor_id, note=note)
+        await WebhookDispatcher(self.session).emit(memory_drift_resolved(project_id=project.id, customer=customer, drift=flag))
+        logger.info("memory.drift_kept", drift_id=flag.id, kind=flag.kind, memory_id=flag.memory_id)
+        return (await self._out(project, [flag]))[0]
+
+    async def _gone(self, project: Project, flag: MemoryDrift, customer: Customer | None) -> dict[str, Any]:
+        """The memory a flag was about is no longer standing — superseded, expired, rejected:
+        there is nothing left to decide, so the flag is cleared and returned as such."""
+        await self.drift.resolve(flag, status=CLEARED, by=None, by_type="system", note="The memory it was about is no longer standing.")
+        if customer is not None:
+            await WebhookDispatcher(self.session).emit(memory_drift_resolved(project_id=project.id, customer=customer, drift=flag))
+        return (await self._out(project, [flag]))[0]
+
     async def settle_for_memory(
         self,
         *,
@@ -440,10 +491,16 @@ class DriftService:
         actor_id: str | None = None,
     ) -> list[MemoryDrift]:
         """Close a memory's open flags because a person acted on the memory itself: confirming
-        it dismisses them; rejecting or correcting it clears them."""
+        it keeps them; rejecting or correcting it clears them."""
         flags = (await self.drift.open_for_memories(project.id, [memory.id])).get(memory.id, [])
+        if not flags:
+            return flags
+        customer = await self.customers.get(memory.customer_id, project.id)
+        dispatcher = WebhookDispatcher(self.session)
         for flag in flags:
             await self.drift.resolve(flag, status=status, by=actor_id, by_type=actor_type, note=note)
+            if customer is not None:
+                await dispatcher.emit(memory_drift_resolved(project_id=project.id, customer=customer, drift=flag))
         return flags
 
     async def _apply(
@@ -549,6 +606,13 @@ class DriftService:
 
 
 # ---------------------------------------------------------------------- helpers
+
+
+def standing(memory: Memory, *, now: datetime | None = None) -> bool:
+    """Active and not past its expiry — what a person can still decide about."""
+    if str(memory.status) != MemoryStatus.ACTIVE.value:
+        return False
+    return memory.expires_at is None or ensure_utc(memory.expires_at) > (now or utcnow())
 
 
 def feature_of(memory: Any) -> str | None:

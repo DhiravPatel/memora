@@ -19,7 +19,7 @@
 import { HttpClient } from "./client.js";
 import { Admin } from "./resources/admin.js";
 import { Agent } from "./resources/agent.js";
-import { Customers } from "./resources/customers.js";
+import { Customers, type JourneyOptions } from "./resources/customers.js";
 import { Drift } from "./resources/drift.js";
 import { Events } from "./resources/events.js";
 import { Foresight } from "./resources/foresight.js";
@@ -31,6 +31,7 @@ import type {
   ClientOptions,
   ContextResult,
   CustomerBrief,
+  CustomerJourney,
   QueryResult,
   Recommendations,
   SignalReport,
@@ -114,6 +115,11 @@ export class MemoryClient {
     return this.customers.brief(customerId, options);
   }
 
+  /** Shorthand for `customers.journey`: the customer's history as milestones. */
+  journey(customerId: string, options: JourneyOptions = {}): Promise<CustomerJourney> {
+    return this.customers.journey(customerId, options);
+  }
+
   /** Shorthand for `foresight.signals`. */
   signals(customerId: string): Promise<SignalReport> {
     return this.foresight.signals(customerId);
@@ -158,5 +164,6 @@ export {
 } from "./webhooks.js";
 export type { WebhookEventEnvelope } from "./webhooks.js";
 export type { Expectation } from "./resources/quality.js";
+export type { JourneyOptions } from "./resources/customers.js";
 export * from "./types.js";
 export default MemoryClient;

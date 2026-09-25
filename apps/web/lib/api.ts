@@ -70,6 +70,17 @@ interface RequestOptions {
 }
 
 export async function api<T>(path: string, options: RequestOptions = {}): Promise<T> {
+  const response = await send(path, options);
+  if (response.status === 204) return undefined as T;
+  return (await response.json()) as T;
+}
+
+/** The same request, read as text — for the routes that answer `?format=markdown`. */
+export async function apiText(path: string, options: RequestOptions = {}): Promise<string> {
+  return (await send(path, options)).text();
+}
+
+async function send(path: string, options: RequestOptions): Promise<Response> {
   const { method = "GET", body, query, auth = true, retryOnUnauthorized = true } = options;
   const url = new URL(API_URL + path);
   for (const [key, value] of Object.entries(query ?? {})) {
@@ -89,7 +100,7 @@ export async function api<T>(path: string, options: RequestOptions = {}): Promis
 
   if (response.status === 401 && auth && retryOnUnauthorized && tokenStore.refresh) {
     const refreshed = await refreshSession();
-    if (refreshed) return api<T>(path, { ...options, retryOnUnauthorized: false });
+    if (refreshed) return send(path, { ...options, retryOnUnauthorized: false });
   }
 
   if (!response.ok) {
@@ -100,22 +111,17 @@ export async function api<T>(path: string, options: RequestOptions = {}): Promis
       payload?.error?.code,
     );
   }
-
-  if (response.status === 204) return undefined as T;
-  return (await response.json()) as T;
+  return response;
 }
 
 async function refreshSession(): Promise<boolean> {
   try {
-    const tokens = await api<{ access_token: string; refresh_token: string }>(
-      "/v1/auth/refresh",
-      {
-        method: "POST",
-        body: { refresh_token: tokenStore.refresh },
-        auth: false,
-        retryOnUnauthorized: false,
-      },
-    );
+    const tokens = await api<{ access_token: string; refresh_token: string }>("/v1/auth/refresh", {
+      method: "POST",
+      body: { refresh_token: tokenStore.refresh },
+      auth: false,
+      retryOnUnauthorized: false,
+    });
     tokenStore.set(tokens);
     return true;
   } catch {

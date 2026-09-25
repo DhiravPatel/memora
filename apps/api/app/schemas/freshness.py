@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 
 FreshnessState = Literal["active", "aging", "stale", "outdated", "conflicted", "expired", "superseded"]
 DriftKind = Literal["channel", "plan", "usage", "quiet_problem"]
-DriftStatus = Literal["open", "confirmed", "dismissed", "cleared"]
+DriftStatus = Literal["open", "confirmed", "kept", "dismissed", "cleared"]
 
 
 class DriftRefOut(BaseModel):

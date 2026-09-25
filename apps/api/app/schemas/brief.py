@@ -39,18 +39,36 @@ class BriefPlanOut(BaseModel):
 
 
 class BriefTrackOut(BaseModel):
+    id: str | None = None
     track: str
     label: str
     state: str
     entered_at: datetime
     pinned: bool = False
-    reasons: list[str] = Field(default_factory=list)
+    reasons: list[str] = Field(default_factory=list, description="Why they entered the state, when they did")
+    reasons_now: list[str] | None = Field(
+        default=None,
+        description=(
+            "Why they are in it now: the entering transition's clauses that still hold, or — when"
+            " none does — what keeps them from the way out they are closest to. Null when a person"
+            " set the state or it is the initial one."
+        ),
+    )
+    holds: bool | None = Field(default=None, description="Whether the transition that brought them here would still fire")
+    held_by: str | None = Field(default=None, description="When it would not: the way out they are closest to")
+    moving_to: str | None = Field(
+        default=None, description="Nothing keeps them here and a way out would fire: the state the next refresh moves them to"
+    )
 
 
 class BriefSituationOut(BaseModel):
     health: BriefHealthOut
     plan: BriefPlanOut
     lifecycle: list[BriefTrackOut] = Field(default_factory=list)
+    why: list[str] = Field(
+        default_factory=list,
+        description="Why they are where they are: lifecycle reasons, what pulls health down, the risks seen.",
+    )
     open_problems: int = Field(description="Every open problem — a count, so whole even when some are withheld.")
     goals: dict[str, int] = Field(default_factory=dict, description="Goals by status: open, progressing, stalled, achieved.")
 
@@ -127,6 +145,20 @@ class BriefConversationOut(BaseModel):
     turn_count: int | None = None
 
 
+class BriefCareOut(BaseModel):
+    topic: str
+    detail: str
+    evidence: list[str] = Field(default_factory=list)
+
+
+class BriefEvidenceOut(BaseModel):
+    memories: list[str] = Field(default_factory=list)
+    goals: list[str] = Field(default_factory=list)
+    snapshots: list[str] = Field(default_factory=list)
+    states: list[str] = Field(default_factory=list)
+    drift: list[str] = Field(default_factory=list)
+
+
 class BriefDriftOut(BaseModel):
     id: str
     kind: str
@@ -148,6 +180,9 @@ class CustomerBriefOut(BaseModel):
     customer: BriefCustomerOut
     headline: str = Field(description="The situation in a few sentences.")
     situation: BriefSituationOut
+    cares_about: list[BriefCareOut] = Field(
+        default_factory=list, description="Their goals, then the products and features they talk about most."
+    )
     talking_points: list[str] = Field(default_factory=list, description="What to raise, most important first.")
     cautions: list[BriefCautionOut] = Field(default_factory=list, description="What not to do, and why.")
     open_issues: list[BriefIssueOut] = Field(default_factory=list)
@@ -168,6 +203,9 @@ class CustomerBriefOut(BaseModel):
         default_factory=list, description="More urgent recommendations a caution forbids, and which caution."
     )
     evidence: list[str] = Field(default_factory=list, description="Every memory and goal id the brief rests on.")
+    evidence_refs: BriefEvidenceOut = Field(
+        default_factory=BriefEvidenceOut, description="The evidence by kind: memories, goals, snapshots, states, drift flags."
+    )
     withheld: int = Field(default=0, description="Memories this caller may not see.")
     withheld_facts: list[str] = Field(default_factory=list, description="Facts shown without what came only from withheld memories.")
     generated_at: datetime

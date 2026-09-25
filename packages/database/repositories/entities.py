@@ -81,6 +81,23 @@ class EntityRepository(BaseRepository):
         )
         return list(result.scalars())
 
+    async def types_of(self, *, project_id: str, names: Sequence[str]) -> dict[str, str]:
+        """Normalised name → entity type, for the names given. Where one name is several
+        entities, a product, integration or feature wins: it is what a topic is."""
+        found: dict[str, str] = {}
+        wanted = sorted({normalize_name(name) for name in names if name and name.strip()})
+        for start in range(0, len(wanted), 500):
+            result = await self.session.execute(
+                select(Entity.normalized_name, Entity.type).where(
+                    Entity.project_id == project_id, Entity.normalized_name.in_(wanted[start : start + 500])
+                )
+            )
+            for name, kind in result.all():
+                kind = str(kind)
+                if name not in found or kind in ("integration", "product", "feature"):
+                    found[name] = kind
+        return found
+
     async def list(
         self,
         *,

@@ -6,7 +6,9 @@ import type {
   Customer,
   Customer360,
   CustomerBrief,
+  CustomerJourney,
   Memory,
+  Milestone,
   Page,
   TimelineEntry,
 } from "../types.js";
@@ -64,6 +66,82 @@ function toCaution(raw: any): BriefCaution {
   };
 }
 
+export interface JourneyOptions {
+  /** Only milestones from this moment: a span ("90d"), a date, "last_session", … */
+  since?: Date | string;
+  until?: Date | string;
+  categories?: Milestone["category"][];
+  /** 0.75 keeps the key moments. */
+  minImportance?: number;
+  limit?: number;
+}
+
+function journeyQuery(options: JourneyOptions): Record<string, string | number | undefined> {
+  return {
+    since: iso(options.since),
+    until: iso(options.until),
+    categories: options.categories?.length ? options.categories.join(",") : undefined,
+    min_importance: options.minImportance,
+    limit: options.limit ?? 100,
+  };
+}
+
+function toMilestone(raw: any): Milestone {
+  const health = raw.health;
+  return {
+    id: raw.id,
+    at: raw.at,
+    recordedAt: raw.recorded_at ?? null,
+    category: raw.category,
+    kind: raw.kind,
+    title: raw.title,
+    tone: raw.tone ?? "neutral",
+    importance: raw.importance ?? 0,
+    topics: raw.topics ?? [],
+    whatHappened: raw.what_happened ?? "",
+    whyItMatters: raw.why_it_matters ?? null,
+    memories: raw.memories ?? [],
+    health: health
+      ? {
+          before: health.before ?? null,
+          after: health.after ?? null,
+          delta: health.delta ?? null,
+          drivers: health.drivers ?? [],
+          snapshotId: health.snapshot_id ?? null,
+        }
+      : null,
+    transitions: raw.transitions ?? [],
+    evidence: {
+      memories: raw.evidence?.memories ?? [],
+      goals: raw.evidence?.goals ?? [],
+      events: raw.evidence?.events ?? [],
+      snapshots: raw.evidence?.snapshots ?? [],
+      states: raw.evidence?.states ?? [],
+    },
+    detail: raw.detail ?? {},
+  };
+}
+
+export function toJourney(raw: any): CustomerJourney {
+  return {
+    customerId: raw.customer_id,
+    customerSince: raw.customer_since ?? null,
+    summary: raw.summary ?? "",
+    milestones: (raw.milestones ?? []).map(toMilestone),
+    counts: raw.counts ?? {},
+    total: raw.total ?? 0,
+    truncated: Boolean(raw.truncated),
+    withheld: raw.withheld ?? 0,
+    window: {
+      since: raw.window?.since ?? null,
+      until: raw.window?.until,
+      basis: raw.window?.basis,
+      label: raw.window?.label,
+      note: raw.window?.note ?? null,
+    },
+  };
+}
+
 export function toBrief(raw: any): CustomerBrief {
   const situation = raw.situation ?? {};
   const health = situation.health ?? {};
@@ -102,10 +180,29 @@ export function toBrief(raw: any): CustomerBrief {
         enteredAt: track.entered_at,
         pinned: Boolean(track.pinned),
         reasons: track.reasons ?? [],
+        reasonsNow: track.reasons_now ?? null,
+        holds: track.holds ?? null,
+        heldBy: track.held_by ?? null,
+        movingTo: track.moving_to ?? null,
       })),
       openProblems: situation.open_problems ?? 0,
       goals: situation.goals ?? {},
+      why: situation.why ?? [],
     },
+    caresAbout: raw.cares_about ?? [],
+    evidenceRefs: {
+      memories: raw.evidence_refs?.memories ?? [],
+      goals: raw.evidence_refs?.goals ?? [],
+      snapshots: raw.evidence_refs?.snapshots ?? [],
+      states: raw.evidence_refs?.states ?? [],
+      drift: raw.evidence_refs?.drift ?? [],
+    },
+    drift: (raw.drift ?? []).map((flag: any) => ({
+      id: flag.id,
+      kind: flag.kind,
+      summary: flag.summary,
+      memoryId: flag.memory_id,
+    })),
     talkingPoints: raw.talking_points ?? [],
     cautions: (raw.cautions ?? []).map(toCaution),
     openIssues: (raw.open_issues ?? []).map((issue: any) => ({
@@ -214,6 +311,28 @@ export class Customers {
         agent: options.agent,
         format: "markdown",
       },
+    });
+  }
+
+  /** The customer's journey as milestones, not rows (§26 6.6): where it began, first uses,
+   * problems and their repeats, plan changes, goals, health crossing a band, lifecycle moves,
+   * silences and returns — oldest first, each with what it did to health and the lifecycle.
+   * The whole history by default. */
+  async journey(customerId: string, options: JourneyOptions = {}): Promise<CustomerJourney> {
+    const raw = await this.http.request<any>({
+      method: "GET",
+      path: `/v1/customers/${encodeURIComponent(customerId)}/journey`,
+      query: journeyQuery(options),
+    });
+    return toJourney(raw);
+  }
+
+  /** The journey as a Markdown page, grouped by month. */
+  journeyMarkdown(customerId: string, options: JourneyOptions = {}): Promise<string> {
+    return this.http.request<string>({
+      method: "GET",
+      path: `/v1/customers/${encodeURIComponent(customerId)}/journey`,
+      query: { ...journeyQuery(options), format: "markdown" },
     });
   }
 

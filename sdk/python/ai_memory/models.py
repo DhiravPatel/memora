@@ -123,6 +123,7 @@ class Change:
     reasons: list[str] = field(default_factory=list)
     detail: dict[str, Any] = field(default_factory=dict)
     importance: float = 0.0
+    topics: list[str] = field(default_factory=list)
 
     @classmethod
     def from_api(cls, data: dict[str, Any]) -> Change:
@@ -139,7 +140,100 @@ class Change:
             reasons=list(data.get("reasons") or []),
             detail=dict(data.get("detail") or {}),
             importance=float(data.get("importance") or 0.0),
+            topics=list(data.get("topics") or []),
         )
+
+
+@dataclass(slots=True)
+class Milestone:
+    """One moment in a customer's journey that changed something (§26 6.6).
+
+    ``at`` is when it happened — the time of the event behind it; ``recorded_at`` is set when
+    Memora recorded it a day or more later (imported history). Expanded, it answers what
+    happened (``what_happened``), why it mattered (``why_it_matters``), which memories
+    changed (``memories``), what happened to health (``health``) and which lifecycle
+    transitions followed (``transitions``).
+    """
+
+    id: str
+    at: str
+    category: str  # account | usage | problem | plan | intent | preference | goal | health | lifecycle | activity | feedback | relationship
+    kind: str
+    title: str
+    tone: str  # positive | negative | neutral
+    importance: float
+    what_happened: str
+    why_it_matters: str | None = None
+    recorded_at: str | None = None
+    topics: list[str] = field(default_factory=list)
+    memories: list[dict[str, Any]] = field(default_factory=list)
+    health: dict[str, Any] | None = None
+    transitions: list[dict[str, Any]] = field(default_factory=list)
+    evidence: dict[str, list[str]] = field(default_factory=dict)
+    detail: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_api(cls, data: dict[str, Any]) -> Milestone:
+        return cls(
+            id=data["id"],
+            at=data.get("at", ""),
+            category=data.get("category", ""),
+            kind=data.get("kind", ""),
+            title=data.get("title", ""),
+            tone=data.get("tone", "neutral"),
+            importance=float(data.get("importance") or 0.0),
+            what_happened=data.get("what_happened", ""),
+            why_it_matters=data.get("why_it_matters"),
+            recorded_at=data.get("recorded_at"),
+            topics=list(data.get("topics") or []),
+            memories=list(data.get("memories") or []),
+            health=data.get("health"),
+            transitions=list(data.get("transitions") or []),
+            evidence={name: list(ids or []) for name, ids in (data.get("evidence") or {}).items()},
+            detail=dict(data.get("detail") or {}),
+        )
+
+    @property
+    def health_delta(self) -> float | None:
+        """How far health moved with it, in points — ``None`` when nothing was measured."""
+        return (self.health or {}).get("delta")
+
+
+@dataclass(slots=True)
+class CustomerJourney:
+    """A customer's history as milestones, oldest first — where it began, first uses,
+    problems and their repeats, plan changes, goals, health crossing a band, lifecycle
+    moves, silences and returns."""
+
+    customer_id: str
+    summary: str
+    milestones: list[Milestone]
+    customer_since: str | None = None
+    counts: dict[str, int] = field(default_factory=dict)
+    total: int = 0
+    truncated: bool = False
+    withheld: int = 0
+    window: dict[str, Any] = field(default_factory=dict)
+    raw: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_api(cls, data: dict[str, Any]) -> CustomerJourney:
+        return cls(
+            customer_id=data.get("customer_id", ""),
+            summary=data.get("summary", ""),
+            milestones=[Milestone.from_api(item) for item in data.get("milestones") or []],
+            customer_since=data.get("customer_since"),
+            counts=dict(data.get("counts") or {}),
+            total=int(data.get("total") or 0),
+            truncated=bool(data.get("truncated", False)),
+            withheld=int(data.get("withheld") or 0),
+            window=dict(data.get("window") or {}),
+            raw=data,
+        )
+
+    def of(self, *categories: str) -> list[Milestone]:
+        """The milestones in these categories: ``journey.of("problem", "plan")``."""
+        return [milestone for milestone in self.milestones if milestone.category in categories]
 
 
 @dataclass(slots=True)
@@ -249,6 +343,16 @@ class CustomerBrief:
     withheld_facts: list[str] = field(default_factory=list)
     generated_at: str | None = None
     raw: dict[str, Any] = field(default_factory=dict)
+    cares_about: list[dict[str, Any]] = field(default_factory=list)
+    evidence_refs: dict[str, list[str]] = field(default_factory=dict)
+    drift: list[dict[str, Any]] = field(default_factory=list)
+
+    @property
+    def why(self) -> list[str]:
+        """Why they are where they are *now*: the lifecycle reasons that still hold (each
+        track's ``reasons_now``; ``reasons`` is why they entered), what pulls health down,
+        risks."""
+        return list((self.situation or {}).get("why") or [])
 
     @property
     def health_score(self) -> float | None:
@@ -302,6 +406,9 @@ class CustomerBrief:
             withheld_facts=list(data.get("withheld_facts") or []),
             generated_at=data.get("generated_at"),
             raw=data,
+            cares_about=list(data.get("cares_about") or []),
+            evidence_refs=dict(data.get("evidence_refs") or {}),
+            drift=list(data.get("drift") or []),
         )
 
 
@@ -479,11 +586,12 @@ class Freshness:
 @dataclass(slots=True)
 class DriftFlag:
     """Evidence that a standing memory may be out of date (§26 5.5). A flag, never a change:
-    ``confirm_drift`` writes the change, ``dismiss_drift`` keeps the memory."""
+    ``confirm_drift`` writes the change, ``keep_drift`` vouches for the memory (confirming
+    it), ``dismiss_drift`` sets the evidence aside and leaves the memory as it was."""
 
     id: str
     kind: str  # channel | plan | usage | quiet_problem
-    status: str  # open | confirmed | dismissed | cleared
+    status: str  # open | confirmed | kept | dismissed | cleared
     stated: str
     summary: str
     observed: str | None = None

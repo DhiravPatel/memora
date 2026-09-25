@@ -7,7 +7,10 @@ mentions cancelling is worth more still.
 
 from __future__ import annotations
 
+import re
+from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Any
 
 from nlp.lexicon import (
     CHURN_WORDS,
@@ -119,3 +122,61 @@ def analyze(text: str) -> Sentiment:
         exclamations=exclamations,
         shouted=shouted,
     )
+
+
+# ------------------------------------------------------------------ feedback
+
+# A score's band, as the NPS/CSAT template writes it: "a satisfaction score of 4 (detractor)".
+_BAND = re.compile(r"\((detractor|passive|promoter)\)", re.IGNORECASE)
+_TONE_OF_BAND = {"detractor": "negative", "passive": "neutral", "promoter": "positive"}
+# The fact document's line between mild and neutral (§26 1.1).
+TONE_THRESHOLD = 0.1
+
+
+def feedback_band(content: str, attributes: Mapping[str, Any] | None = None) -> str | None:
+    """detractor, passive or promoter, when the feedback is a score — from the band the
+    template recorded, or the words it wrote for memories made before the band was kept."""
+    band = (attributes or {}).get("band")
+    if isinstance(band, str) and band.lower() in _TONE_OF_BAND:
+        return band.lower()
+    match = _BAND.search(content or "")
+    return match.group(1).lower() if match else None
+
+
+def feedback_polarity(content: str, attributes: Mapping[str, Any] | None = None) -> float:
+    """The sentiment recorded when the feedback was extracted — or, for a memory that has
+    none, the sentiment of its own words."""
+    sentiment = (attributes or {}).get("sentiment")
+    if isinstance(sentiment, Mapping) and sentiment.get("polarity") is not None:
+        try:
+            return float(sentiment["polarity"])
+        except (TypeError, ValueError):
+            pass
+    return analyze(content or "").polarity
+
+
+def feedback_tone(content: str, attributes: Mapping[str, Any] | None = None) -> str:
+    """negative, positive or neutral — one answer for health, the fact document, "what
+    changed" and the journey. A score says it through its band (a 4 is a detractor
+    whatever the sentence around it); anything else through its sentiment."""
+    band = feedback_band(content, attributes)
+    if band is not None:
+        return _TONE_OF_BAND[band]
+    polarity = feedback_polarity(content, attributes)
+    if polarity < -TONE_THRESHOLD:
+        return "negative"
+    if polarity > TONE_THRESHOLD:
+        return "positive"
+    return "neutral"
+
+
+def feedback_strength(content: str, attributes: Mapping[str, Any] | None = None) -> float:
+    """How strongly it was said, 0..1: a detractor's or promoter's score is as strong as
+    feedback gets; words are as strong as their sentiment."""
+    band = feedback_band(content, attributes)
+    if band in ("detractor", "promoter"):
+        return 1.0
+    if band == "passive":
+        return 0.0
+    return min(1.0, abs(feedback_polarity(content, attributes)))
+

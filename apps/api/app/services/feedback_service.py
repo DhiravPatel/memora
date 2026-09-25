@@ -93,14 +93,15 @@ class FeedbackService:
             raise ValidationError(f"Unknown verdict '{verdict}'.")
 
         # A person acting on the memory itself settles any drift flag on it (§26 5.5):
-        # confirming it says the memory still stands; rejecting or correcting it retires it.
+        # confirming it says the memory still stands (kept); rejecting or correcting it
+        # retires the memory, and with it the question (cleared).
         from app.services.drift_service import DriftService
-        from database.repositories.drift import CLEARED, DISMISSED
+        from database.repositories.drift import CLEARED, KEPT
 
         await DriftService(self.session).settle_for_memory(
             project=project,
             memory=memory,
-            status=DISMISSED if verdict == "confirm" else CLEARED,
+            status=KEPT if verdict == "confirm" else CLEARED,
             note=f"A person {'confirmed' if verdict == 'confirm' else verdict + 'ed'} the memory.",
             actor_type=actor_type,
             actor_id=actor_id,

@@ -62,6 +62,8 @@ _KEPT_ATTRIBUTES = frozenset(
     {
         "cues", "resolved", "quoted", "sentiment", "measurements", "channels",
         "plan", "previous_plan", "direction", "feature", "integration", "product",
+        # A score and its band (NPS/CSAT): what the feedback's tone is read from.
+        "score", "band",
     }
 )
 # A memory stands for every statement it absorbed, not only its newest wording. A new report

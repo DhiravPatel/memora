@@ -56,7 +56,7 @@ export class Drift {
   async list(
     options: {
       customerId?: string;
-      status?: "open" | "confirmed" | "dismissed" | "cleared" | "all";
+      status?: "open" | "confirmed" | "kept" | "dismissed" | "cleared" | "all";
       kind?: DriftFlag["kind"];
       limit?: number;
       offset?: number;
@@ -96,7 +96,18 @@ export class Drift {
     );
   }
 
-  /** The memory still holds: keep it, and count only evidence newer than now. */
+  /** The memory still holds and you vouch for it: it is confirmed, and its flags settled. */
+  async keep(driftId: string, options: { note?: string } = {}): Promise<DriftFlag> {
+    return toDrift(
+      await this.http.request<any>({
+        method: "POST",
+        path: `/v1/drift/${encodeURIComponent(driftId)}/keep`,
+        body: { note: options.note ?? null },
+      }),
+    );
+  }
+
+  /** Not on this evidence: keep the memory as it is, and count only newer evidence. */
   async dismiss(driftId: string, options: { note?: string } = {}): Promise<DriftFlag> {
     return toDrift(
       await this.http.request<any>({

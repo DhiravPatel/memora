@@ -41,7 +41,9 @@ from memory_engine.policy import WITHHELD
 from memory_engine.reasons import reasons as reasons_in_words
 from memory_engine.reasons import sentence
 from memory_engine.snapshots import TRACKED
+from memory_engine.topics import topics_of
 from nlp.intents import intent_kinds
+from nlp.sentiment import feedback_band, feedback_strength, feedback_tone
 
 # How much a change matters, for ordering by importance and for the summary.
 _IMPORTANCE = {
@@ -115,6 +117,9 @@ class Change:
     # ``before`` quotes. Neither is shown; both are for :func:`shape`.
     subject: str | None = None
     before_id: str | None = None
+    # What it is about — the products, integrations and features its memory names
+    # ("Shopify") — so a reader can group changes by topic.
+    topics: list[str] = field(default_factory=list)
 
     @property
     def importance(self) -> float:
@@ -137,6 +142,7 @@ class Change:
             "reasons": self.reasons,
             "detail": self.detail,
             "importance": round(self.importance, 2),
+            "topics": list(self.topics),
         }
 
 
@@ -176,6 +182,9 @@ class ChangeInputs:
     # Drift flags raised in the window (§26 5.5): evidence that a standing memory may be out
     # of date. What a confirmation changed is a memory change of its own.
     drift: Sequence[Any] = ()
+    # Normalised entity name → its type in the graph: only products, integrations and
+    # features are topics (:mod:`memory_engine.topics`). Empty: every name is.
+    topic_types: dict[str, str] = field(default_factory=dict)
 
 
 def detect(inputs: ChangeInputs) -> list[Change]:
@@ -190,8 +199,22 @@ def detect(inputs: ChangeInputs) -> list[Change]:
     found.extend(_from_signals(inputs))
     found.extend(_from_activity(inputs))
     found.extend(_from_drift(inputs))
+    _name_topics(found, inputs)
     found.sort(key=lambda change: change.detected_at, reverse=True)
     return found
+
+
+def _name_topics(changes: list[Change], inputs: ChangeInputs) -> None:
+    """Each change about a memory takes the entities that memory names."""
+    rows = [*inputs.memories, *inputs.related.values(), *(memory for _, memory in inputs.versions)]
+    named: dict[str, list[str]] = {}
+    for memory in rows:
+        found = topics_of(memory, inputs.topic_types)
+        if found:
+            named[memory.id] = found
+    for change in changes:
+        if not change.topics and change.subject in named:
+            change.topics = named[change.subject]
 
 
 # Details derived from the *before* record, withheld with it.
@@ -351,17 +374,27 @@ def _subscription_change(memory: Any, prior: Any | None, when: datetime) -> Chan
     )
 
 
+# The same reading of a plan change, for the journey (§26 6.6).
+subscription_change = _subscription_change
+
+
 def _from_feedback(inputs: ChangeInputs) -> Iterable[Change]:
     feedback = [memory for memory in inputs.memories if str(memory.type) == "feedback"]
     # Strong feedback is quoted: "terrible support experience" is a change a person wants
     # to see in the customer's words. Mild feedback only counts toward the trend.
     strong = sorted(
-        (memory for memory in feedback if abs(polarity(memory)) >= STRONG_FEEDBACK),
+        (
+            memory
+            for memory in feedback
+            if feedback_strength(memory.content, _meta(memory)) >= STRONG_FEEDBACK
+            and feedback_tone(memory.content, _meta(memory)) != "neutral"
+        ),
         key=lambda memory: ensure_utc(memory.first_seen_at),
         reverse=True,
     )[:FEEDBACK_QUOTES]
     for memory in strong:
-        negative = polarity(memory) < 0
+        negative = feedback_tone(memory.content, _meta(memory)) == "negative"
+        band = feedback_band(memory.content, _meta(memory))
         yield Change(
             "feedback",
             "negative" if negative else "positive",
@@ -369,7 +402,7 @@ def _from_feedback(inputs: ChangeInputs) -> Iterable[Change]:
             ensure_utc(memory.first_seen_at),
             after=memory.content,
             evidence=[memory.id],
-            detail={"polarity": round(polarity(memory), 2)},
+            detail={"polarity": round(polarity(memory), 2), **({"band": band} if band else {})},
             subject=memory.id,
         )
 
@@ -499,20 +532,26 @@ def _from_states(inputs: ChangeInputs) -> Iterable[Change]:
     return moves
 
 
+def _same_refresh(row: Any, other: Any) -> bool:
+    """Whether two stays were entered by one refresh: they share its snapshot — or, for
+    stays recorded before stays were tied to snapshots, were written within a second. Time
+    alone misleads when events arrive in a burst (an import), a refresh a millisecond apart."""
+    mine, theirs = getattr(row, "snapshot_id", None), getattr(other, "snapshot_id", None)
+    if mine and theirs:
+        return mine == theirs
+    return abs((ensure_utc(row.entered_at) - ensure_utc(other.entered_at)).total_seconds()) <= PLACEMENT_SECONDS
+
+
 def _state_moves(inputs: ChangeInputs) -> Iterable[Change]:
-    placed: dict[str, datetime] = {}
+    placed: dict[str, Any] = {}
     for row, _ in inputs.states:
         if not row.previous_state:
-            placed[getattr(row, "track", None) or "lifecycle"] = ensure_utc(row.entered_at)
+            placed[getattr(row, "track", None) or "lifecycle"] = row
     for row, evaluation in inputs.states:
         track = getattr(row, "track", None) or "lifecycle"
         if not row.previous_state:
             continue
-        if (
-            str(row.source) == "auto"
-            and track in placed
-            and abs((ensure_utc(row.entered_at) - placed[track]).total_seconds()) <= PLACEMENT_SECONDS
-        ):
+        if str(row.source) == "auto" and track in placed and _same_refresh(row, placed[track]):
             continue
         label = inputs.track_labels.get(track, _words(track).title())
         manual = str(row.source) == "manual"

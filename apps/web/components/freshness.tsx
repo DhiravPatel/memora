@@ -60,7 +60,7 @@ export function FreshnessBadge({
 function useDriftActions(projectId: string | null) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (input: { flag: DriftFlag; verdict: "confirm" | "dismiss"; note: string }) =>
+    mutationFn: (input: { flag: DriftFlag; verdict: DriftVerdict; note: string }) =>
       api<DriftFlag>(`/v1/projects/${projectId}/drift/${input.flag.id}/${input.verdict}`, {
         method: "POST",
         body: { note: input.note || null },
@@ -80,14 +80,47 @@ function useDriftActions(projectId: string | null) {
   });
 }
 
-const CONFIRM_WORDS: Record<string, string> = {
-  channel: "Update the preference",
-  plan: "Update the plan",
-  usage: "They stopped using it",
-  quiet_problem: "It is resolved",
-};
+type DriftVerdict = "confirm" | "keep" | "dismiss";
 
-/** One flag: what the memory says, what the evidence says, and the two things a person can do. */
+function titled(value: string | null | undefined): string {
+  if (!value) return "";
+  return value.charAt(0).toUpperCase() + value.slice(1);
+}
+
+/** The three decisions, in the words of the flag: "Confirm WhatsApp", "Keep email", "Dismiss". */
+function driftChoices(
+  flag: DriftFlag,
+): { verdict: DriftVerdict; label: string; title: string }[] {
+  // Channels arrive as people write them ("WhatsApp", "email"); plans arrive lowercase.
+  const [confirm, keep] =
+    flag.kind === "channel"
+      ? [`Confirm ${flag.observed || "the change"}`, `Keep ${flag.stated}`]
+      : flag.kind === "plan"
+        ? [`Confirm ${titled(flag.observed) || "the change"}`, `Keep ${titled(flag.stated)}`]
+        : flag.kind === "usage"
+          ? ["They stopped using it", "They still use it"]
+          : ["It is resolved", "Still a problem"];
+  return [
+    {
+      verdict: "confirm",
+      label: confirm,
+      title: "The evidence is right: write the change; the old memory is kept as history",
+    },
+    {
+      verdict: "keep",
+      label: keep,
+      title: "The memory is right: confirm it (more confidence, new evidence); counting restarts",
+    },
+    {
+      verdict: "dismiss",
+      label: "Dismiss",
+      title:
+        "Not on this evidence: leave the memory as it is; only newer evidence raises this again",
+    },
+  ];
+}
+
+/** One flag: what the memory says, what the evidence says, and the three things a person can do. */
 function DriftRow({
   flag,
   projectId,
@@ -143,23 +176,25 @@ function DriftRow({
             placeholder="Note (optional)"
             className="h-7 w-56 text-[11px]"
           />
-          <Button
-            size="sm"
-            loading={act.isPending && act.variables?.verdict === "confirm"}
-            onClick={() => act.mutate({ flag, verdict: "confirm", note })}
-            title="Write the change the evidence points to; the old memory is kept as history"
-          >
-            {CONFIRM_WORDS[flag.kind] ?? "Confirm"}
-          </Button>
-          <Button
-            size="sm"
-            variant="outline"
-            loading={act.isPending && act.variables?.verdict === "dismiss"}
-            onClick={() => act.mutate({ flag, verdict: "dismiss", note })}
-            title="Keep the memory; only newer evidence will raise this again"
-          >
-            Keep the memory
-          </Button>
+          {driftChoices(flag).map((choice) => (
+            <Button
+              key={choice.verdict}
+              size="sm"
+              variant={
+                choice.verdict === "confirm"
+                  ? "primary"
+                  : choice.verdict === "keep"
+                    ? "outline"
+                    : "ghost"
+              }
+              disabled={act.isPending && act.variables?.verdict !== choice.verdict}
+              loading={act.isPending && act.variables?.verdict === choice.verdict}
+              onClick={() => act.mutate({ flag, verdict: choice.verdict, note })}
+              title={choice.title}
+            >
+              {choice.label}
+            </Button>
+          ))}
         </div>
       ) : (
         <p className="text-xs text-muted-foreground">
@@ -212,7 +247,7 @@ export function DriftQueue({
               onChange={(event) => setStatus(event.target.value)}
               className="w-32"
             >
-              {["open", "confirmed", "dismissed", "cleared", "all"].map((value) => (
+              {["open", "confirmed", "kept", "dismissed", "cleared", "all"].map((value) => (
                 <option key={value} value={value}>
                   {value}
                 </option>

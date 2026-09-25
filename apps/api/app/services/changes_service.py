@@ -44,7 +44,9 @@ from database.repositories import (
     AgentSessionRepository,
     CustomerSnapshotRepository,
     CustomerStateRepository,
+    CustomerViewRepository,
     DriftRepository,
+    EntityRepository,
     EventRepository,
     GoalRepository,
     MemoryRepository,
@@ -151,7 +153,10 @@ class ChangesService:
         since: str | None,
         until: str | None = None,
         agent: str | None = None,
+        viewer: tuple[str, str] | None = None,
     ) -> Window:
+        """``viewer`` is (``user`` or ``api_key``, id), for ``last_view``: since this person or
+        key last looked at the customer."""
         now = utcnow()
         end, live, end_label = await self._until(project, customer, until, now)
         text = (since or "").strip().lower()
@@ -170,6 +175,16 @@ class ChangesService:
                 who = f" with {session.agent}" if agent else ""
                 return Window(moment, end, "last_session", session.id, f"Since the last conversation{who} ({_day(moment)})", live=live)
             return self._fallback(end, live, end_label, "last_session", "No earlier conversation with this customer")
+
+        if text in ("last_view", "last_look"):
+            looked = None
+            if viewer is not None:
+                looked = await CustomerViewRepository(self.session).last_look(
+                    customer_id=customer.id, viewer_type=viewer[0], viewer_id=viewer[1], now=now
+                )
+            if looked is not None and looked < end:
+                return Window(looked, end, "last_view", None, f"Since you last looked ({_day(looked)})", live=live)
+            return self._fallback(end, live, end_label, "last_view", "You have not looked at this customer before")
 
         if text == "last_run":
             runs, _ = await QueryLogRepository(self.session).runs(
@@ -190,7 +205,7 @@ class ChangesService:
         if moment is None:
             raise ValidationError(
                 "'since' is a span such as 7d, 12h, 2w or 3mo, an ISO time, a snapshot id, "
-                "'last_session' or 'last_run'."
+                "'last_session', 'last_run' or 'last_view'."
             )
         if moment >= end:
             raise ValidationError("'since' must be before 'until'.")
@@ -448,6 +463,16 @@ class ChangesService:
             events_now=await self.events.count_between(**scope, since=since, until=until),
             events_before=await self.events.count_between(**scope, since=since - window.span, until=since),
             drift=await DriftRepository(self.session).detected_between(**scope, since=since, until=until),
+            topic_types=await EntityRepository(self.session).types_of(
+                project_id=project.id,
+                names=sorted(
+                    {
+                        str(name)
+                        for memory in [*memories, *related.values(), *(row for _, row in versions)]
+                        for name in (memory.meta or {}).get("entity_names") or []
+                    }
+                ),
+            ),
             customer_since=min(
                 (moment for moment in (customer.created_at, await self.events.first_occurred_at(**scope)) if moment),
                 key=ensure_utc,

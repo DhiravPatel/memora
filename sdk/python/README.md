@@ -37,11 +37,17 @@ if brief.forbids("offer_upgrade"):              # the guardrails' own verdict, f
     print(brief.caution_for("offer_upgrade").text)
 prompt = memory.brief_markdown("cus_123")        # the same brief as a page, for a system prompt
 
+# How they got here — milestones, not rows, each with what it did to health and the lifecycle
+for step in memory.journey("cus_123", min_importance=0.75).milestones:
+    print(step.at[:10], step.title)  # "2026-09-05 First Shopify problem"
+page = memory.journey_markdown("cus_123")         # the same journey as a page, by month
+
 # What may be out of date — a stated channel they no longer use, a plan billing disagrees with
 for flag in memory.drift("cus_123"):
     print(flag.kind, flag.summary)        # "They said they prefer email on 8 Mar; since then 12 of …"
-    memory.confirm_drift(flag.id)          # write the change (the old memory is kept as history)
-    # …or memory.dismiss_drift(flag.id) to keep the memory; only newer evidence raises it again
+    memory.confirm_drift(flag.id)          # "Confirm WhatsApp": write the change (the old memory is kept as history)
+    # …or memory.keep_drift(flag.id)       # "Keep email": vouch for the memory — confirmed, counting restarts
+    # …or memory.dismiss_drift(flag.id)    # set this evidence aside; only newer evidence raises it again
 print(memory.freshness("cus_123")["counts"])  # {"active": 14, "aging": 3, "stale": 2, "outdated": 1, …}
 
 # Everything worth knowing, in one call — what an agent reads before it replies

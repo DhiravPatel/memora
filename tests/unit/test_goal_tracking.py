@@ -148,6 +148,31 @@ def test_unrelated_news_moves_nothing():
     assert decide(goal(last_signal_days_ago=1), memories=[unrelated], now=NOW) is None
 
 
+def test_every_memory_saying_the_customer_is_not_evidence_for_every_goal():
+    """Stored memories are in the third person; "the customer" matched them all to every goal."""
+    stated = "The customer's goal is launch automation."
+    assert keywords_for(stated) == ("launch", "automation")
+    view = goal(statement=stated, opened_days_ago=5)
+    downgrade = memory("m_down", MemoryType.SUBSCRIPTION, "The customer downgraded from the Pro plan to the Starter plan.")
+    assert overlap(view.keywords, downgrade.content) == 0.0
+    assert decide(view, memories=[downgrade], now=NOW) is None
+
+
+def test_a_cue_is_a_whole_word_not_part_of_one():
+    """"done" lemmatises to "do", which "downgraded" and "download" begin with; and the
+    goal's own "launch" is not the cue "launched"."""
+    view = goal(statement="We want to launch the automation download.", opened_days_ago=5)
+    for text in (
+        "The automation download launch documentation was updated.",
+        "The automation download launch is delayed.",
+    ):
+        moved = decide(view, memories=[memory("m1", MemoryType.FACT, text)], now=NOW)
+        assert moved is None or moved.status is not GoalStatus.ACHIEVED, text
+    for text in ("The automation download launch is done.", "We launched the automation download."):
+        finished = decide(view, memories=[memory("m2", MemoryType.FACT, text)], now=NOW)
+        assert finished is not None and finished.status is GoalStatus.ACHIEVED, text
+
+
 def test_evidence_from_before_the_goal_was_stated_is_ignored():
     """Last month's "we finished the rollout" cannot close a goal set this week."""
     earlier = memory("mem_2", MemoryType.BEHAVIOR, "SSO is live for the sales team", age_days=90)

@@ -15,7 +15,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from tests.conftest import database_required, run_job, run_worker
 
 from app.main import create_app
@@ -321,7 +321,7 @@ def test_feedback_on_the_memory_settles_its_flags(client, world):
     )
     assert confirmed.status_code == 200, confirmed.text
     settled = client.get(f"/v1/drift/{world['salary_flag']}", headers=h(world)).json()
-    assert settled["status"] == "dismissed" and settled["note"] == "A person confirmed the memory."
+    assert settled["status"] == "kept" and settled["note"] == "A person confirmed the memory."
     memory = client.get(f"/v1/memories/{salary['memory']['id']}", headers=h(world)).json()
     assert memory["freshness"]["state"] == "active", "a person vouching for it is new evidence"
 
@@ -344,9 +344,10 @@ def test_a_restatement_clears_the_flag(client, world):
 
 def test_the_dashboard_and_the_quality_report(client, world):
     everything = client.get(f"{world['base']}/drift", params={"status": "all"}, headers=world["auth"]).json()
-    # Three confirmed, two dismissed (the habit, and the problem a person vouched for), one cleared.
+    # Three confirmed, one dismissed (the habit), one kept (the problem a person vouched for),
+    # one cleared.
     assert sorted(flag["status"] for flag in everything["data"]) == [
-        "cleared", "confirmed", "confirmed", "confirmed", "dismissed", "dismissed",
+        "cleared", "confirmed", "confirmed", "confirmed", "dismissed", "kept",
     ]
     assert everything == client.get("/v1/drift", params={"status": "all"}, headers=h(world)).json()
     report = client.get(f"{world['base']}/customers/acme/freshness", headers=world["auth"]).json()
@@ -355,7 +356,7 @@ def test_the_dashboard_and_the_quality_report(client, world):
     memories = quality["metrics"]["memories"]
     assert set(memories["freshness"]) == {"active", "aging", "stale", "outdated", "conflicted"}
     assert memories["drift_open"] == 0
-    assert memories["drift_resolved"] == {"confirmed": 3, "dismissed": 2, "cleared": 1}
+    assert memories["drift_resolved"] == {"confirmed": 3, "kept": 1, "dismissed": 1, "cleared": 1}
     component = next(item for item in quality["components"] if item["key"] == "freshness")
     assert component["detail"] == "Share of standing memories within their type's freshness window."
 
@@ -409,3 +410,62 @@ def test_a_memory_past_its_expiry_is_expired_before_the_sweep(client, world, eng
     assert "cancellation" not in after["intents.kinds"]
     brief = client.get("/v1/customers/initech/brief", headers=h(world)).json()
     assert "said they may cancel" not in brief["headline"]
+
+
+def opened_on_whatsapp(client, world, customer: str) -> dict:
+    """A customer who said email forty days ago and has reached out on WhatsApp five times."""
+    now = datetime.now(UTC)
+    client.post("/v1/customers", json={"external_id": customer, "name": customer.title()}, headers=h(world))
+    send(client, world, "preferences_updated", {"message": "We prefer email."}, at=now - timedelta(days=40), customer=customer)
+    for day in range(5):
+        send(client, world, "whatsapp_message", {"message": "Hello?"}, at=now - timedelta(days=10 - day), customer=customer)
+    opened = client.get("/v1/drift", params={"customer_id": customer}, headers=h(world)).json()["data"]
+    assert [(flag["kind"], flag["stated"], flag["observed"]) for flag in opened] == [("channel", "email", "WhatsApp")]
+    return opened[0]
+
+
+def test_keeping_the_memory_vouches_for_it(client, world):
+    flag = opened_on_whatsapp(client, world, "initech")
+    before = client.get(f"/v1/memories/{flag['memory']['id']}", headers=h(world)).json()
+    assert before["freshness"]["state"] == "outdated"
+
+    kept = client.post(f"/v1/drift/{flag['id']}/keep", json={"note": "They confirmed email on a call."}, headers=h(world))
+    assert kept.status_code == 200, kept.text
+    body = kept.json()
+    assert body["status"] == "kept" and body["note"] == "They confirmed email on a call."
+    assert body["resolved_by_type"] == "api_key" and body["replacement_memory_id"] is None
+    memory = client.get(f"/v1/memories/{flag['memory']['id']}", headers=h(world)).json()
+    assert memory["status"] == "active" and memory["content"] == "The customer prefers email."
+    assert memory["confidence"] > before["confidence"], "vouching for it raises confidence"
+    assert memory["freshness"]["state"] == "active", "and is new evidence"
+    facts = client.get("/v1/customers/initech/facts", headers=h(world)).json()["values"]
+    assert facts["preferences.channel"] == "email" and facts["preferences.channel_outdated"] is False
+
+    run = client.post("/v1/customers/initech/drift/refresh", headers=h(world)).json()
+    assert run["open"] == [], "only contacts after the decision count"
+    assert client.post(f"/v1/drift/{flag['id']}/keep", json={}, headers=h(world)).status_code == 409
+    listed = client.get("/v1/drift", params={"customer_id": "initech", "status": "kept"}, headers=h(world)).json()["data"]
+    assert [item["id"] for item in listed] == [flag["id"]]
+    resolved = [item for item in deliveries(client, world, "memory.drift_resolved") if item["drift"]["id"] == flag["id"]]
+    assert [item["drift"]["status"] for item in resolved] == ["kept"], "one delivery, saying what happened"
+
+
+def test_a_flag_whose_memory_is_gone_is_cleared_not_decided(client, world, engine):
+    flag = opened_on_whatsapp(client, world, "hooli")
+    with engine.begin() as connection:
+        connection.execute(
+            text("UPDATE memories SET expires_at = now() - interval '1 hour' WHERE id = :id"), {"id": flag["memory"]["id"]}
+        )
+    for verdict, route in (("keep", f"{world['base']}/drift/{flag['id']}/keep"), ("confirm", f"/v1/drift/{flag['id']}/confirm")):
+        headers = world["auth"] if route.startswith(world["base"]) else h(world)
+        response = client.post(route, json={}, headers=headers)
+        if verdict == "keep":
+            assert response.status_code == 200, response.text
+            body = response.json()
+            assert body["status"] == "cleared" and body["resolved_by_type"] == "system"
+            assert body["note"] == "The memory it was about is no longer standing."
+            assert body["replacement_memory_id"] is None
+        else:
+            assert response.status_code == 409, "the clearing was kept, not rolled back"
+    stored = client.get(f"/v1/drift/{flag['id']}", headers=h(world)).json()
+    assert stored["status"] == "cleared"

@@ -160,6 +160,11 @@ def test_the_brief_leads_with_what_matters(client, world):
     assert points[-1] == "They prefer email."
 
     situation = body["situation"]
+    assert "said they may cancel" in situation["why"] and len(situation["why"]) <= 5
+    assert any("open problems" in reason for reason in situation["why"])
+    refs = body["evidence_refs"]
+    assert refs["snapshots"] and refs["states"] and set(refs["memories"]) <= set(body["evidence"])
+    assert "- **Why:** " in body["markdown"] and "said they may cancel" in body["markdown"]
     assert situation["open_problems"] == 3
     assert situation["plan"]["name"] == "pro" and situation["plan"]["direction"] == "upgraded"
     assert "Pro plan" in situation["plan"]["statement"]

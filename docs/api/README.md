@@ -184,7 +184,7 @@ evidence. Built for the moment before a call or a reply.
 
 | Parameter | Meaning |
 | --- | --- |
-| `since` | what `recent_changes` covers — `last_session` (default: since the last conversation that ended), `last_run`, a span (`7d`), an ISO time or a snapshot id; see [What changed](#what-changed) |
+| `since` | what `recent_changes` covers — `last_session` (default: since the last conversation that ended), `last_view` (since you last looked), `last_run`, a span (`7d`), an ISO time or a snapshot id; see [What changed](#what-changed) |
 | `agent` | with `last_session`/`last_run`: only that agent's |
 | `format` | `json` (default) or `markdown` — the brief as a page, `text/markdown` |
 
@@ -212,10 +212,18 @@ evidence. Built for the moment before a call or a reply.
   "situation": {
     "health": { "score": 34.2, "band": "critical", "churn_risk": 0.78, "trajectory": "declining", "explanation": "…" },
     "plan": { "name": "pro", "statement": "The customer upgraded from the Starter plan to the Pro plan.", "direction": "upgraded" },
-    "lifecycle": [{ "track": "lifecycle", "label": "Lifecycle", "state": "at_risk", "reasons": ["said they may cancel"] }],
+    "lifecycle": [{ "id": "cst_…", "track": "lifecycle", "label": "Lifecycle", "state": "at_risk",
+                    "reasons": ["health is critical", "said they may cancel"], "reasons_now": ["said they may cancel"],
+                    "holds": true, "held_by": null, "moving_to": null }],
+    "why": ["said they may cancel", "3 unresolved problems", "activity down 47%"],
     "open_problems": 3,
     "goals": { "open": 0, "progressing": 0, "stalled": 0, "achieved": 0 }
   },
+  "cares_about": [
+    { "topic": "Launch the payroll integration by Q4", "detail": "a goal, stalled", "evidence": ["goal_…"] },
+    { "topic": "Payroll", "detail": "in 4 memories", "evidence": ["mem_…", "mem_…"] }
+  ],
+  "evidence_refs": { "memories": ["mem_…"], "goals": ["goal_…"], "snapshots": ["snp_…"], "states": ["cst_…"], "drift": [] },
   "open_issues": [{ "id": "mem_…", "content": "…", "age_days": 19, "times_reported": 3 }],
   "goals": [], "intents": [{ "id": "mem_…", "type": "intent", "content": "…", "kinds": ["cancellation"] }],
   "preferences": { "channel": "email", "opt_outs": [{ "kind": "phone", "words": "asked not to be called" }], "statements": [] },
@@ -227,6 +235,21 @@ evidence. Built for the moment before a call or a reply.
   "markdown": "# Acme\n\nAcme: critical (34), declining. …"
 }
 ```
+
+**`situation.why`** says why the customer is where they are *now*: the reasons their
+primary lifecycle state holds today, then the health factors pulling them down (worst
+first), then risks — de-duplicated, at most five. Each track carries both `reasons` (why
+they entered it, when they did) and `reasons_now`: the transition that brought them is
+checked again on today's facts, and its clauses that still hold are the reasons
+(`holds: true`). When none does, they stay because leaving is stricter than entering, and
+`reasons_now` is what keeps them from the way out they are closest to (`held_by`, e.g.
+`recovered`: *"forecast churn risk 0.50"*). When a way out would fire already, `moving_to`
+names the state the next refresh moves them to. A state a person set, or the initial state,
+has `reasons_now: null`. **`cares_about`** is what they care about: their open goals
+(stalled ones say so), then the things their memories keep naming (products, features,
+integrations — at least two memories each). **`evidence_refs`** types the evidence: memory
+ids, goal ids, the snapshot the brief read and the lifecycle states it quotes — so a caller
+can open the exact record behind each line.
 
 **Cautions** are the guardrails' own verdicts ([Guardrails](#guardrails)) on selling,
 marketing, asking for a review, unprompted contact, calling, emailing, discounts, credits
@@ -281,21 +304,26 @@ each reading only records authoritative for its question:
 | `quiet_problem` | an open problem not reported for `drift_quiet_days.problem` (30) while the customer stayed active (`drift_min_activity`, default 5 events) | the event stream |
 
 `channel` and `plan` are checked as events are processed; all four nightly and on demand. A
-flag is **never a change**: the memory stands until a person confirms or dismisses it.
+flag is **never a change**: the memory stands until a person decides, one of three ways —
+*Confirm WhatsApp*, *Keep email*, or *Dismiss*.
 
 | Endpoint | |
 | --- | --- |
-| `GET /v1/drift?status=open&kind=&customer_id=` | flags, newest first; `status` is `open` (default), `confirmed`, `dismissed`, `cleared` or `all`. A flag on a memory this key may not read is not listed; `withheld` counts them |
+| `GET /v1/drift?status=open&kind=&customer_id=` | flags, newest first; `status` is `open` (default), `confirmed`, `kept`, `dismissed`, `cleared` or `all`. A flag on a memory this key may not read is not listed; `withheld` counts them |
 | `GET /v1/drift/{id}` | one flag: `stated`, `observed`, `summary`, `counts`, `evidence` (event and session ids), the memory and the customer |
 | `POST /v1/drift/{id}/confirm` `{ "note"?: … }` | write the change: a new preference ("The customer prefers WhatsApp."), plan ("upgraded from the Pro plan to the Enterprise plan"), habit ("has not used the Campaign Builder feature for 2 months") or the problem resolved — the old memory superseded (a plan *transition* is history and stays), with versions, audit and webhooks. Lifecycle and snapshots refresh at once |
-| `POST /v1/drift/{id}/dismiss` `{ "note"?: … }` | keep the memory; only evidence newer than the dismissal can raise it again |
+| `POST /v1/drift/{id}/keep` `{ "note"?: … }` | the memory is right, and you vouch for it: it is **confirmed** like any feedback (confidence up, new evidence — so it reads `active` again), the flag is `kept`, and only evidence newer than now can raise it again |
+| `POST /v1/drift/{id}/dismiss` `{ "note"?: … }` | not on this evidence: the memory is left exactly as it was (no new confidence, no new evidence); only evidence newer than the dismissal can raise it again |
 | `POST /v1/customers/{id}/drift/refresh` | run every detector for one customer now |
 
 Confirming or rejecting the memory itself through feedback settles its flags (confirming it
-is new evidence and dismisses them; rejecting or correcting clears them). A flag whose
-evidence no longer holds — the customer restated the preference, the problem was reported
-again — is `cleared` by the system. Reads need `memory:read`; confirm, dismiss and refresh
-need `memory:write`.
+is new evidence and keeps them; rejecting or correcting clears them). A flag whose evidence
+no longer holds — the customer restated the preference, the problem was reported again — is
+`cleared` by the system, and so is a flag whose memory is no longer standing (superseded,
+expired, rejected) when someone tries to decide it: the response is the cleared flag, not an
+error. Deciding a flag that is already decided is `409`. Reads need `memory:read`; confirm,
+keep, dismiss and refresh need `memory:write`. Every decision emits `memory.drift_resolved`
+with the flag's final `status`.
 
 Facts rules can read: `memories.stale_count`, `memories.attention_count`,
 `memories.stale_share`, `drift.open_count`, `drift.kinds`, `preferences.channel_outdated`,
@@ -374,7 +402,7 @@ and the evidence — and the customer *then* and *now*.
 
 | Parameter | Meaning |
 | --- | --- |
-| `since` | a span (`7d`, `12h`, `2w`, `3mo`), an ISO time or date, a snapshot id, `last_session` (the last finished conversation with the customer) or `last_run` (the last time an agent acted for them). Default `30d`. |
+| `since` | a span (`7d`, `12h`, `2w`, `3mo`), an ISO time or date, a snapshot id, `last_session` (the last finished conversation with the customer), `last_run` (the last time an agent acted for them) or `last_view` (since you last looked — see below). Default `30d`. |
 | `until` | an ISO time, a span back from now, or a snapshot id. Default now. |
 | `agent` | with `last_session`/`last_run`: only that agent's |
 | `types` | comma-separated: `subscription, lifecycle, health, risk, trajectory, problem, intent, preference, goal, feedback, relationship, fact, memory, signal, activity` |
@@ -389,8 +417,11 @@ and the evidence — and the customer *then* and *now*.
   "changes": [{
     "type": "subscription", "kind": "changed", "title": "Upgraded from Starter to Pro",
     "before": "The customer is on the Starter plan.", "after": "The customer upgraded from the Starter plan to the Pro plan.",
-    "detected_at": "…", "evidence": ["mem_…", "mem_…"], "source": "memory",
+    "detected_at": "…", "evidence": ["mem_…", "mem_…"], "source": "memory", "topics": [],
     "detail": { "plan": "pro", "previous_plan": "starter", "direction": "upgraded" }, "importance": 0.95
+  }, {
+    "type": "problem", "kind": "opened", "title": "The Stripe sync fails on refunds.",
+    "topics": ["Stripe"], "evidence": ["mem_…"]
   }, {
     "type": "lifecycle", "kind": "moved", "title": "Engagement: adopting → at risk", "track": "engagement",
     "reasons": ["3 unresolved problems", "activity down 47%"]
@@ -410,14 +441,95 @@ at each end (health bands, churn risk, trajectory), signals that started or stop
 activity against the equal window before — compared only when the customer existed for all
 of it. A caller without clearance is not shown changes about memories they may not read;
 `withheld` counts them, and a *before* quoting a hidden memory reads `[withheld]`. When
-`last_session`/`last_run` has nothing to go back to, the window falls back to 30 days and
-`window.note` says so. Needs `memory:read`.
+`last_session`/`last_run`/`last_view` has nothing to go back to, the window falls back to
+30 days and `window.note` says so. Each change about a memory carries **`topics`** — the
+products, features, integrations and people that memory names — so "what changed about
+Stripe" is a filter, not a read. Needs `memory:read`.
+
+**Since you last looked.** Opening a customer — their 360, their brief, or their page on
+the dashboard — records a look, for the API key or the signed-in person. Looks less than 30
+minutes apart are one visit; `since=last_view` starts where your previous visit ended, so
+reopening the customer mid-call does not reset it. The dashboard's customer page records a
+look unless asked not to (`?look=false`).
 
 ### `GET /v1/customers/{customer_id}/compare?from=&to=`
 
 The customer at two moments side by side — plan, health, lifecycle and every track,
 problems, goals, channel, intents, signals — and every fact that differs, with `added` and
 `removed` for lists. `from`/`to` take the same forms as `until`; `to` defaults to now.
+
+
+## Journey
+
+### `GET /v1/customers/{customer_id}/journey`
+
+The customer's history as **milestones, not rows** — oldest first:
+
+| Category | Milestones |
+| --- | --- |
+| `account` | *Became a customer* — their first event (or when they were added) |
+| `usage` | *Started using Shopify* — the first use of each feature and integration, from the events themselves, with how often since |
+| `problem` | *First Shopify problem*, *New problem*, *Shopify problem reported 3 times* (and 5, 10), *Shopify problem resolved* — with how long it was open |
+| `plan` | *Started on the Pro plan*, *Upgraded from Starter to Pro*, *Downgraded from Pro to Starter*, *Cancelled the Pro plan*, *Renewed* |
+| `intent` | *Said they may cancel*, *Talked about expanding*, … |
+| `preference` | *Prefers WhatsApp*, *Preferred channel changed to WhatsApp*, *Asked not to be called* |
+| `goal` | *Goal set*, *Goal achieved*, *Goal stalled*, *Goal abandoned* — once each per goal |
+| `health` | *Health dropped 82 → 67* — a band crossed between one snapshot and the next, or a swing of 15 points within one; a crossing undone within two days is left out as a wobble |
+| `lifecycle` | *Lifecycle → At risk*, *Engagement → Power user* — every track's moves, with the reasons; the steps of a track's first placement are not moves |
+| `activity` | *Went quiet* (30 days without an event), *Came back after 7 weeks* |
+| `feedback` | *Negative feedback*, *Praise* — a detractor or promoter score, or strongly worded feedback |
+| `relationship` | *New relationship*, *A relationship changed* |
+
+| Parameter | Meaning |
+| --- | --- |
+| `since` | only milestones from this moment — a span (`90d`, `6mo`), an ISO time, a snapshot id, `last_session`, `last_run` or `last_view`. Default: the whole history |
+| `until` | an ISO time, a span back from now, or a snapshot id |
+| `categories` | comma-separated categories to keep |
+| `min_importance` | 0–1; `0.75` keeps the key moments |
+| `limit` | 1–500, default 100 — when more qualify, the most important, still in order (`truncated`, `total`) |
+| `format` | `json` (default) or `markdown` — the journey as a page, grouped by month |
+
+```json
+{
+  "customer_id": "acme",
+  "customer_since": "2026-06-27T…",
+  "window": { "since": "2026-06-27T…", "until": "…", "basis": "all", "label": "Since 27 Jun 2026" },
+  "summary": "Customer since 27 Jun 2026 · 16 milestones: first Shopify problem (26 Aug 2026); downgraded from Pro to Starter (5 Sep 2026); health dropped 64 → 37 (5 Sep 2026); lifecycle → At risk (5 Sep 2026); said they may cancel (7 Sep 2026); …",
+  "milestones": [{
+    "id": "jm_4f1c…", "at": "2026-09-05T…", "recorded_at": "2026-09-25T…",
+    "category": "plan", "kind": "downgraded", "title": "Downgraded from Pro to Starter", "tone": "negative", "importance": 0.95,
+    "topics": [],
+    "what_happened": "“The customer downgraded from the Pro plan to the Starter plan”.",
+    "why_it_matters": "Downgrades count heavily against health, and the forecast reads them as churn language.",
+    "memories": [{ "id": "mem_…", "type": "subscription", "content": "…", "change": "created" }],
+    "health": { "before": { "score": 63.8, "band": "watch" }, "after": { "score": 36.7, "band": "at_risk" }, "delta": -27.1,
+                "drivers": ["on the starter plan", "subscription downgraded"], "snapshot_id": "snp_…" },
+    "transitions": [{ "id": "cst_…", "track": "lifecycle", "label": "Lifecycle", "before": "onboarding", "after": "at_risk",
+                      "reasons": ["health is at risk", "forecast churn risk 0.74"], "manual": false }],
+    "evidence": { "memories": ["mem_…"], "goals": [], "events": ["evt_…"], "snapshots": ["snp_…"], "states": ["cst_…"] },
+    "detail": { "plan": "starter", "previous_plan": "pro", "direction": "downgraded" }
+  }],
+  "counts": { "problem": 3, "plan": 1, "health": 2, "lifecycle": 2 },
+  "total": 16, "truncated": false, "withheld": 0
+}
+```
+
+Each milestone answers five questions: **what happened** (`what_happened`), **why it
+mattered** (`why_it_matters` — what Memora does with it, from the project's own health
+weights: "open problems pull health down until they are resolved; this one is still open
+after 4 weeks"), **which memories changed** (`memories` — its own, and whatever else its
+event wrote), **what happened to health** (`health` — the snapshot its event led to against
+the one before, and what else moved with it; `detail.health_unchanged` when the event
+changed nothing material), and **which state transition followed** (`transitions`). The last
+three are read along a chain the pipeline records: the event behind a memory, the snapshot
+that event's refresh took, and the lifecycle stays entered in the same refresh.
+
+A milestone sits at the time of the **event behind it**. Health and the lifecycle are judged
+when an event is processed; for history imported after the fact that is later than the event,
+and `recorded_at` says when (it is `null` when the two are within a day). `id` is stable
+across reads. Milestones about memories or goals this key may not read are left out and
+counted in `withheld`; a quoted older statement it may not read is dropped from the sentence;
+a first use named by an event that fed a hidden memory is left out. Needs `memory:read`.
 
 ## Quality
 
@@ -795,11 +907,13 @@ ai-memory-mcp --transport http --port 8765                                      
 ```
 
 Tools: `ask_memory`, `search_memory`, `customer_360`, `customer_brief`, `customer_changes`,
-`customer_timeline`, `get_health`, `get_goals`, `get_recommendations`, `check_action`,
+`customer_journey`, `customer_timeline`, `get_health`, `get_goals`, `get_recommendations`, `check_action`,
 `request_action`, `proceed_action`, `report_action`, `explain_answer`, `remember`. Over HTTP each caller sends their own key as
 `Authorization: Bearer mk_…`; the key's scopes, clearance and profile apply to every tool.
 `customer_brief` returns the [brief](#customer-brief)'s Markdown page (with the JSON as
-structured content) and takes `since` and `agent`.
+structured content) and takes `since` and `agent`. `customer_journey` returns the
+[journey](#journey) — the summary and one line per milestone with what it did to health and
+the lifecycle — and takes `since`, `categories`, `min_importance` and `limit`.
 
 ## Asking
 
@@ -904,7 +1018,7 @@ Subscribe to changes rather than polling for them. Configure at
 | `agent.approval_requested` | An agent needs a person to approve an action |
 | `agent.approval_decided` | A request was approved, rejected — or lapsed (`status: "expired"`) |
 | `memory.drift_detected` | Evidence says a standing memory may be out of date — a changed channel, plan or habit, a problem gone quiet ([drift](#freshness-and-drift)) |
-| `memory.drift_resolved` | A drift flag was confirmed (the memory was changed), dismissed, or cleared because the evidence no longer points the other way |
+| `memory.drift_resolved` | A drift flag was decided or closed: `confirmed` (the memory was changed), `kept` (a person vouched for the memory), `dismissed` (the evidence was set aside), or `cleared` (the evidence stopped holding, or the memory is no longer standing) |
 
 Every request carries:
 

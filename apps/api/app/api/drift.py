@@ -18,7 +18,7 @@ from database.repositories import CustomerRepository
 
 READ = [Depends(require_scope(ApiKeyScope.MEMORY_READ))]
 WRITE = [Depends(require_scope(ApiKeyScope.MEMORY_WRITE))]
-STATUS = "^(open|confirmed|dismissed|cleared|all)$"
+STATUS = "^(open|confirmed|kept|dismissed|cleared|all)$"
 KIND = "^(channel|plan|usage|quiet_problem)$"
 
 router = APIRouter(prefix="/v1/drift", tags=["drift"])
@@ -77,6 +77,23 @@ async def confirm_drift(
     problem — superseding what it replaces, with versions and an audit entry."""
     return DriftOut(
         **await DriftService(session, cleared=cleared, embedder=embedder).confirm(
+            project=project,
+            drift_id=drift_id,
+            note=payload.note,
+            actor_type="api_key",
+            actor_id=_actor(request, project.id),
+        )
+    )
+
+
+@router.post("/{drift_id}/keep", response_model=DriftOut, dependencies=WRITE)
+async def keep_drift(
+    drift_id: str, payload: DriftDecisionIn, request: Request, project: ApiProject, session: DBSession, cleared: Clearance
+) -> DriftOut:
+    """The memory still holds, and you vouch for it: it is confirmed — new evidence, more
+    confidence — and its flags are settled."""
+    return DriftOut(
+        **await DriftService(session, cleared=cleared).keep(
             project=project,
             drift_id=drift_id,
             note=payload.note,

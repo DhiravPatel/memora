@@ -122,6 +122,44 @@ POSITIVE_WORDS: dict[str, float] = {
     "receive": 0.35, "responsive": 0.6, "stable": 0.7, "accurate": 0.6,
 }
 
+# Sentiment verbs, whose inflections carry the same weight: "loves", "loved", "hates",
+# "complained", "fails", "crashes". Only these — the negation bait above ("work", "load",
+# "sync", …) is there for its negated forms, and "keeps loading" is not praise.
+_NEGATIVE_VERBS: dict[str, float] = {
+    "hate": 0.95, "dislike": 0.7, "complain": 0.6, "annoy": 0.8, "disappoint": 0.85,
+    "frustrate": 0.9, "fail": 0.7, "crash": 0.8, "waste": 0.8, "confuse": 0.6, "struggle": 0.6,
+}
+_POSITIVE_VERBS: dict[str, float] = {
+    "love": 0.9, "appreciate": 0.6, "enjoy": 0.7, "praise": 0.7, "adore": 0.9, "delight": 0.85,
+    "impress": 0.8,
+}
+NEGATIVE_WORDS.update(
+    {
+        "poor": 0.7, "unusable": 1.0, "unreliable": 0.8, "buggy": 0.8, "clunky": 0.6,
+        "painful": 0.8, "complaint": 0.6, "hated": 0.95,
+    }
+)
+POSITIVE_WORDS.update(
+    {
+        "pleased": 0.7, "wonderful": 0.9, "brilliant": 0.9, "satisfied": 0.7, "intuitive": 0.6,
+        "grateful": 0.7, "impressive": 0.8,
+    }
+)
+
+
+def verb_forms(verb: str) -> tuple[str, ...]:
+    """A regular verb and its inflections: love → loves, loved, loving; crash → crashes."""
+    third = verb + ("es" if verb.endswith(("s", "sh", "ch", "x", "z")) else "s")
+    past = verb + ("d" if verb.endswith("e") else "ed")
+    gerund = (verb[:-1] if verb.endswith("e") and not verb.endswith("ee") else verb) + "ing"
+    return (verb, third, past, gerund)
+
+
+for _verbs, _words in ((_NEGATIVE_VERBS, NEGATIVE_WORDS), (_POSITIVE_VERBS, POSITIVE_WORDS)):
+    for _verb, _weight in _verbs.items():
+        for _form in verb_forms(_verb):
+            _words.setdefault(_form, _weight)
+
 URGENCY_WORDS: dict[str, float] = {
     "urgent": 1.0, "urgently": 1.0, "asap": 1.0, "immediately": 0.95, "critical": 1.0,
     "blocker": 1.0, "blocking": 0.9, "production": 0.7, "down": 0.8, "outage": 1.0,

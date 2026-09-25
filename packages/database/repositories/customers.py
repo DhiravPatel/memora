@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from common.ids import new_id
-from database.models import Customer
+from common.time import ensure_utc, utcnow
+from database.models import Customer, CustomerView
 from database.repositories.base import BaseRepository
 
 
@@ -123,3 +125,57 @@ class CustomerRepository(BaseRepository):
     async def delete(self, customer: Customer) -> None:
         """Hard delete: memories, events and embeddings cascade from the customer row."""
         await self.session.delete(customer)
+
+
+# Loads closer together than this are one visit: "since I last looked" means since the end
+# of the previous visit, not since the page loaded a moment ago.
+VISIT_GAP = timedelta(minutes=30)
+
+
+class CustomerViewRepository(BaseRepository):
+    async def record(
+        self, *, project_id: str, customer_id: str, viewer_type: str, viewer_id: str, now: datetime | None = None
+    ) -> None:
+        """Note a look at a customer: extend the current visit, or start a new one. One
+        upsert, so two tabs loading at once cannot race."""
+        now = now or utcnow()
+        statement = pg_insert(CustomerView).values(
+            id=new_id("cvw"),
+            project_id=project_id,
+            customer_id=customer_id,
+            viewer_type=viewer_type,
+            viewer_id=viewer_id,
+            viewed_at=now,
+            previous_viewed_at=None,
+            visits=1,
+        )
+        new_visit = statement.excluded.viewed_at - CustomerView.viewed_at > VISIT_GAP
+        statement = statement.on_conflict_do_update(
+            constraint="uq_customer_views_viewer",
+            set_={
+                "previous_viewed_at": case((new_visit, CustomerView.viewed_at), else_=CustomerView.previous_viewed_at),
+                "visits": CustomerView.visits + case((new_visit, 1), else_=0),
+                "viewed_at": statement.excluded.viewed_at,
+            },
+        )
+        await self.session.execute(statement)
+
+    async def last_look(
+        self, *, customer_id: str, viewer_type: str, viewer_id: str, now: datetime | None = None
+    ) -> datetime | None:
+        """When this viewer last looked, before the visit under way — None if never."""
+        now = now or utcnow()
+        row = (
+            await self.session.execute(
+                select(CustomerView).where(
+                    CustomerView.customer_id == customer_id,
+                    CustomerView.viewer_type == viewer_type,
+                    CustomerView.viewer_id == viewer_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            return None
+        if now - ensure_utc(row.viewed_at) > VISIT_GAP:
+            return ensure_utc(row.viewed_at)  # not looking now: the last look is the last visit
+        return ensure_utc(row.previous_viewed_at) if row.previous_viewed_at else None

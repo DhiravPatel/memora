@@ -14,6 +14,7 @@ out exactly when a goal closes.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -43,6 +44,9 @@ GOAL_FRAME_WORDS = frozenset(
         "want", "like", "plan", "planning", "hope", "need", "try", "trying", "look",
         "looking", "goal", "aim", "intend", "would", "could", "should", "will", "going",
         "able", "get", "make", "take", "use", "team", "month", "quarter", "year", "week",
+        # Every stored memory is about "the customer" — the third-person rewrite puts it
+        # there — so it can never tell one goal's evidence from another's.
+        "customer", "customers", "client",
     )
 )
 
@@ -143,17 +147,43 @@ def _negated_before(text: str, index: int) -> bool:
     return any(word.strip(",.;:") in NEGATIONS for word in preceding)
 
 
-def _cue_hit(text: str, cues: Sequence[tuple[str, str]]) -> str | None:
-    """Find a cue in the raw text, then — more loosely — in its lemmas."""
-    lowered = " ".join(text.lower().split())
+_WORD = re.compile(r"[a-z0-9']+")
+
+
+def _words_of(text: str) -> str:
+    """Lowercase words joined by single spaces — punctuation gone, so a cue can be matched
+    as whole words."""
+    return " ".join(_WORD.findall(text.lower()))
+
+
+def _find(words: str, phrase: str) -> int:
+    """Where ``phrase`` starts in ``words`` as whole words, or -1: "done" is not in
+    "downgraded", however the two lemmatise."""
+    index = f" {words} ".find(f" {phrase} ")
+    return index if index != -1 else -1
+
+
+def _cue_hit(
+    text: str, cues: Sequence[tuple[str, str]], *, keywords: Sequence[str] = ()
+) -> str | None:
+    """Find a cue in the raw text, then — more loosely — in its lemmas; whole words only.
+
+    A cue whose lemma is one of the goal's own keywords only counts as written: for "launch
+    automation", "we launched it" is the goal done, but "the launch is delayed" is only the
+    goal mentioned.
+    """
+    lowered = _words_of(text)
     for phrase, _ in cues:
-        index = lowered.find(phrase)
+        index = _find(lowered, phrase)
         if index != -1 and not _negated_before(lowered, index):
             return phrase
 
+    own = set(keywords)
     lemma_text = " ".join(lemmatize(word) for word in lowered.split())
     for phrase, lemma_phrase in cues:
-        index = lemma_text.find(lemma_phrase)
+        if lemma_phrase in own:
+            continue
+        index = _find(lemma_text, lemma_phrase)
         if index != -1 and not _negated_before(lemma_text, index):
             return phrase
     return None
@@ -167,9 +197,9 @@ def _progress_cue(text: str) -> str | None:
     two apart, at the cost of reading "we finished rolling it out" as progress — the
     conservative direction to be wrong in.
     """
-    lowered = " ".join(text.lower().split())
+    lowered = _words_of(text)
     for phrase in PROGRESS_CUES:
-        index = lowered.find(phrase)
+        index = _find(lowered, phrase)
         if index != -1 and not _negated_before(lowered, index):
             return phrase
     return None
@@ -239,10 +269,10 @@ def decide(
         if score < STRONG_MATCH_THRESHOLD:
             continue
 
-        abandon_cue = _cue_hit(memory.content, _LEMMA_ABANDON)
+        abandon_cue = _cue_hit(memory.content, _LEMMA_ABANDON, keywords=goal.keywords)
         # Progress is checked before completion: "setting up SSO" is not "SSO is set up".
         progress_cue = _progress_cue(memory.content)
-        achieve_cue = None if progress_cue else _cue_hit(memory.content, _LEMMA_ACHIEVEMENT)
+        achieve_cue = None if progress_cue else _cue_hit(memory.content, _LEMMA_ACHIEVEMENT, keywords=goal.keywords)
 
         if abandon_cue:
             kind, cue = "abandoned", abandon_cue

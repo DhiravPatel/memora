@@ -34,6 +34,12 @@ def _label(value: Any, *, title: bool = True) -> str:
     return text.title() if title and text.islower() else text
 
 
+def display_name(value: Any) -> str:
+    """A feature, integration or plan named in a payload, as a sentence names it:
+    "shopify" → "Shopify", "campaign_builder" → "Campaign Builder"."""
+    return _label(value)
+
+
 def _get(data: dict[str, Any], *names: str) -> Any:
     for name in names:
         value = (data or {}).get(name)

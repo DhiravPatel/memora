@@ -293,6 +293,25 @@ class Step:
 
 
 @dataclass(slots=True)
+class Standing:
+    """Why a customer is in their state *now* — which need not be why they entered it.
+
+    ``holds`` says whether the transition that brought them here would still fire; if so,
+    ``evaluation`` is that transition's and its decisive clauses are the reasons. If not,
+    they stay because leaving is stricter than entering (hysteresis), and ``evaluation`` is
+    the way out they are closest to: its failing clauses are what keeps them. ``moving`` is
+    set when a way out would fire already — the next refresh moves them.
+    """
+
+    holds: bool
+    transition: str
+    evaluation: Evaluation
+    moving: bool = False
+    # Where the transition in ``transition`` leads.
+    target: str | None = None
+
+
+@dataclass(slots=True)
 class Lifecycle:
     states: tuple[str, ...]
     initial: str
@@ -307,6 +326,49 @@ class Lifecycle:
             if evaluation.matched:
                 return Step(transition=transition, previous=state, evaluation=evaluation)
         return None
+
+    def standing(
+        self,
+        state: str,
+        facts: CustomerFacts,
+        *,
+        entered_by: str | None,
+        came_from: str | None = None,
+    ) -> Standing | None:
+        """Why a customer is in ``state`` now, from the facts as they are now.
+
+        ``entered_by`` is the transition that moved them here. ``None`` — a person put them
+        there, or they were placed in the initial state — means nothing was decided that
+        could be checked again. The way out they are closest to is the one whose condition
+        fails on the fewest clauses; on a tie, the way back to ``came_from``, then the order
+        written.
+        """
+        entry = next(
+            (transition for transition in self.transitions if transition.name == entered_by and transition.target == state),
+            None,
+        )
+        if entry is None:
+            return None
+        evaluation = entry.condition.evaluate(facts)
+        if evaluation.matched:
+            return Standing(holds=True, transition=entry.name, evaluation=evaluation, target=state)
+        closest: tuple[tuple[int, int, int], Transition, Evaluation] | None = None
+        for order, transition in enumerate(self.transitions):
+            if transition.target == state or not transition.applies_to(state):
+                continue
+            outcome = transition.condition.evaluate(facts)
+            if outcome.matched:
+                return Standing(
+                    holds=False, transition=transition.name, evaluation=outcome, moving=True, target=transition.target
+                )
+            if outcome.outcome is not False:
+                continue  # cannot be judged on these facts
+            rank = (len(outcome.decisive), 0 if transition.target == came_from else 1, order)
+            if closest is None or rank < closest[0]:
+                closest = (rank, transition, outcome)
+        if closest is None:
+            return Standing(holds=False, transition=entry.name, evaluation=evaluation, target=state)
+        return Standing(holds=False, transition=closest[1].name, evaluation=closest[2], target=closest[1].target)
 
     def settle(self, state: str | None, facts: CustomerFacts) -> list[Step]:
         """Every move the customer makes now, stopping short of a cycle.

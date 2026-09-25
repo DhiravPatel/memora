@@ -56,6 +56,7 @@ export function toChange(raw: any): Change {
     reasons: raw.reasons ?? [],
     detail: raw.detail ?? {},
     importance: raw.importance ?? 0,
+    topics: raw.topics ?? [],
   };
 }
 

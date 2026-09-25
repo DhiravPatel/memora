@@ -17,6 +17,7 @@ import { cn } from "@/lib/utils";
 import type { CustomerBrief } from "@/lib/types";
 
 const PERIODS = [
+  { value: "last_view", label: "Since I last looked" },
   { value: "last_session", label: "Since last conversation" },
   { value: "7d", label: "7 days" },
   { value: "30d", label: "30 days" },
@@ -43,7 +44,8 @@ export function CustomerBriefPanel({
   customerId: string;
   onOpenTab?: (tab: "Changes" | "State" | "Agents" | "Goals" | "Freshness") => void;
 }) {
-  const [since, setSince] = useState("last_session");
+  // A person reading the brief wants what changed since *they* last looked (§26 4.1).
+  const [since, setSince] = useState("last_view");
   const [copied, setCopied] = useState(false);
   const brief = useQuery({
     queryKey: ["customer-brief", projectId, customerId, since],
@@ -134,6 +136,7 @@ export function CustomerBriefPanel({
           </div>
           <div className="space-y-6">
             <Situation brief={body} onOpenState={() => onOpenTab?.("State")} />
+            <CaresAbout brief={body} />
             <NextStep brief={body} />
             <Preferences brief={body} />
             <Goals brief={body} onOpenGoals={() => onOpenTab?.("Goals")} />
@@ -383,31 +386,84 @@ function Situation({ brief, onOpenState }: { brief: CustomerBrief; onOpenState: 
         <dt className="label border-b border-border px-5 py-2.5">Lifecycle</dt>
         <dd className="space-y-1.5 border-b border-border px-5 py-2.5">
           {lifecycle.length === 0 && <span className="text-muted-foreground">not tracked</span>}
-          {lifecycle.map((track) => (
-            <button
-              key={track.track}
-              onClick={onOpenState}
-              className="flex w-full flex-wrap items-center gap-2 text-left"
-              title={track.reasons.join("; ") || undefined}
-            >
-              <span className="label">{track.label}</span>
-              <StateBadge state={track.state} pinned={track.pinned} />
-              {track.reasons.length > 0 && (
-                <span className="text-muted-foreground">
-                  {track.reasons.slice(0, 2).join("; ")}
-                </span>
-              )}
-            </button>
-          ))}
+          {lifecycle.map((track) => {
+            // Why they are there now; the reasons they entered it only when it cannot be
+            // re-checked (set by a person, or the initial state).
+            const now = track.reasons_now ?? track.reasons;
+            const entered = track.reasons.join("; ");
+            return (
+              <button
+                key={track.track}
+                onClick={onOpenState}
+                className="flex w-full flex-wrap items-center gap-2 text-left"
+                title={
+                  entered
+                    ? `Entered ${formatDate(track.entered_at)} because: ${entered}`
+                    : undefined
+                }
+              >
+                <span className="label">{track.label}</span>
+                <StateBadge state={track.state} pinned={track.pinned} />
+                {track.moving_to && (
+                  <span
+                    className="text-muted-foreground"
+                    title="Nothing keeps them in this state now; the next refresh moves them"
+                  >
+                    moving to {track.moving_to.replace(/_/g, " ")}
+                  </span>
+                )}
+                {!track.moving_to && now.length > 0 && (
+                  <span className="text-muted-foreground">
+                    {track.holds === false && track.held_by
+                      ? `not yet ${track.held_by.replace(/_/g, " ")}: `
+                      : ""}
+                    {now.slice(0, 2).join("; ")}
+                  </span>
+                )}
+              </button>
+            );
+          })}
         </dd>
-        <dt className="label px-5 py-2.5">Goals</dt>
-        <dd className="px-5 py-2.5 text-muted-foreground">
+        <dt className="label border-b border-border px-5 py-2.5">Goals</dt>
+        <dd className="border-b border-border px-5 py-2.5 text-muted-foreground">
           {Object.entries(goals)
             .filter(([, count]) => count > 0)
             .map(([status, count]) => `${count} ${status}`)
             .join(" · ") || "none stated"}
         </dd>
+        <dt className="label px-5 py-2.5">Why</dt>
+        <dd className="space-y-0.5 px-5 py-2.5 text-foreground">
+          {(brief.situation.why ?? []).length === 0 && (
+            <span className="text-muted-foreground">nothing stands out</span>
+          )}
+          {(brief.situation.why ?? []).map((reason) => (
+            <p key={reason}>{reason}</p>
+          ))}
+        </dd>
       </dl>
+    </Card>
+  );
+}
+
+function CaresAbout({ brief }: { brief: CustomerBrief }) {
+  const topics = brief.cares_about ?? [];
+  if (topics.length === 0) return null;
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>They care about</CardTitle>
+      </CardHeader>
+      <ul>
+        {topics.map((item) => (
+          <li
+            key={item.topic}
+            className="flex items-baseline justify-between gap-3 border-t border-border px-5 py-2.5"
+          >
+            <span className="text-sm text-foreground">{item.topic}</span>
+            <span className="label shrink-0">{item.detail}</span>
+          </li>
+        ))}
+      </ul>
     </Card>
   );
 }

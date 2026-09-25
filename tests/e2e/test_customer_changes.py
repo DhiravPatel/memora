@@ -258,3 +258,39 @@ def test_the_dashboard_sees_the_same_changes(client, world):
     )
     assert response.status_code == 200, response.text
     assert response.json()["summary"] == changes(client, world, since="7d")["summary"]
+
+
+def test_changes_name_their_topics(client, world):
+    body = changes(client, world, since="7d")
+    salary = next(change for change in body["changes"] if "Stripe payout" in change["title"])
+    assert salary["topics"] == ["Stripe"]
+
+
+def test_since_i_last_looked(client, world, engine):
+    """``last_view``: since this person — or this agent's key — last looked at the customer.
+    Loads within half an hour are one visit, so it means the visit before this one."""
+    never = changes(client, world, since="last_view")
+    assert never["window"]["basis"] == "last_view" and never["window"]["found"] is False
+    assert never["window"]["note"] == "You have not looked at this customer before; showing the last 30 days instead."
+
+    # An agent's key looks by reading the brief or the 360.
+    assert client.get("/v1/customers/acme/brief", headers=h(world)).status_code == 200
+    with engine.begin() as connection:
+        connection.execute(text("UPDATE customer_views SET viewed_at = now() - interval '3 days'"))
+    looked = changes(client, world, since="last_view")
+    assert looked["window"]["basis"] == "last_view" and looked["window"]["found"] is True
+    assert looked["window"]["label"].startswith("Since you last looked (")
+    assert all(change["detected_at"] >= looked["window"]["since"] for change in looked["changes"])
+
+    # A person looks by opening the customer; the visit under way does not count.
+    base = f"/v1/projects/{world['project_id']}"
+    assert client.get(f"{base}/customers/acme", headers=world["auth"]).status_code == 200
+    first = client.get(f"{base}/customers/acme/changes", params={"since": "last_view"}, headers=world["auth"]).json()
+    assert first["window"]["found"] is False, "the first visit has nothing before it"
+    with engine.begin() as connection:
+        connection.execute(text("UPDATE customer_views SET viewed_at = now() - interval '2 days' WHERE viewer_type = 'user'"))
+    assert client.get(f"{base}/customers/acme", headers=world["auth"]).status_code == 200  # a new visit
+    again = client.get(f"{base}/customers/acme/changes", params={"since": "last_view"}, headers=world["auth"]).json()
+    assert again["window"]["found"] is True and again["window"]["basis"] == "last_view"
+    # Peeking without counting as a look is possible.
+    assert client.get(f"{base}/customers/acme", params={"look": "false"}, headers=world["auth"]).status_code == 200

@@ -31,6 +31,7 @@ from ai_memory.models import (
     CustomerBrief,
     CustomerChanges,
     CustomerContext,
+    CustomerJourney,
     DriftFlag,
     EventExplanation,
     Goal,
@@ -102,6 +103,25 @@ def _changes_params(
 
 def _drift_params(customer_id: str | None, status: str, kind: str | None, limit: int, offset: int) -> dict[str, Any]:
     return {"customer_id": customer_id, "status": status, "kind": kind, "limit": limit, "offset": offset}
+
+
+def _journey_params(
+    since: datetime | str | None,
+    until: datetime | str | None,
+    categories: Sequence[str] | None,
+    min_importance: float | None,
+    limit: int,
+) -> dict[str, Any]:
+    params: dict[str, Any] = {"limit": limit}
+    if since:
+        params["since"] = _iso(since)
+    if until:
+        params["until"] = _iso(until)
+    if categories:
+        params["categories"] = ",".join(categories)
+    if min_importance is not None:
+        params["min_importance"] = min_importance
+    return params
 
 
 def _brief_params(since: datetime | str | None, agent: str | None) -> dict[str, Any]:
@@ -615,6 +635,50 @@ class MemoryClient(_BaseClient):
             )
         )
 
+    # ------------------------------------------------------------------ journey
+
+    def journey(
+        self,
+        customer_id: str,
+        *,
+        since: datetime | str | None = None,
+        until: datetime | str | None = None,
+        categories: Sequence[str] | None = None,
+        min_importance: float | None = None,
+        limit: int = 100,
+    ) -> CustomerJourney:
+        """The customer's journey as milestones, not rows (§26 6.6): where it began, first
+        uses, the first report of a problem and its repeats, plan changes, goals, health
+        crossing a band, lifecycle moves, silences and returns — oldest first, each with what
+        happened, why it mattered, the memories it changed, health and the transition that
+        followed. The whole history by default; ``since`` narrows it ("90d", a date,
+        "last_session", …).
+
+            for milestone in client.journey("cus_1", min_importance=0.75).milestones:
+                print(milestone.at[:10], milestone.title)
+        """
+        return CustomerJourney.from_api(
+            self._request(
+                "GET",
+                f"/v1/customers/{customer_id}/journey",
+                params=_journey_params(since, until, categories, min_importance, limit),
+            )
+        )
+
+    def journey_markdown(
+        self,
+        customer_id: str,
+        *,
+        since: datetime | str | None = None,
+        until: datetime | str | None = None,
+        categories: Sequence[str] | None = None,
+        min_importance: float | None = None,
+        limit: int = 100,
+    ) -> str:
+        """The journey as a Markdown page, grouped by month."""
+        params = {**_journey_params(since, until, categories, min_importance, limit), "format": "markdown"}
+        return str(self._request("GET", f"/v1/customers/{customer_id}/journey", params=params))
+
     # ------------------------------------------------------ freshness and drift
 
     def freshness(self, customer_id: str, *, limit: int = 50) -> dict[str, Any]:
@@ -648,8 +712,13 @@ class MemoryClient(_BaseClient):
         habit, or the problem resolved). The replaced memory is kept as history."""
         return DriftFlag.from_api(self._request("POST", f"/v1/drift/{drift_id}/confirm", json={"note": note}))
 
+    def keep_drift(self, drift_id: str, *, note: str | None = None) -> DriftFlag:
+        """The memory still holds and you vouch for it: it is confirmed (new evidence, more
+        confidence) and its flags are settled."""
+        return DriftFlag.from_api(self._request("POST", f"/v1/drift/{drift_id}/keep", json={"note": note}))
+
     def dismiss_drift(self, drift_id: str, *, note: str | None = None) -> DriftFlag:
-        """The memory still holds: keep it, and count only evidence newer than now."""
+        """Not on this evidence: keep the memory as it is, and count only evidence newer than now."""
         return DriftFlag.from_api(self._request("POST", f"/v1/drift/{drift_id}/dismiss", json={"note": note}))
 
     def refresh_drift(self, customer_id: str) -> dict[str, Any]:
@@ -1438,6 +1507,39 @@ class AsyncMemoryClient(_BaseClient):
             )
         )
 
+    async def journey(
+        self,
+        customer_id: str,
+        *,
+        since: datetime | str | None = None,
+        until: datetime | str | None = None,
+        categories: Sequence[str] | None = None,
+        min_importance: float | None = None,
+        limit: int = 100,
+    ) -> CustomerJourney:
+        """The customer's journey as milestones. See :meth:`MemoryClient.journey`."""
+        return CustomerJourney.from_api(
+            await self._request(
+                "GET",
+                f"/v1/customers/{customer_id}/journey",
+                params=_journey_params(since, until, categories, min_importance, limit),
+            )
+        )
+
+    async def journey_markdown(
+        self,
+        customer_id: str,
+        *,
+        since: datetime | str | None = None,
+        until: datetime | str | None = None,
+        categories: Sequence[str] | None = None,
+        min_importance: float | None = None,
+        limit: int = 100,
+    ) -> str:
+        """The journey as a Markdown page."""
+        params = {**_journey_params(since, until, categories, min_importance, limit), "format": "markdown"}
+        return str(await self._request("GET", f"/v1/customers/{customer_id}/journey", params=params))
+
     async def freshness(self, customer_id: str, *, limit: int = 50) -> dict[str, Any]:
         """How current what is known about a customer is. See :meth:`MemoryClient.freshness`."""
         return await self._request("GET", f"/v1/customers/{customer_id}/freshness", params={"limit": limit})
@@ -1459,6 +1561,9 @@ class AsyncMemoryClient(_BaseClient):
 
     async def confirm_drift(self, drift_id: str, *, note: str | None = None) -> DriftFlag:
         return DriftFlag.from_api(await self._request("POST", f"/v1/drift/{drift_id}/confirm", json={"note": note}))
+
+    async def keep_drift(self, drift_id: str, *, note: str | None = None) -> DriftFlag:
+        return DriftFlag.from_api(await self._request("POST", f"/v1/drift/{drift_id}/keep", json={"note": note}))
 
     async def dismiss_drift(self, drift_id: str, *, note: str | None = None) -> DriftFlag:
         return DriftFlag.from_api(await self._request("POST", f"/v1/drift/{drift_id}/dismiss", json={"note": note}))

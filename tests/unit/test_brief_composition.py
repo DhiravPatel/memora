@@ -220,7 +220,7 @@ def test_the_next_step_is_never_what_a_caution_forbids():
 
 def test_compose_returns_every_judgement():
     judged = compose(parts(recommendations=[{"key": "k", "action": "Do it"}]))
-    assert set(judged) == {"headline", "talking_points", "cautions", "next_step", "set_aside"}
+    assert set(judged) == {"headline", "why", "cares_about", "talking_points", "cautions", "next_step", "set_aside"}
     assert judged["next_step"]["action"] == "Do it"
 
 
@@ -339,3 +339,71 @@ def test_drift_is_raised_as_a_question_and_replaces_the_still_open_line():
     assert not any(point.startswith("Still open") for point in points)
     page = markdown({"customer": {"name": "Acme"}, "headline": "Acme.", "drift": [{"summary": "Mostly WhatsApp."}]})
     assert "## Possibly out of date\n- Mostly WhatsApp." in page
+
+
+
+def test_why_they_are_where_they_are_and_what_they_care_about():
+    context = parts(
+        lifecycle=[{"track": "lifecycle", "label": "Lifecycle", "state": "at_risk", "reasons": ["said they may cancel"]}],
+        health_factors=[
+            {"label": "3 open problems", "contribution": -19.9},
+            {"label": "activity in the last two weeks", "contribution": 8.0},
+            {"label": "memories mentioning leaving or cancelling", "contribution": -27.1},
+        ],
+        risks=[{"label": "problem reports accelerating"}, {"label": "Said they may cancel"}],
+        goals=[
+            {"id": "g1", "statement": "Launch automation.", "status": "stalled"},
+            {"id": "g2", "statement": "Old win", "status": "achieved"},
+        ],
+        topics=[
+            {"name": "Shopify", "mentions": 5, "memory_ids": ["m1", "m2"]},
+            {"name": "Slack", "mentions": 1, "memory_ids": ["m3"]},
+        ],
+    )
+    judged = compose(context)
+    assert judged["why"] == [
+        "said they may cancel",
+        "memories mentioning leaving or cancelling",
+        "3 open problems",
+        "problem reports accelerating",
+    ], "worst health factor first; each reason once, whatever its case"
+    assert judged["cares_about"] == [
+        {"topic": "Launch automation", "detail": "a goal, stalled", "evidence": ["g1"]},
+        {"topic": "Shopify", "detail": "in 5 memories", "evidence": ["m1", "m2"]},
+    ]
+    page = markdown(
+        {
+            "customer": {"name": "Acme"},
+            "headline": "Acme.",
+            "situation": {"why": judged["why"]},
+            "cares_about": judged["cares_about"],
+        }
+    )
+    assert "- **Why:** said they may cancel; memories mentioning leaving or cancelling" in page
+    assert "## They care about\n- Launch automation (a goal, stalled)\n- Shopify (in 5 memories)" in page
+
+
+def test_why_reads_the_reasons_that_hold_now_not_the_ones_on_entry():
+    """At risk since a critical score; health recovered, the threat to cancel did not."""
+    track = {
+        "track": "lifecycle",
+        "label": "Lifecycle",
+        "state": "at_risk",
+        "reasons": ["health is critical", "forecast churn risk 0.77", "said they may cancel"],
+        "reasons_now": ["said they may cancel"],
+        "holds": True,
+    }
+    judged = compose(parts(lifecycle=[track]))
+    assert judged["why"] == ["said they may cancel"]
+    assert "health is critical" not in " ".join(judged["why"])
+    page = markdown({"customer": {"name": "Acme"}, "headline": "Acme.", "situation": {"lifecycle": [track]}})
+    assert "- **Lifecycle:** Lifecycle: at risk — said they may cancel\n" in page
+    # A state a person set cannot be re-checked: its own reasons stand.
+    manual = {**track, "reasons": ["set by hand"], "reasons_now": None, "holds": None}
+    assert compose(parts(lifecycle=[manual]))["why"] == ["set by hand"]
+    # Nothing keeps them there: the page says where they are going, not why they came.
+    moving = {**track, "reasons_now": [], "holds": False, "moving_to": "active"}
+    assert compose(parts(lifecycle=[moving]))["why"] == []
+    paying = {"track": "commercial", "label": "Commercial", "state": "paying", "reasons": ["on the pro plan"], "reasons_now": ["on the pro plan"]}
+    page = markdown({"customer": {"name": "Acme"}, "headline": "Acme.", "situation": {"lifecycle": [moving, paying]}})
+    assert "- **Lifecycle:** Lifecycle: at risk, moving to active · Commercial: paying — on the pro plan\n" in page

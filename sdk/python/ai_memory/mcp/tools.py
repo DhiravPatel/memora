@@ -208,6 +208,42 @@ def customer_changes(client: Any, args: dict[str, Any]) -> ToolResult:
     return ToolResult(text=text, data=changes.raw)
 
 
+def customer_journey(client: Any, args: dict[str, Any]) -> ToolResult:
+    """The server's journey: milestones, not rows — with what each did to health and the lifecycle."""
+    customer = _required(args, "customer_id")
+    categories = args.get("categories")
+    if categories is not None and not isinstance(categories, list):
+        raise ToolInputError("'categories' is a list, e.g. [\"problem\", \"plan\"].")
+    importance = args.get("min_importance")
+    if importance is not None and not isinstance(importance, (int, float)):
+        raise ToolInputError("'min_importance' is a number between 0 and 1.")
+    journey = client.journey(
+        customer,
+        since=args.get("since"),
+        categories=categories,
+        min_importance=float(importance) if importance is not None else None,
+        limit=_limit(args, 40, 200),
+    )
+    lines = []
+    for milestone in journey.milestones:
+        line = f"{milestone.at[:10]} {milestone.title} — {milestone.what_happened}"
+        delta = milestone.health_delta
+        if delta and milestone.category != "health":
+            line += f" (health {delta:+.0f})"
+        moves = [f"{move['label']} → {str(move['after']).replace('_', ' ')}" for move in milestone.transitions]
+        if moves and milestone.category != "lifecycle":
+            line += f" [{'; '.join(moves)}]"
+        lines.append(line)
+    text = journey.summary
+    if lines:
+        text += "\n" + _bullets(lines, "")
+    if journey.truncated:
+        text += f"\n\nShowing the {len(journey.milestones)} most important of {journey.total} milestones."
+    if journey.withheld:
+        text += f"\n\n{journey.withheld} milestone(s) concern memories you may not read."
+    return ToolResult(text=text, data=journey.raw)
+
+
 def get_health(client: Any, args: dict[str, Any]) -> ToolResult:
     customer = _required(args, "customer_id")
     health = client.health(customer)
@@ -500,6 +536,37 @@ TOOLS: tuple[Tool, ...] = (
             ["customer_id"],
         ),
         customer_changes,
+    ),
+    Tool(
+        "customer_journey",
+        "Customer journey",
+        "A customer's history as milestones rather than rows: when they became a customer, first use of each "
+        "feature and integration, the first report of a problem and its repeats, plan changes, goals, health "
+        "crossing a band, lifecycle moves, silences and returns — each with what it did to health and the lifecycle. "
+        "Use it to understand how a customer got to where they are.",
+        _schema(
+            {
+                "customer_id": CUSTOMER_ID,
+                "since": {
+                    "type": "string",
+                    "description": "Only milestones from this moment: a span (90d, 6mo), an ISO date or last_session. Default: all.",
+                },
+                "categories": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": [
+                            "account", "usage", "problem", "plan", "intent", "preference", "goal", "health",
+                            "lifecycle", "activity", "feedback", "relationship",
+                        ],
+                    },
+                },
+                "min_importance": {"type": "number", "minimum": 0, "maximum": 1, "description": "0.75 keeps the key moments."},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 40},
+            },
+            ["customer_id"],
+        ),
+        customer_journey,
     ),
     Tool(
         "customer_timeline",

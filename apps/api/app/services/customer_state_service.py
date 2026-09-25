@@ -59,6 +59,8 @@ class TrackRefresh:
     state: str | None
     steps: list[Step] = field(default_factory=list)
     initial: bool = False
+    # The stays this refresh entered, to be tied to the snapshot it takes.
+    rows: list[CustomerState] = field(default_factory=list)
 
     @property
     def moved(self) -> bool:
@@ -187,6 +189,14 @@ class CustomerStateService:
         result.snapshot = await self._snapshot(
             project, customer, facts, reason="state_change" if moved else reason, event_id=event_id
         )
+        if result.snapshot is not None:
+            # A stay and the snapshot of the same refresh belong together: the journey reads
+            # event → snapshot → stay to say which transition an event led to (§26 6.6).
+            entered = [row for outcome in result.tracks.values() for row in outcome.rows]
+            for row in entered:
+                row.snapshot_id = result.snapshot.id
+            if entered:
+                await self.session.flush()
         return result
 
     async def _advance(
@@ -207,7 +217,7 @@ class CustomerStateService:
 
         if known is None:
             first = steps[0].previous if steps else machine.initial
-            await self.states.enter(
+            placed = await self.states.enter(
                 project_id=project.id,
                 customer_id=customer.id,
                 track=track,
@@ -215,6 +225,7 @@ class CustomerStateService:
                 source="initial",
                 reason="Placed in the initial state the first time this track saw the customer.",
             )
+            outcome.rows.append(placed)
             outcome.initial = True
             outcome.state = first or machine.initial
             self._set_state_facts(facts, track, outcome.state)
@@ -232,6 +243,7 @@ class CustomerStateService:
                 evidence=step.evaluation.evidence,
             )
             outcome.state = step.target
+            outcome.rows.append(row)
             self._set_state_facts(facts, track, step.target)
             logger.info(
                 "lifecycle.transition",

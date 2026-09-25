@@ -13,6 +13,7 @@ import { cn } from "@/lib/utils";
 import type { Change, CustomerAt, CustomerChanges } from "@/lib/types";
 
 const PERIODS = [
+  { value: "last_view", label: "Since I last looked" },
   { value: "last_session", label: "Since last conversation" },
   { value: "7d", label: "7 days" },
   { value: "30d", label: "30 days" },
@@ -240,6 +241,11 @@ function ChangeRow({ change }: { change: Change }) {
           <Badge className={tone(change)}>
             {change.type} · {change.kind}
           </Badge>
+          {(change.topics ?? []).map((topic) => (
+            <Badge key={topic} className="normal-case tracking-normal">
+              {topic}
+            </Badge>
+          ))}
           {change.track && change.track !== "lifecycle" && (
             <Badge>{change.track.replace(/_/g, " ")}</Badge>
           )}

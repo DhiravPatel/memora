@@ -47,6 +47,7 @@ from app.schemas.health import (
     HealthOut,
     PortfolioHealthOut,
 )
+from app.schemas.journey import CustomerJourneyOut
 from app.schemas.memories import (
     CustomerLinks,
     EntityOut,
@@ -102,6 +103,7 @@ from app.services.feedback_service import FeedbackService
 from app.services.freshness_service import FreshnessService
 from app.services.goal_service import GoalService
 from app.services.health_service import HealthService
+from app.services.journey_service import JourneyService
 from app.services.memory_service import MemoryService
 from app.services.quality_service import QualityService
 from app.services.reader import Reader
@@ -130,9 +132,11 @@ from common.time import ensure_utc
 from database.repositories import (
     AuditRepository,
     CustomerRepository,
+    CustomerViewRepository,
     EventRepository,
     VocabularyRepository,
 )
+from memory_engine.journey import markdown as journey_markdown
 
 router = APIRouter(prefix="/v1/projects/{project_id}", tags=["dashboard"])
 
@@ -165,9 +169,19 @@ async def list_customers(
 
 @router.get("/customers/{customer_id}", response_model=CustomerOut)
 async def get_customer(
-    customer_id: str, project: UserProject, session: DBSession
+    customer_id: str,
+    project: UserProject,
+    session: DBSession,
+    current_user: CurrentUserDep,
+    look: bool = Query(default=True, description="Count this as the user looking at the customer."),
 ) -> CustomerOut:
-    return customer_out(await _resolve_customer(session, project.id, customer_id))
+    """The customer — and, by default, a look by this user, for "since I last looked"."""
+    customer = await _resolve_customer(session, project.id, customer_id)
+    if look:
+        await CustomerViewRepository(session).record(
+            project_id=project.id, customer_id=customer.id, viewer_type="user", viewer_id=current_user.user.id
+        )
+    return customer_out(customer)
 
 
 @router.get("/customers/{customer_id}/memories", response_model=Page[MemoryOut])
@@ -971,6 +985,7 @@ async def dashboard_customer_changes(
     project: UserProject,
     session: DBSession,
     cleared: Clearance,
+    current_user: CurrentUserDep,
     since: str | None = Query(default=None, max_length=64),
     until: str | None = Query(default=None, max_length=64),
     agent: str | None = Query(default=None, max_length=120),
@@ -980,7 +995,9 @@ async def dashboard_customer_changes(
 ) -> ChangesOut:
     customer = await _resolve_customer(session, project.id, customer_id)
     service = ChangesService(session, cleared=cleared)
-    window = await service.window(project=project, customer=customer, since=since, until=until, agent=agent)
+    window = await service.window(
+        project=project, customer=customer, since=since, until=until, agent=agent, viewer=("user", current_user.user.id)
+    )
     return await service.changes(
         project=project, customer=customer, window=window, types=_types(types), order=order, limit=limit
     )
@@ -993,6 +1010,7 @@ async def dashboard_customer_brief(
     session: DBSession,
     engine: Engine,
     cleared: Clearance,
+    current_user: CurrentUserDep,
     since: str | None = Query(default="last_session", max_length=64),
     agent: str | None = Query(default=None, max_length=120),
     fmt: str = Query(default="json", alias="format", pattern="^(json|markdown)$"),
@@ -1000,11 +1018,40 @@ async def dashboard_customer_brief(
     """A decision-ready brief on this customer. See the API-key route."""
     customer = await _resolve_customer(session, project.id, customer_id)
     brief = await BriefService(session, engine, cleared=cleared).build(
-        project=project, customer=customer, since=since, agent=agent
+        project=project, customer=customer, since=since, agent=agent, viewer=("user", current_user.user.id)
     )
     if fmt == "markdown":
         return PlainTextResponse(brief["markdown"], media_type="text/markdown; charset=utf-8")
     return CustomerBriefOut(**brief)
+
+
+@router.get("/customers/{customer_id}/journey", response_model=CustomerJourneyOut, responses=MARKDOWN)
+async def dashboard_customer_journey(
+    customer_id: str,
+    project: UserProject,
+    session: DBSession,
+    cleared: Clearance,
+    since: str | None = Query(default=None, max_length=64),
+    until: str | None = Query(default=None, max_length=64),
+    categories: str | None = Query(default=None, max_length=300),
+    min_importance: float = Query(default=0.0, ge=0.0, le=1.0),
+    limit: int = Query(default=100, ge=1, le=500),
+    fmt: str = Query(default="json", alias="format", pattern="^(json|markdown)$"),
+) -> CustomerJourneyOut | PlainTextResponse:
+    """The customer's journey as milestones. See the API-key route."""
+    customer = await _resolve_customer(session, project.id, customer_id)
+    journey = await JourneyService(session, cleared=cleared).build(
+        project=project,
+        customer=customer,
+        since=since,
+        until=until,
+        categories={name.strip().lower() for name in categories.split(",") if name.strip()} if categories else None,
+        limit=limit,
+        min_importance=min_importance,
+    )
+    if fmt == "markdown":
+        return PlainTextResponse(journey_markdown(journey), media_type="text/markdown; charset=utf-8")
+    return CustomerJourneyOut(**journey)
 
 
 # ------------------------------------------------------------ freshness and drift
@@ -1041,7 +1088,7 @@ async def dashboard_drift(
     project: UserProject,
     session: DBSession,
     cleared: Clearance,
-    status: str = Query(default="open", pattern="^(open|confirmed|dismissed|cleared|all)$"),
+    status: str = Query(default="open", pattern="^(open|confirmed|kept|dismissed|cleared|all)$"),
     kind: str | None = Query(default=None, pattern="^(channel|plan|usage|quiet_problem)$"),
     customer_id: str | None = Query(default=None, max_length=255),
     limit: int = Query(default=50, ge=1, le=200),
@@ -1078,6 +1125,23 @@ async def dashboard_confirm_drift(
     current_user.require(UserRole.MEMBER)
     return DriftOut(
         **await DriftService(session, cleared=cleared, embedder=embedder).confirm(
+            project=project, drift_id=drift_id, note=payload.note, actor_type="user", actor_id=current_user.user.id
+        )
+    )
+
+
+@router.post("/drift/{drift_id}/keep", response_model=DriftOut)
+async def dashboard_keep_drift(
+    drift_id: str,
+    payload: DriftDecisionIn,
+    project: UserProject,
+    session: DBSession,
+    cleared: Clearance,
+    current_user: CurrentUserDep,
+) -> DriftOut:
+    current_user.require(UserRole.MEMBER)
+    return DriftOut(
+        **await DriftService(session, cleared=cleared).keep(
             project=project, drift_id=drift_id, note=payload.note, actor_type="user", actor_id=current_user.user.id
         )
     )

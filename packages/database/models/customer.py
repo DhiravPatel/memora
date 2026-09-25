@@ -36,3 +36,32 @@ class Customer(Base, TimestampMixin):
     health_computed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # Set when this record was merged into another customer; kept for id resolution.
     merged_into: Mapped[str | None] = mapped_column(String(ID_LENGTH), index=True)
+
+
+class CustomerView(Base):
+    """When a person or an agent's key last looked at a customer — so "what changed since I
+    last looked" has an answer (§26 4.1).
+
+    One row per viewer and customer. Loads within a visit extend it; a new visit moves the
+    previous one's end into ``previous_viewed_at``, which is what "since I last looked"
+    means while the current visit is under way.
+    """
+
+    __tablename__ = "customer_views"
+    __table_args__ = (
+        UniqueConstraint("customer_id", "viewer_type", "viewer_id", name="uq_customer_views_viewer"),
+    )
+
+    id: Mapped[str] = mapped_column(String(ID_LENGTH), primary_key=True)
+    project_id: Mapped[str] = mapped_column(
+        String(ID_LENGTH), ForeignKey("projects.id", ondelete="CASCADE"), index=True
+    )
+    customer_id: Mapped[str] = mapped_column(
+        String(ID_LENGTH), ForeignKey("customers.id", ondelete="CASCADE"), nullable=False
+    )
+    # user | api_key
+    viewer_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    viewer_id: Mapped[str] = mapped_column(String(ID_LENGTH), nullable=False)
+    viewed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    previous_viewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    visits: Mapped[int] = mapped_column(nullable=False, default=1)

@@ -273,6 +273,33 @@ def test_freshness_and_drift_through_the_sdk(memory):
     assert memory.drift("cus_drift") == []
     assert [item.id for item in memory.drift("cus_drift", status="confirmed")] == [flag.id]
 
+    # The same customer's history, as milestones.
+    from ai_memory import CustomerJourney, Milestone
+
+    walked = memory.journey("cus_drift")
+    assert isinstance(walked, CustomerJourney) and all(isinstance(item, Milestone) for item in walked.milestones)
+    assert walked.summary.startswith("Customer since ") and walked.milestones[0].title == "Became a customer"
+    assert [item.at for item in walked.milestones] == sorted(item.at for item in walked.milestones)
+    assert walked.of("preference") and walked.of("preference")[0].title in ("Prefers email", "Preferred channel changed to WhatsApp")
+    page = memory.journey_markdown("cus_drift", categories=["preference", "account"])
+    assert page.startswith("# Hooli — journey")
+
+    # The other answer: the memory still holds, and a person vouches for it.
+    memory.upsert_customer("cus_kept", name="Initech")
+    memory.remember("cus_kept", "The customer prefers email.", type="preference")
+    for index in range(5):
+        memory.track(
+            customer_id="cus_kept",
+            type="whatsapp_message",
+            data={"message": "Quick question"},
+            occurred_at=later + timedelta(minutes=index),
+        )
+    memory.refresh_drift("cus_kept")
+    kept = memory.keep_drift(memory.drift("cus_kept")[0].id, note="Email, they said.")
+    assert kept.status == "kept" and kept.note == "Email, they said." and kept.replacement_memory_id is None
+    assert memory.facts("cus_kept")["values"]["preferences.channel"] == "email"
+    assert memory.memories("cus_kept", type="preference")[0].freshness.state == "active"
+
 
 def test_manual_memory_query_and_context(memory):
     memory.remember(
@@ -678,6 +705,12 @@ def test_the_mcp_server_over_http(live_server):
         assert changed["content"][0]["text"].startswith("In the last 7 days:")
         assert "TPS report" in changed["content"][0]["text"]
         assert changed["structuredContent"]["window"]["basis"] == "span"
+
+        walked = call({"jsonrpc": "2.0", "id": 13, "method": "tools/call", "params": {"name": "customer_journey", "arguments": {"customer_id": "cus_mcp"}}}).json()["result"]
+        assert walked["isError"] is False
+        assert walked["content"][0]["text"].startswith("Customer since ")
+        assert "TPS report" in walked["content"][0]["text"]
+        assert walked["structuredContent"]["window"]["basis"] == "all"
 
         requested = call({"jsonrpc": "2.0", "id": 11, "method": "tools/call", "params": {"name": "request_action", "arguments": {"customer_id": "cus_mcp", "action": "create_ticket", "request": {"topic": "TPS report"}}}}).json()["result"]
         assert requested["isError"] is False and requested["content"][0]["text"].startswith("ALLOWED")

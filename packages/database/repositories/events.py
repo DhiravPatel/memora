@@ -6,7 +6,7 @@ from collections.abc import Sequence
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import func, or_, select, text, update
 
 from common.enums import EventStatus
 from common.ids import new_id
@@ -159,6 +159,114 @@ class EventRepository(BaseRepository):
             .group_by(Event.customer_id)
         )
         return {customer_id: int(count) for customer_id, count in result}
+
+    async def first_event(self, *, project_id: str, customer_id: str) -> tuple[str, str, datetime] | None:
+        """(id, type, occurred_at) of a customer's first event — where their history begins."""
+        return await self._edge(project_id, customer_id, first=True)
+
+    async def last_event(self, *, project_id: str, customer_id: str) -> tuple[str, str, datetime] | None:
+        """(id, type, occurred_at) of a customer's latest event."""
+        return await self._edge(project_id, customer_id, first=False)
+
+    async def _edge(self, project_id: str, customer_id: str, *, first: bool) -> tuple[str, str, datetime] | None:
+        order = (Event.occurred_at.asc(), Event.id.asc()) if first else (Event.occurred_at.desc(), Event.id.desc())
+        row = (
+            await self.session.execute(
+                select(Event.id, Event.event_type, Event.occurred_at)
+                .where(Event.project_id == project_id, Event.customer_id == customer_id)
+                .order_by(*order)
+                .limit(1)
+            )
+        ).first()
+        return (row[0], row[1], row[2]) if row is not None else None
+
+    async def occurred(self, project_id: str, event_ids: Sequence[str]) -> dict[str, tuple[datetime, str]]:
+        """When each event happened, and its type — to place what it caused in time."""
+        wanted = sorted({ident for ident in event_ids if ident})
+        found: dict[str, tuple[datetime, str]] = {}
+        for start in range(0, len(wanted), 1000):
+            result = await self.session.execute(
+                select(Event.id, Event.occurred_at, Event.event_type).where(
+                    Event.project_id == project_id, Event.id.in_(wanted[start : start + 1000])
+                )
+            )
+            found.update({row[0]: (row[1], row[2]) for row in result.all()})
+        return found
+
+    async def first_uses(
+        self, *, project_id: str, customer_id: str, limit: int = 200
+    ) -> list[tuple[str, str, str, str, datetime, datetime, int, str]]:
+        """(kind, key, name, first event id, first used, last used, uses, first event type)
+        for every feature and integration a customer's events name — oldest first.
+
+        Read from the events themselves, the way the templates read them: a feature event's
+        ``feature``/``feature_name``/``action``, an integration event's ``integration``/
+        ``provider``/``app``/``service``. A failed or disconnected integration is not a use.
+        """
+        result = await self.session.execute(
+            text(
+                """
+                WITH uses AS (
+                    SELECT e.id, e.event_type, e.occurred_at,
+                           CASE WHEN e.event_type ILIKE ANY (ARRAY['%integration%', '%connector%', '%oauth%'])
+                                THEN 'integration' ELSE 'feature' END AS kind,
+                           CASE WHEN e.event_type ILIKE ANY (ARRAY['%integration%', '%connector%', '%oauth%'])
+                                THEN COALESCE(e.data->>'integration', e.data->>'provider', e.data->>'app', e.data->>'service')
+                                ELSE COALESCE(e.data->>'feature', e.data->>'feature_name', e.data->>'action') END AS name
+                    FROM events e
+                    WHERE e.project_id = :project_id
+                      AND e.customer_id = :customer_id
+                      AND e.event_type ILIKE ANY (ARRAY['%integration%', '%connector%', '%oauth%', '%feature%', '%action_performed%'])
+                      AND NOT (e.event_type ILIKE ANY (ARRAY['%fail%', '%error%', '%disconnect%', '%revoke%']))
+                ), named AS (
+                    SELECT uses.*, lower(regexp_replace(trim(name), '[_\s-]+', ' ', 'g')) AS key
+                    FROM uses
+                    WHERE name IS NOT NULL AND trim(name) <> ''
+                )
+                SELECT kind, key, name, id, occurred_at, last_at, uses, event_type FROM (
+                    SELECT DISTINCT ON (kind, key)
+                           kind, key, name, id, occurred_at, event_type,
+                           count(*) OVER (PARTITION BY kind, key) AS uses,
+                           max(occurred_at) OVER (PARTITION BY kind, key) AS last_at
+                    FROM named
+                    ORDER BY kind, key, occurred_at, id
+                ) firsts
+                ORDER BY occurred_at
+                LIMIT CAST(:limit AS integer)
+                """
+            ),
+            {"project_id": project_id, "customer_id": customer_id, "limit": limit},
+        )
+        return [
+            (row.kind, row.key, row.name, row.id, row.occurred_at, row.last_at, int(row.uses), row.event_type)
+            for row in result
+        ]
+
+    async def quiet_gaps(
+        self, *, project_id: str, customer_id: str, min_days: int, limit: int = 100
+    ) -> list[tuple[str, datetime, str, datetime, str]]:
+        """(last event id, its time, returning event id, its time, its type) for every run
+        of at least ``min_days`` without an event — oldest first. A silence still going on
+        has no returning event; see :meth:`last_event`."""
+        result = await self.session.execute(
+            text(
+                """
+                SELECT previous_id, previous_at, id, occurred_at, event_type FROM (
+                    SELECT id, occurred_at, event_type,
+                           lag(id) OVER (ORDER BY occurred_at, id) AS previous_id,
+                           lag(occurred_at) OVER (ORDER BY occurred_at, id) AS previous_at
+                    FROM events
+                    WHERE project_id = :project_id AND customer_id = :customer_id
+                ) ordered
+                WHERE previous_at IS NOT NULL
+                  AND occurred_at - previous_at >= make_interval(days => CAST(:min_days AS integer))
+                ORDER BY occurred_at
+                LIMIT CAST(:limit AS integer)
+                """
+            ),
+            {"project_id": project_id, "customer_id": customer_id, "min_days": min_days, "limit": limit},
+        )
+        return [(row.previous_id, row.previous_at, row.id, row.occurred_at, row.event_type) for row in result]
 
     async def first_occurred_at(self, *, project_id: str, customer_id: str) -> datetime | None:
         """When a customer's first event happened."""

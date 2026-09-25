@@ -14,6 +14,7 @@ import { AskMemory } from "@/components/ask-memory";
 import { CausalChains } from "@/components/causal-chains";
 import { ChangesPanel } from "@/components/changes-panel";
 import { CustomerBriefPanel } from "@/components/customer-brief";
+import { CustomerJourneyPanel } from "@/components/customer-journey";
 import {
   ForecastCard,
   GoalList,
@@ -54,6 +55,7 @@ const TABS = [
   "Brief",
   "Actions",
   "Changes",
+  "Journey",
   "State",
   "Facts",
   "360",
@@ -61,7 +63,7 @@ const TABS = [
   "Freshness",
   "Goals",
   "Signals",
-  "Timeline",
+  "Raw timeline",
   "Why",
   "Graph",
   "Agents",
@@ -103,7 +105,7 @@ export default function CustomerPage() {
       api<{ entries: TimelineEntry[] }>(`${base}/timeline`, {
         query: { limit: 150 },
       }),
-    enabled: Boolean(projectId) && tab === "Timeline",
+    enabled: Boolean(projectId) && tab === "Raw timeline",
   });
 
   const graph = useQuery({
@@ -256,6 +258,8 @@ export default function CustomerPage() {
 
       {tab === "Changes" && <ChangesPanel projectId={projectId} customerId={customerId} />}
 
+      {tab === "Journey" && <CustomerJourneyPanel projectId={projectId} customerId={customerId} />}
+
       {tab === "State" && <StatePanel projectId={projectId} customerId={customerId} />}
 
       {tab === "Facts" && <FactsPanel projectId={projectId} customerId={customerId} />}
@@ -318,7 +322,7 @@ export default function CustomerPage() {
         <CustomerFreshnessPanel projectId={projectId} customerId={customerId} />
       )}
 
-      {tab === "Timeline" && (
+      {tab === "Raw timeline" && (
         <Card>
           <CardHeader>
             <CardTitle>What happened, and what we concluded</CardTitle>

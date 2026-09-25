@@ -85,7 +85,8 @@ class BriefParts:
     plan_direction: str | None = None  # upgraded, downgraded, cancelled, renewed, started, changed
     previous_plan: str | None = None
     plan_changed_days: int | None = None
-    lifecycle: list[dict[str, Any]] = field(default_factory=list)  # track, label, state, entered_at, reasons
+    # track, label, state, entered_at, reasons (on entry), reasons_now (live; None when not re-checkable)
+    lifecycle: list[dict[str, Any]] = field(default_factory=list)
     # Every open problem, counted over everything — a count is not a quote (§17c).
     open_problems: int = 0
     problems: list[dict[str, Any]] = field(default_factory=list)  # id, content, first_seen_at, evidence_count
@@ -102,6 +103,10 @@ class BriefParts:
     cautions: list[dict[str, Any]] = field(default_factory=list)  # action, decision, summary, rules, evidence
     # Open drift flags (§26 5.5): kind, stated, observed, summary, counts, memory_id.
     drift: list[dict[str, Any]] = field(default_factory=list)
+    # What pulls health down: label, contribution (negative), memory_ids.
+    health_factors: list[dict[str, Any]] = field(default_factory=list)
+    # What they talk about: name, mentions, memory_ids — the entities of their memories.
+    topics: list[dict[str, Any]] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------- words
@@ -355,6 +360,75 @@ def _short(summary: str, clauses: int = CHANGE_CLAUSES) -> str:
     return f"{lead}: {'; '.join(items[:clauses])} — and {more} more change{'' if more == 1 else 's'}."
 
 
+WHY_LIMIT = 5
+CARES_LIMIT = 5
+
+
+def why(parts: BriefParts) -> list[str]:
+    """Why the customer is where they are: the reasons their lifecycle state holds *now*
+    (the reasons they entered it only when it cannot be re-checked), what pulls their health
+    down, and the risks the forecast sees — once each."""
+    reasons: list[str] = []
+    for track in parts.lifecycle:
+        if track.get("track") == "lifecycle":
+            current = track.get("reasons_now")
+            reasons.extend(str(reason) for reason in (current if current is not None else track.get("reasons") or []))
+    for factor in sorted(parts.health_factors, key=lambda item: float(item.get("contribution") or 0)):
+        if float(factor.get("contribution") or 0) < 0 and factor.get("label"):
+            reasons.append(str(factor["label"]))
+    reasons.extend(str(risk.get("label")) for risk in parts.risks if risk.get("label"))
+    seen: set[str] = set()
+    found: list[str] = []
+    for reason in reasons:
+        key = reason.strip().lower()
+        if key and key not in seen:
+            seen.add(key)
+            found.append(reason.strip())
+    return found[:WHY_LIMIT]
+
+
+def _track_line(track: dict[str, Any]) -> str:
+    """"Lifecycle: at risk — said they may cancel", or "…: at risk, moving to active"."""
+    line = f"{track['label']}: {_words(track['state'])}"
+    if track.get("moving_to"):
+        return f"{line}, moving to {_words(track['moving_to'])}"
+    reasons = _track_reasons(track)
+    return f"{line} — {'; '.join(reasons[:2])}" if reasons else line
+
+
+def _track_reasons(track: dict[str, Any]) -> list[str]:
+    """A track's reasons as they stand now, or as they were on entry when not re-checkable."""
+    current = track.get("reasons_now")
+    return list(current if current is not None else track.get("reasons") or [])
+
+
+def cares_about(parts: BriefParts) -> list[dict[str, Any]]:
+    """What matters to them, from what they said: the goals they are working towards, then
+    the products and features they talk about most."""
+    found: list[dict[str, Any]] = []
+    for goal in parts.goals:
+        if str(goal.get("status")) in ("open", "progressing", "stalled") and goal.get("statement"):
+            found.append(
+                {
+                    "topic": " ".join(str(goal["statement"]).split()).rstrip("."),
+                    "detail": f"a goal, {_words(goal.get('status'))}",
+                    "evidence": [goal["id"]] if goal.get("id") else [],
+                }
+            )
+    for topic in sorted(parts.topics, key=lambda item: (-int(item.get("mentions") or 0), str(item.get("name")))):
+        mentions = int(topic.get("mentions") or 0)
+        if mentions < 2 or not topic.get("name"):
+            continue
+        found.append(
+            {
+                "topic": str(topic["name"]),
+                "detail": f"in {_plural(mentions, 'memory')}".replace("memorys", "memories"),
+                "evidence": list(topic.get("memory_ids") or [])[:5],
+            }
+        )
+    return found[:CARES_LIMIT]
+
+
 def drift_points(parts: BriefParts) -> list[str]:
     """What evidence says may be out of date, each as a question to ask — never as fact."""
     points: list[str] = []
@@ -452,6 +526,8 @@ def compose(parts: BriefParts) -> dict[str, Any]:
     step, set_aside = next_step(parts)
     return {
         "headline": headline(parts),
+        "why": why(parts),
+        "cares_about": cares_about(parts),
         "talking_points": talking_points(parts, step),
         "cautions": caution_lines(parts.cautions, open_problems=max(parts.open_problems, len(parts.problems))),
         "next_step": step,
@@ -480,11 +556,9 @@ def markdown(brief: dict[str, Any]) -> str:
     if plan.get("name"):
         statement = f" — {_quote(plan['statement'])}" if plan.get("statement") else ""
         facts.append(f"**Plan:** {str(plan['name']).title()}{statement}")
-    tracks = situation.get("lifecycle") or []
+    tracks = [track for track in situation.get("lifecycle") or [] if track.get("state")]
     if tracks:
-        described = " · ".join(f"{track['label']}: {_words(track['state'])}" for track in tracks if track.get("state"))
-        reasons = next((track.get("reasons") for track in tracks if track.get("reasons")), None)
-        facts.append(f"**Lifecycle:** {described}" + (f" — {'; '.join(reasons[:3])}" if reasons else ""))
+        facts.append(f"**Lifecycle:** {' · '.join(_track_line(track) for track in tracks)}")
     since = customer.get("customer_since")
     active = customer.get("last_active_at")
     if isinstance(generated, datetime) and (isinstance(since, datetime) or isinstance(active, datetime)):
@@ -494,8 +568,14 @@ def markdown(brief: dict[str, Any]) -> str:
         if isinstance(active, datetime):
             known.append(f"last active {_when(active, generated)}")
         facts.append(f"**Account:** {', '.join(known)}")
+    reasons = situation.get("why") or []
+    if reasons:
+        facts.append(f"**Why:** {'; '.join(reasons)}")
     if facts:
         lines += ["", "## Situation", *[f"- {fact}" for fact in facts]]
+    cares = brief.get("cares_about") or []
+    if cares:
+        lines += ["", "## They care about", *[f"- {item['topic']} ({item['detail']})" for item in cares]]
 
     if brief.get("talking_points"):
         lines += ["", "## Talk about", *[f"- {point}" for point in brief["talking_points"]]]

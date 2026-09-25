@@ -158,6 +158,30 @@ def test_a_problem_reported_again_is_one_change_however_often():
     assert recurring.detail["times"] == 2
 
 
+def test_topics_are_the_graphs_products_integrations_and_features():
+    found = detect(
+        inputs(
+            memories=[memory("t1", "problem", "The CSV importer and Shopify fail.", entity_names=["The CSV", "Shopify"])],
+            topic_types={"the csv": "other", "shopify": "integration"},
+        )
+    )
+    assert found[0].topics == ["Shopify"]
+
+
+def test_a_score_is_feedback_by_its_band():
+    """An NPS detractor has no sentiment recorded; its band is what it says."""
+    found = detect(
+        inputs(
+            memories=[
+                memory("n1", "feedback", "The customer gave a satisfaction score of 3 (detractor).", days_ago=1),
+                memory("n2", "feedback", "The customer gave a satisfaction score of 7 (passive).", days_ago=2),
+            ]
+        )
+    )
+    quoted = [change for change in found if change.type == "feedback" and change.kind in ("negative", "positive")]
+    assert [(change.kind, change.subject, change.detail.get("band")) for change in quoted] == [("negative", "n1", "detractor")]
+
+
 def test_strong_feedback_is_quoted_and_the_trend_counted():
     found = detect(
         inputs(

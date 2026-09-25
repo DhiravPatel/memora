@@ -637,6 +637,28 @@ class MemoryRepository(BaseRepository):
         )
         return list(result.scalars())
 
+    async def history(
+        self, *, project_id: str, customer_id: str, types: Sequence[str], limit: int = 2000
+    ) -> list[Memory]:
+        """A customer's memories of these types, any status but deleted, oldest first — the
+        newest ``limit`` of them, so a long history keeps its latest chapters.
+
+        A system read, like :meth:`first_seen_between`: the journey is decided over
+        everything and shown through a reader (§26 6.6).
+        """
+        result = await self.session.execute(
+            select(Memory)
+            .where(
+                Memory.project_id == project_id,
+                Memory.customer_id == customer_id,
+                Memory.type.in_(list(types)),
+                Memory.status != MemoryStatus.DELETED,
+            )
+            .order_by(Memory.first_seen_at.desc())
+            .limit(limit)
+        )
+        return sorted(result.scalars(), key=lambda row: row.first_seen_at)
+
     async def latest_before(
         self, *, project_id: str, customer_id: str, type: MemoryType, before: datetime
     ) -> Memory | None:

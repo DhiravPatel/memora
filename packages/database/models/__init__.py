@@ -3,7 +3,7 @@
 from database.models.agent import AgentSession, AgentTurn
 from database.models.agent_policy import AgentAction, AgentApproval, AgentCheck, AgentProfile
 from database.models.api_key import ApiKey
-from database.models.customer import Customer
+from database.models.customer import Customer, CustomerView
 from database.models.customer_state import CustomerSnapshot, CustomerState
 from database.models.embedding import EMBEDDING_DIMENSIONS, Embedding
 from database.models.encryption import EncryptionKeyUse
@@ -40,6 +40,7 @@ __all__ = [
     "Customer",
     "CustomerSnapshot",
     "CustomerState",
+    "CustomerView",
     "CustomerGoal",
     "Embedding",
     "EncryptionKeyUse",

@@ -269,7 +269,7 @@ def agent_approval_decided(*, project_id: str, customer: Any, approval: Any) -> 
 def memory_drift_detected(*, project_id: str, customer: Any, drift: Any) -> OutboundEvent:
     """Evidence says a standing memory may be out of date (§26 5.5) — a stated channel the
     customer no longer uses, a plan billing disagrees with. Nothing changed yet: a person
-    confirms or dismisses it."""
+    confirms the change, keeps the memory, or dismisses the evidence."""
     return OutboundEvent(
         type=WebhookEvent.MEMORY_DRIFT_DETECTED,
         project_id=project_id,
@@ -278,8 +278,9 @@ def memory_drift_detected(*, project_id: str, customer: Any, drift: Any) -> Outb
 
 
 def memory_drift_resolved(*, project_id: str, customer: Any, drift: Any) -> OutboundEvent:
-    """A drift flag was confirmed (the memory was changed), dismissed, or cleared because
-    the evidence no longer points the other way."""
+    """A drift flag was decided or closed: ``confirmed`` (the memory was changed), ``kept``
+    (a person vouched for the memory), ``dismissed`` (the evidence was set aside), or
+    ``cleared`` (the evidence stopped holding, or the memory is no longer standing)."""
     return OutboundEvent(
         type=WebhookEvent.MEMORY_DRIFT_RESOLVED,
         project_id=project_id,

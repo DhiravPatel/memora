@@ -1345,6 +1345,8 @@ export interface Change {
   reasons: string[];
   detail: Record<string, unknown>;
   importance: number;
+  /** What it is about: the products, integrations and features its memory names. */
+  topics?: string[];
 }
 
 export interface CustomerAt {
@@ -1390,12 +1392,105 @@ export interface BriefCaution {
 }
 
 export interface BriefTrack {
+  id?: string | null;
   track: string;
   label: string;
   state: string;
   entered_at: string;
   pinned: boolean;
+  /** Why they entered the state, when they did. */
   reasons: string[];
+  /** Why they are in it now; null when a person set it or it is the initial state. */
+  reasons_now?: string[] | null;
+  /** Whether the transition that brought them here would still fire. */
+  holds?: boolean | null;
+  /** When it would not: the way out they are closest to. */
+  held_by?: string | null;
+  /** Nothing keeps them here and a way out would fire: where the next refresh moves them. */
+  moving_to?: string | null;
+}
+
+// ------------------------------------------------------------- journey (§26 6.6)
+
+export type MilestoneCategory =
+  | "account"
+  | "usage"
+  | "problem"
+  | "plan"
+  | "intent"
+  | "preference"
+  | "goal"
+  | "health"
+  | "lifecycle"
+  | "activity"
+  | "feedback"
+  | "relationship";
+
+export interface JourneyHealthSide {
+  score: number | null;
+  band: string | null;
+}
+
+/** One moment that changed something, and the five things a person expands it for. */
+export interface Milestone {
+  id: string;
+  /** When it happened — the time of the event behind it. */
+  at: string;
+  /** When Memora recorded it, when that is a day or more later (imported history). */
+  recorded_at: string | null;
+  category: MilestoneCategory;
+  kind: string;
+  title: string;
+  tone: "positive" | "negative" | "neutral";
+  importance: number;
+  topics: string[];
+  what_happened: string;
+  why_it_matters: string | null;
+  memories: { id: string; type: string; content: string | null; change: string }[];
+  health: {
+    before: JourneyHealthSide | null;
+    after: JourneyHealthSide | null;
+    delta: number | null;
+    drivers: string[];
+    snapshot_id: string | null;
+  } | null;
+  transitions: {
+    id: string;
+    track: string;
+    label: string;
+    before: string | null;
+    after: string;
+    reasons: string[];
+    manual: boolean;
+  }[];
+  evidence: {
+    memories: string[];
+    goals: string[];
+    events: string[];
+    snapshots: string[];
+    states: string[];
+  };
+  detail: Record<string, unknown>;
+}
+
+export interface CustomerJourney {
+  customer_id: string;
+  customer: { id: string; external_id: string; name: string | null };
+  customer_since: string | null;
+  window: {
+    since: string | null;
+    until: string;
+    basis: string;
+    label: string;
+    note: string | null;
+  };
+  summary: string;
+  milestones: Milestone[];
+  counts: Partial<Record<MilestoneCategory, number>>;
+  total: number;
+  truncated: boolean;
+  withheld: number;
+  generated_at: string;
 }
 
 // ------------------------------------------------------- freshness and drift (§26 5.5)
@@ -1415,7 +1510,7 @@ export interface Freshness {
 }
 
 export type DriftKind = "channel" | "plan" | "usage" | "quiet_problem";
-export type DriftStatus = "open" | "confirmed" | "dismissed" | "cleared";
+export type DriftStatus = "open" | "confirmed" | "kept" | "dismissed" | "cleared";
 
 export interface DriftFlag {
   id: string;
@@ -1499,9 +1594,12 @@ export interface CustomerBrief {
       direction: string | null;
     };
     lifecycle: BriefTrack[];
+    /** Why they are where they are: lifecycle reasons, what pulls health down, risks. */
+    why?: string[];
     open_problems: number;
     goals: Record<string, number>;
   };
+  cares_about?: { topic: string; detail: string; evidence: string[] }[];
   talking_points: string[];
   cautions: BriefCaution[];
   open_issues: {
