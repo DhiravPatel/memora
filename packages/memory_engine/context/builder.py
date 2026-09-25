@@ -7,13 +7,14 @@ a token budget, removes near-duplicates, and keeps the distinction between what 
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
 from common.enums import MemoryType
 from common.text import jaccard
 from common.tokens import estimate_tokens, truncate_to_tokens
+from memory_engine.freshness import note as freshness_note
 from memory_engine.schemas import ScoredMemory
 
 # Memories whose wording overlaps this much are treated as the same statement.
@@ -90,7 +91,11 @@ class CustomerContext:
             if not items:
                 continue
             lines.append(f"\n{section.replace('_', ' ').title()}:")
-            lines.extend(f"- {item['content']}" for item in items)
+            # A memory that is not fresh says so, so the agent weighs it (§26 5.5).
+            lines.extend(
+                f"- {item['content']}" + (f" ({item['freshness_note']})" if item.get("freshness_note") else "")
+                for item in items
+            )
         if self.recent_events:
             lines.append("\nRecent Events:")
             lines.extend(
@@ -117,6 +122,7 @@ class ContextBuilder:
         recent_events: Sequence[dict[str, Any]] = (),
         relationships: Sequence[dict[str, Any]] = (),
         token_budget: int | None = None,
+        freshness: Mapping[str, Any] | None = None,
     ) -> CustomerContext:
         budget = token_budget or self.token_budget
         sections: dict[str, list[dict[str, Any]]] = {}
@@ -134,11 +140,13 @@ class ContextBuilder:
                 left_out[memory.id] = "section_cap"
                 continue
             content = memory.content.strip()
+            current = (freshness or {}).get(memory.id)
+            flagged = freshness_note(current)
             if self._is_duplicate(content, sections):
                 left_out[memory.id] = "duplicate"
                 continue
 
-            cost = estimate_tokens(content) + 12  # + per-item JSON overhead
+            cost = estimate_tokens(content) + 12 + (estimate_tokens(flagged) if flagged else 0)  # + per-item JSON overhead
             if used_tokens + cost > budget:
                 truncated = True
                 left_out[memory.id] = "token_budget"
@@ -157,6 +165,15 @@ class ContextBuilder:
                     "source_event_ids": list(memory.source_event_ids or []),
                     "score": round(candidate.score, 4),
                     "retrieved_by": sorted(candidate.strategies),
+                    **(
+                        {
+                            "freshness": current.state,
+                            "effective_confidence": round(current.effective_confidence, 3),
+                            "freshness_note": flagged,
+                        }
+                        if current is not None
+                        else {}
+                    ),
                 }
             )
             memory_ids.append(memory.id)

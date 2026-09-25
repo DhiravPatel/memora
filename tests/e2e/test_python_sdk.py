@@ -236,6 +236,44 @@ def test_the_brief_through_the_sdk(memory):
     assert "## Don't" in page
 
 
+def test_freshness_and_drift_through_the_sdk(memory):
+    """§26 5.5 over a real socket: a stated channel, contacts elsewhere, and the flag's life."""
+    from datetime import UTC, datetime, timedelta
+
+    from ai_memory import DriftFlag
+
+    memory.upsert_customer("cus_drift", name="Hooli")
+    stated = memory.remember("cus_drift", "The customer prefers email.", type="preference")
+    later = datetime.now(UTC) + timedelta(seconds=5)
+    for index in range(5):
+        memory.track(
+            customer_id="cus_drift",
+            type="whatsapp_message",
+            data={"message": "Quick question"},
+            occurred_at=later + timedelta(minutes=index),
+        )
+    run = memory.refresh_drift("cus_drift")
+    assert len(run["opened"]) == 1 and run["open"][0]["kind"] == "channel"
+
+    flags = memory.drift("cus_drift")
+    assert [type(flag) for flag in flags] == [DriftFlag]
+    flag = flags[0]
+    assert flag.is_open and flag.kind == "channel" and flag.observed == "WhatsApp"
+    assert memory.drift_flag(flag.id).summary == flag.summary
+
+    report = memory.freshness("cus_drift")
+    assert report["counts"]["outdated"] == 1
+    listed = memory.memories("cus_drift", type="preference")
+    assert listed[0].id == stated.id and listed[0].freshness is not None
+    assert listed[0].freshness.state == "outdated" and listed[0].freshness.needs_attention
+
+    done = memory.confirm_drift(flag.id, note="Asked them.")
+    assert done.status == "confirmed" and done.replacement_memory_id
+    assert memory.facts("cus_drift")["values"]["preferences.channel"] == "whatsapp"
+    assert memory.drift("cus_drift") == []
+    assert [item.id for item in memory.drift("cus_drift", status="confirmed")] == [flag.id]
+
+
 def test_manual_memory_query_and_context(memory):
     memory.remember(
         "cus_sdk",

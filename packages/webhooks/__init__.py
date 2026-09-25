@@ -21,6 +21,8 @@ from webhooks.events import (
     goal_changed,
     memory_conflict,
     memory_created,
+    memory_drift_detected,
+    memory_drift_resolved,
     memory_updated,
     signal_raised,
 )
@@ -54,6 +56,8 @@ __all__ = [
     "goal_changed",
     "memory_conflict",
     "memory_created",
+    "memory_drift_detected",
+    "memory_drift_resolved",
     "memory_updated",
     "new_secret",
     "signal_raised",

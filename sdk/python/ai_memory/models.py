@@ -444,6 +444,85 @@ class EventExplanation:
 
 
 @dataclass(slots=True)
+class Freshness:
+    """How current a memory is (§26 5.5): its state and the confidence left after time."""
+
+    state: str  # active | aging | stale | outdated | conflicted | expired | superseded
+    effective_confidence: float
+    days_since_evidence: int
+    window_days: int
+    evidence_at: str | None = None
+    reasons: list[str] = field(default_factory=list)
+    contradicted_at: str | None = None
+    drift: list[dict[str, Any]] = field(default_factory=list)
+
+    @property
+    def needs_attention(self) -> bool:
+        return self.state in ("stale", "outdated", "conflicted")
+
+    @classmethod
+    def from_api(cls, data: dict[str, Any] | None) -> Freshness | None:
+        if not data:
+            return None
+        return cls(
+            state=data.get("state", "active"),
+            effective_confidence=float(data.get("effective_confidence") or 0.0),
+            days_since_evidence=int(data.get("days_since_evidence") or 0),
+            window_days=int(data.get("window_days") or 0),
+            evidence_at=data.get("evidence_at"),
+            reasons=list(data.get("reasons") or []),
+            contradicted_at=data.get("contradicted_at"),
+            drift=list(data.get("drift") or []),
+        )
+
+
+@dataclass(slots=True)
+class DriftFlag:
+    """Evidence that a standing memory may be out of date (§26 5.5). A flag, never a change:
+    ``confirm_drift`` writes the change, ``dismiss_drift`` keeps the memory."""
+
+    id: str
+    kind: str  # channel | plan | usage | quiet_problem
+    status: str  # open | confirmed | dismissed | cleared
+    stated: str
+    summary: str
+    observed: str | None = None
+    counts: dict[str, Any] = field(default_factory=dict)
+    evidence: list[str] = field(default_factory=list)
+    memory: dict[str, Any] = field(default_factory=dict)
+    customer: dict[str, Any] = field(default_factory=dict)
+    detected_at: str | None = None
+    resolved_at: str | None = None
+    note: str | None = None
+    replacement_memory_id: str | None = None
+    raw: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def is_open(self) -> bool:
+        return self.status == "open"
+
+    @classmethod
+    def from_api(cls, data: dict[str, Any]) -> DriftFlag:
+        return cls(
+            id=data["id"],
+            kind=data.get("kind", ""),
+            status=data.get("status", "open"),
+            stated=data.get("stated", ""),
+            summary=data.get("summary", ""),
+            observed=data.get("observed"),
+            counts=dict(data.get("counts") or {}),
+            evidence=list(data.get("evidence") or []),
+            memory=dict(data.get("memory") or {}),
+            customer=dict(data.get("customer") or {}),
+            detected_at=data.get("detected_at"),
+            resolved_at=data.get("resolved_at"),
+            note=data.get("note"),
+            replacement_memory_id=data.get("replacement_memory_id"),
+            raw=data,
+        )
+
+
+@dataclass(slots=True)
 class Memory:
     id: str
     type: str
@@ -456,6 +535,8 @@ class Memory:
     last_seen_at: str | None = None
     score: float | None = None
     retrieved_by: list[str] = field(default_factory=list)
+    # How current it is, where the endpoint assessed it (§26 5.5).
+    freshness: Freshness | None = None
 
     @classmethod
     def from_api(cls, data: dict[str, Any]) -> Memory:
@@ -471,6 +552,7 @@ class Memory:
             last_seen_at=data.get("last_seen_at"),
             score=data.get("score"),
             retrieved_by=list(data.get("retrieved_by") or []),
+            freshness=Freshness.from_api(data.get("freshness")),
         )
 
 

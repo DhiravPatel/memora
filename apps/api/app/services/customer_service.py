@@ -28,6 +28,7 @@ from database.models import (
     CustomerGoal,
     Event,
     Memory,
+    MemoryDrift,
     MemoryLink,
     Project,
     SignalSnapshot,
@@ -49,6 +50,7 @@ class MergeResult:
     goals_moved: int = 0
     sessions_moved: int = 0
     agent_actions_moved: int = 0
+    drift_moved: int = 0
     conflicts_relinked: int = 0
 
     def as_dict(self) -> dict[str, Any]:
@@ -61,6 +63,7 @@ class MergeResult:
             "goals_moved": self.goals_moved,
             "sessions_moved": self.sessions_moved,
             "agent_actions_moved": self.agent_actions_moved,
+            "drift_moved": self.drift_moved,
         }
 
 
@@ -146,6 +149,8 @@ class CustomerService:
         result.agent_actions_moved = await self._move(AgentAction, source.id, target.id)
         await self._move(AgentCheck, source.id, target.id)
         await self._move(AgentApproval, source.id, target.id)
+        # Drift flags stay with the memories they are about (§26 5.5).
+        result.drift_moved = await self._move(MemoryDrift, source.id, target.id)
         # Signal snapshots are a per-day series keyed on customer: merging two series would
         # collide on (customer_id, captured_on), so the source's history is dropped and the
         # nightly job rebuilds the survivor's from the merged memories.

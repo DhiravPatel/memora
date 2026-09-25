@@ -10,6 +10,7 @@ import type {
   Page,
   TimelineEntry,
 } from "../types.js";
+import { toFreshness } from "./drift.js";
 import { toRecommendation, toSignal } from "./foresight.js";
 import { toChange } from "./state.js";
 
@@ -39,6 +40,7 @@ function toMemory(raw: any): Memory {
     firstSeenAt: raw.first_seen_at,
     lastSeenAt: raw.last_seen_at,
     expiresAt: raw.expires_at ?? null,
+    freshness: toFreshness(raw.freshness),
   };
 }
 

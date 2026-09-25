@@ -3,6 +3,7 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 
+import { FreshnessBadge } from "@/components/freshness";
 import { MemoryTypeBadge, RestrictedBadge, ScoreBar, StatusBadge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -72,6 +73,11 @@ export function MemoryTable({
                       />
                     </span>
                   )}
+                  {memory.freshness && memory.freshness.state !== "active" && (
+                    <span className="ml-1 mt-1.5 inline-block">
+                      <FreshnessBadge freshness={memory.freshness} />
+                    </span>
+                  )}
                   {expanded === memory.id && (
                     <div className="mt-2 border-l-2 border-accent bg-surface-2 px-3 py-2">
                       <p className="label">Provenance</p>
@@ -79,6 +85,14 @@ export function MemoryTable({
                         {memory.id} · source {memory.source} · events{" "}
                         {memory.source_event_ids.join(", ") || "—"}
                       </p>
+                      {memory.freshness && (
+                        <p className="mt-1 text-[11px] text-muted-foreground">
+                          {memory.freshness.reasons.join(" ") ||
+                            `Last evidence ${formatRelative(memory.freshness.evidence_at)}.`}{" "}
+                          Effective confidence{" "}
+                          {Math.round(memory.freshness.effective_confidence * 100)}%.
+                        </p>
+                      )}
                     </div>
                   )}
                 </button>

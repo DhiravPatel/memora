@@ -135,6 +135,23 @@ class AgentSessionRepository(BaseRepository):
         await self.session.flush()
         return session
 
+    async def started_since(
+        self, *, project_id: str, customer_id: str, since: datetime, limit: int = 200
+    ) -> list[AgentSession]:
+        """Conversations a customer started after a moment, newest first — contacts, for
+        channel drift (§26 5.5)."""
+        result = await self.session.execute(
+            select(AgentSession)
+            .where(
+                AgentSession.project_id == project_id,
+                AgentSession.customer_id == customer_id,
+                AgentSession.started_at > since,
+            )
+            .order_by(AgentSession.started_at.desc())
+            .limit(limit)
+        )
+        return list(result.scalars())
+
     async def idle(self, *, before: datetime, limit: int = 100) -> list[AgentSession]:
         """Open sessions nobody has touched since ``before``."""
         result = await self.session.execute(

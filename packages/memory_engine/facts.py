@@ -186,6 +186,31 @@ CATALOG: dict[str, FactSpec] = {
         _spec("request.plan", "string", "In a guardrail check: a plan the action involves, lowercase"),
         _spec("memories.count", "number", "Active memories, restricted ones included"),
         _spec("memories.restricted_count", "number", "Active memories the restriction policy marked restricted"),
+        _spec("memories.stale_count", "number", "Memories past their type's freshness window with no new evidence"),
+        _spec(
+            "memories.attention_count",
+            "number",
+            "Memories a person should look at: stale, possibly outdated (open drift) or contradicted",
+        ),
+        _spec("memories.stale_share", "number", "Share of standing memories that are stale, 0–1"),
+        # -------------------------------------------------------------- drift
+        _spec("drift.open_count", "number", "Open drift flags: memories evidence says may be out of date"),
+        _spec("drift.kinds", "list", "Kinds of open drift flag", values=("channel", "plan", "usage", "quiet_problem")),
+        _spec(
+            "preferences.channel_outdated",
+            "boolean",
+            "Whether the preferred channel is flagged possibly outdated by the channels they actually use",
+        ),
+        _spec(
+            "preferences.observed_channel",
+            "string",
+            "The channel they actually reach out through, when it contradicts the stated one, lowercase",
+        ),
+        _spec(
+            "preferences.observed_share",
+            "number",
+            "Share of their contacts since the stated preference that came through the observed channel, 0–1",
+        ),
     )
 }
 
@@ -285,7 +310,7 @@ class CustomerFacts:
                 if kept != value:
                     values[name] = kept
                     withheld.append(name)
-            elif spec.type in ("string", "enum") and value is not None:
+            elif spec.type in ("string", "enum", "boolean") and value is not None:
                 ids = self.evidence.get(name, [])
                 if ids and all(ident in hidden for ident in ids):
                     values[name] = None
@@ -359,6 +384,10 @@ class FactInputs:
     actions: Sequence[tuple[str, datetime, float | None]] = ()
     # Ids of this customer's restricted memories, so goals born from one are known too.
     restricted_memory_ids: frozenset[str] = frozenset()
+    # How current each memory in ``memories_by_type`` is (memory id -> Freshness), and the
+    # customer's open drift flags (§26 5.5).
+    freshness: dict[str, Any] = field(default_factory=dict)
+    drift: Sequence[Any] = ()
 
 
 def _days_since(moment: datetime | None, now: datetime) -> float | None:
@@ -510,6 +539,33 @@ def plan_of(memory: Any) -> tuple[str | None, str | None]:
     return (str(plan).lower() if plan else None, str(direction) if direction else None)
 
 
+def preferred_channel(preferences: Sequence[Any]) -> tuple[str | None, str | None, dict[str, list[str]]]:
+    """The channel a customer prefers, the preference memory that says so, and every channel
+    any preference names (lowercase → memory ids).
+
+    Read for stance, not mention: "WhatsApp instead of email" prefers WhatsApp, and a newer
+    "stop emailing us" rules email out even where an older preference named it. Shared by
+    the fact document and drift detection (§26 5.5), so both mean the same preference.
+    """
+    newest_first = sorted(preferences, key=lambda memory: ensure_utc(memory.last_seen_at), reverse=True)
+    channel_index: dict[str, list[str]] = {}
+    preferred: str | None = None
+    preferred_id: str | None = None
+    turned_away: set[str] = set()
+    for memory in newest_first:
+        wanted, avoided = channel_stance(memory.content)
+        if not wanted and not avoided:
+            wanted = [str(channel) for channel in _meta(memory).get("channels") or []]
+        for channel in [*wanted, *avoided]:
+            channel_index.setdefault(str(channel).lower(), []).append(memory.id)
+        if preferred is None:
+            choice = next((str(channel).lower() for channel in wanted if str(channel).lower() not in turned_away), None)
+            if choice is not None:
+                preferred, preferred_id = choice, memory.id
+        turned_away.update(str(channel).lower() for channel in avoided)
+    return preferred, preferred_id, channel_index
+
+
 def build_facts(inputs: FactInputs) -> CustomerFacts:
     """Compute every fact in :data:`CATALOG` from what the engine already knows."""
     now = inputs.now
@@ -642,25 +698,24 @@ def build_facts(inputs: FactInputs) -> CustomerFacts:
     # ---------------------------------------------------------- preferences
     preferences = grouped.get("preference", [])
     newest_first = sorted(preferences, key=lambda memory: ensure_utc(memory.last_seen_at), reverse=True)
-    channel_index: dict[str, list[str]] = {}
-    preferred: str | None = None
-    preferred_id: str | None = None
-    # Read for stance, not just mention: "WhatsApp instead of email" prefers WhatsApp, and a
-    # newer "stop emailing us" rules email out even where an older preference named it.
-    turned_away: set[str] = set()
-    for memory in newest_first:
-        wanted, avoided = channel_stance(memory.content)
-        if not wanted and not avoided:
-            wanted = [str(channel) for channel in _meta(memory).get("channels") or []]
-        for channel in [*wanted, *avoided]:
-            channel_index.setdefault(str(channel).lower(), []).append(memory.id)
-        if preferred is None:
-            choice = next((str(channel).lower() for channel in wanted if str(channel).lower() not in turned_away), None)
-            if choice is not None:
-                preferred, preferred_id = choice, memory.id
-        turned_away.update(str(channel).lower() for channel in avoided)
+    preferred, preferred_id, channel_index = preferred_channel(preferences)
     values["preferences.channel"] = preferred
     values["preferences.channels"] = sorted(channel_index)
+    # The stated channel, against the ones they actually use (§26 5.5).
+    outdated = next(
+        (flag for flag in inputs.drift if flag.kind == "channel" and flag.memory_id == preferred_id),
+        None,
+    )
+    counted = (getattr(outdated, "counts", None) or {}) if outdated is not None else {}
+    values["preferences.channel_outdated"] = outdated is not None if preferred is not None else None
+    values["preferences.observed_channel"] = str(outdated.observed).lower() if outdated is not None and outdated.observed else None
+    values["preferences.observed_share"] = (
+        round(float(counted["observed"]) / float(counted["total"]), 3)
+        if counted.get("total") and counted.get("observed") is not None
+        else None
+    )
+    for name in ("preferences.channel_outdated", "preferences.observed_channel", "preferences.observed_share"):
+        evidence[name] = [preferred_id] if preferred_id else []
     # Opt-outs live in preferences and in feedback ("stop calling us" is often a complaint).
     opt_out_index: dict[str, list[str]] = {}
     for memory in [*newest_first, *grouped.get("feedback", [])]:
@@ -741,6 +796,25 @@ def build_facts(inputs: FactInputs) -> CustomerFacts:
     # ------------------------------------------------------------- memories
     values["memories.count"] = int(inputs.memory_count)
     values["memories.restricted_count"] = int(inputs.restricted_count)
+    assessed = inputs.freshness or {}
+    stale = [ident for ident, item in assessed.items() if item.state == "stale"]
+    attention = [ident for ident, item in assessed.items() if item.state in ("stale", "outdated", "conflicted")]
+    standing = [ident for ident, item in assessed.items() if item.state not in ("expired", "superseded")]
+    values["memories.stale_count"] = len(stale)
+    values["memories.attention_count"] = len(attention)
+    values["memories.stale_share"] = round(len(stale) / len(standing), 3) if standing else None
+    evidence["memories.stale_count"] = stale[:10]
+    evidence["memories.attention_count"] = attention[:10]
+
+    # ---------------------------------------------------------------- drift
+    kind_index: dict[str, list[str]] = {}
+    for flag in inputs.drift:
+        kind_index.setdefault(str(flag.kind), []).append(flag.memory_id)
+    values["drift.open_count"] = len(inputs.drift)
+    values["drift.kinds"] = [kind for kind in ("channel", "plan", "usage", "quiet_problem") if kind in kind_index]
+    by_value["drift.kinds"] = kind_index
+    evidence["drift.kinds"] = list(dict.fromkeys(ident for ids in kind_index.values() for ident in ids))[:10]
+    evidence["drift.open_count"] = evidence["drift.kinds"]
 
     return facts
 

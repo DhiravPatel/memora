@@ -18,6 +18,8 @@ from common.settings import get_settings
 from database.models import Project
 from memory_engine.analytics.health import MAX_WEIGHT, MIN_WEIGHT
 from memory_engine.analytics.health import WEIGHTS as HEALTH_WEIGHTS
+from memory_engine.drift import DriftSettings
+from memory_engine.freshness import DEFAULT_WINDOWS as FRESHNESS_WINDOWS
 from memory_engine.guardrails import BUILTIN_RULES, GuardrailError, compile_guardrails
 from memory_engine.lifecycle import (
     DEFAULT_LIFECYCLE,
@@ -86,9 +88,11 @@ GROUPS: tuple[tuple[str, str], ...] = (
     ("privacy", "Privacy and retention"),
     ("lifecycle", "Lifecycle"),
     ("agents", "Agents"),
+    ("freshness", "Freshness and drift"),
 )
 
 RANKING_KEYS = ("similarity", "importance", "confidence", "recency", "relationship")
+DRIFT_DEFAULTS = DriftSettings()
 # Every factor the health score knows about, in the order the form should show them.
 HEALTH_WEIGHT_KEYS = tuple(HEALTH_WEIGHTS)
 
@@ -125,6 +129,12 @@ def defaults() -> dict[str, Any]:
             "conversations_days": settings.retention_conversation_days,
         },
         "event_importance": {},
+        "freshness_days": dict(FRESHNESS_WINDOWS),
+        "drift_min_contacts": DRIFT_DEFAULTS.min_contacts,
+        "drift_min_share": DRIFT_DEFAULTS.min_share,
+        "drift_min_billing_events": DRIFT_DEFAULTS.min_billing_events,
+        "drift_quiet_days": {"problem": DRIFT_DEFAULTS.quiet_problem_days, "usage": DRIFT_DEFAULTS.quiet_usage_days},
+        "drift_min_activity": DRIFT_DEFAULTS.min_activity,
     }
 
 
@@ -347,6 +357,98 @@ def schema() -> list[SettingField]:
                 "topic, plan, reply), each denying or requiring a person's approval. Automatic "
                 "limits approve money and account actions within an amount and a monthly count. "
                 "Approvals lapse after the hours set."
+            ),
+        ),
+        SettingField(
+            key="freshness_days",
+            label="Freshness windows",
+            group="freshness",
+            kind="map",
+            default=values["freshness_days"],
+            minimum=1,
+            maximum=3650,
+            step=1,
+            unit="days",
+            keys=tuple(FRESHNESS_WINDOWS),
+            help=(
+                "Days without new evidence — the customer saying it again, or a person "
+                "confirming it — after which a memory of each type is stale; it is aging from "
+                "half that. Effective confidence halves every window. Stale memories are marked "
+                "in context, the brief and the dashboard; nothing is deleted."
+            ),
+        ),
+        SettingField(
+            key="drift_min_contacts",
+            label="Channel drift: contacts",
+            group="freshness",
+            kind="number",
+            default=values["drift_min_contacts"],
+            minimum=2,
+            maximum=100,
+            step=1,
+            unit="contacts",
+            help=(
+                "Contacts on another channel, since a customer said which they prefer, before "
+                "the preference is flagged possibly outdated. Only the customer reaching out "
+                "counts, never what you sent."
+            ),
+        ),
+        SettingField(
+            key="drift_min_share",
+            label="Channel drift: share",
+            group="freshness",
+            kind="percent",
+            default=values["drift_min_share"],
+            minimum=0.5,
+            maximum=1,
+            step=0.05,
+            help="The share of their contacts since that must come through that other channel.",
+        ),
+        SettingField(
+            key="drift_min_billing_events",
+            label="Plan drift: billing events",
+            group="freshness",
+            kind="number",
+            default=values["drift_min_billing_events"],
+            minimum=1,
+            maximum=12,
+            step=1,
+            unit="events",
+            help=(
+                "Consecutive billing events naming another plan before the remembered plan is "
+                "flagged possibly outdated."
+            ),
+        ),
+        SettingField(
+            key="drift_quiet_days",
+            label="Quiet windows",
+            group="freshness",
+            kind="map",
+            default=values["drift_quiet_days"],
+            minimum=7,
+            maximum=365,
+            step=1,
+            unit="days",
+            keys=("problem", "usage"),
+            help=(
+                "How long an open problem can go unreported — or a feature they said they use "
+                "go unused — while the customer stays active, before it is flagged: the problem "
+                "may have been fixed, the habit may have changed."
+            ),
+        ),
+        SettingField(
+            key="drift_min_activity",
+            label="Stayed active: events",
+            group="freshness",
+            kind="number",
+            default=values["drift_min_activity"],
+            minimum=1,
+            maximum=100,
+            step=1,
+            unit="events",
+            help=(
+                "Events in a quiet window that show the customer stayed active. A customer who "
+                "went quiet altogether is silent, not changed, and is left to the forecast."
             ),
         ),
         SettingField(

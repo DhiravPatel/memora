@@ -7,6 +7,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from app.schemas.freshness import FreshnessOut
 from common.enums import EntityType, MemorySource, MemoryStatus, MemoryType, Sensitivity
 
 
@@ -31,6 +32,8 @@ class MemoryOut(BaseModel):
     expires_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
+    # How current it is (§26 5.5), computed when read; absent where a route does not assess it.
+    freshness: FreshnessOut | None = None
 
 
 class MemoryCreate(BaseModel):

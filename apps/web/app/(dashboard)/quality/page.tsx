@@ -3,6 +3,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 
+import { FreshnessOverview } from "@/components/freshness";
 import { EvaluationPanel } from "@/components/quality/evaluation";
 import { QualityReportView } from "@/components/quality/report";
 import { Select } from "@/components/ui/input";
@@ -12,7 +13,7 @@ import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import type { QualityReport } from "@/lib/types";
 
-const TABS = ["Report", "Evaluation"] as const;
+const TABS = ["Report", "Freshness", "Evaluation"] as const;
 
 export default function QualityPage() {
   const { projectId } = useSession();
@@ -23,7 +24,7 @@ export default function QualityPage() {
   const report = useQuery({
     queryKey: ["quality", projectId, days],
     queryFn: () => api<QualityReport>(`/v1/projects/${projectId}/quality`, { query: { days } }),
-    enabled: Boolean(projectId) && tab === "Report",
+    enabled: Boolean(projectId) && (tab === "Report" || tab === "Freshness"),
   });
 
   return (
@@ -78,9 +79,13 @@ export default function QualityPage() {
                 setFocusRun(runId ?? null);
                 setTab("Evaluation");
               }}
+              onOpenFreshness={() => setTab("Freshness")}
             />
           )}
         </>
+      )}
+      {tab === "Freshness" && (
+        <FreshnessOverview projectId={projectId} memories={report.data?.metrics?.memories} />
       )}
       {tab === "Evaluation" && <EvaluationPanel projectId={projectId} focusRun={focusRun} />}
     </div>

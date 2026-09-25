@@ -20,6 +20,7 @@ import { HttpClient } from "./client.js";
 import { Admin } from "./resources/admin.js";
 import { Agent } from "./resources/agent.js";
 import { Customers } from "./resources/customers.js";
+import { Drift } from "./resources/drift.js";
 import { Events } from "./resources/events.js";
 import { Foresight } from "./resources/foresight.js";
 import { Actions, Guardrails, Profiles, Runs } from "./resources/guardrails.js";
@@ -57,6 +58,8 @@ export class MemoryClient {
   readonly runs: Runs;
   /** Agent profiles: which memory an agent may read and which actions it may take. */
   readonly profiles: Profiles;
+  /** Freshness and drift: how current memory is, and what evidence says may be out of date. */
+  readonly drift: Drift;
 
   constructor(options: ClientOptions) {
     const http = new HttpClient(options);
@@ -72,6 +75,7 @@ export class MemoryClient {
     this.actions = new Actions(http);
     this.runs = new Runs(http);
     this.profiles = new Profiles(http);
+    this.drift = new Drift(http);
   }
 
   /** Shorthand for `guardrails.check`. */

@@ -39,6 +39,7 @@ from app.schemas.evaluation import (
     RegressionOut,
 )
 from app.schemas.events import EventExplanationOut, EventOut, EventPreviewIn
+from app.schemas.freshness import CustomerFreshnessOut, DriftDecisionIn, DriftOut, DriftRunOut
 from app.schemas.goals import GoalOut, GoalSummaryOut, GoalUpdate
 from app.schemas.health import (
     FeedbackOut,
@@ -93,10 +94,12 @@ from app.services.changes_service import ChangesService
 from app.services.customer360_service import Customer360Service
 from app.services.customer_state_service import CustomerStateService
 from app.services.deletion_service import DeletionService
+from app.services.drift_service import DriftService
 from app.services.evaluation_service import EvaluationService
 from app.services.event_service import EventService
 from app.services.export_service import ExportService
 from app.services.feedback_service import FeedbackService
+from app.services.freshness_service import FreshnessService
 from app.services.goal_service import GoalService
 from app.services.health_service import HealthService
 from app.services.memory_service import MemoryService
@@ -1002,6 +1005,99 @@ async def dashboard_customer_brief(
     if fmt == "markdown":
         return PlainTextResponse(brief["markdown"], media_type="text/markdown; charset=utf-8")
     return CustomerBriefOut(**brief)
+
+
+# ------------------------------------------------------------ freshness and drift
+
+
+@router.get("/customers/{customer_id}/freshness", response_model=CustomerFreshnessOut)
+async def dashboard_customer_freshness(
+    customer_id: str,
+    project: UserProject,
+    session: DBSession,
+    cleared: Clearance,
+    limit: int = Query(default=50, ge=1, le=200),
+) -> CustomerFreshnessOut:
+    customer = await _resolve_customer(session, project.id, customer_id)
+    return CustomerFreshnessOut(
+        **await FreshnessService(session, cleared=cleared).for_customer(project=project, customer=customer, limit=limit)
+    )
+
+
+@router.post("/customers/{customer_id}/drift/refresh", response_model=DriftRunOut)
+async def dashboard_refresh_drift(
+    customer_id: str, project: UserProject, session: DBSession, cleared: Clearance, current_user: CurrentUserDep
+) -> DriftRunOut:
+    current_user.require(UserRole.MEMBER)
+    customer = await _resolve_customer(session, project.id, customer_id)
+    service = DriftService(session, cleared=cleared)
+    run = await service.detect(project=project, customer=customer)
+    flags, _, _ = await service.list(project=project, customer=customer, status="open", limit=100)
+    return DriftRunOut(**run.as_dict(), open=[DriftOut(**flag) for flag in flags])
+
+
+@router.get("/drift", response_model=Page[DriftOut])
+async def dashboard_drift(
+    project: UserProject,
+    session: DBSession,
+    cleared: Clearance,
+    status: str = Query(default="open", pattern="^(open|confirmed|dismissed|cleared|all)$"),
+    kind: str | None = Query(default=None, pattern="^(channel|plan|usage|quiet_problem)$"),
+    customer_id: str | None = Query(default=None, max_length=255),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+) -> Page[DriftOut]:
+    """The drift review queue. See the API-key route."""
+    customer = await _resolve_customer(session, project.id, customer_id) if customer_id else None
+    rows, total, withheld = await DriftService(session, cleared=cleared).list(
+        project=project,
+        status=None if status == "all" else status,
+        kind=kind,
+        customer=customer,
+        limit=limit,
+        offset=offset,
+    )
+    return Page[DriftOut](data=rows, total=total, limit=limit, offset=offset, withheld=withheld)
+
+
+@router.get("/drift/{drift_id}", response_model=DriftOut)
+async def dashboard_drift_flag(drift_id: str, project: UserProject, session: DBSession, cleared: Clearance) -> DriftOut:
+    return DriftOut(**await DriftService(session, cleared=cleared).get(project=project, drift_id=drift_id))
+
+
+@router.post("/drift/{drift_id}/confirm", response_model=DriftOut)
+async def dashboard_confirm_drift(
+    drift_id: str,
+    payload: DriftDecisionIn,
+    project: UserProject,
+    session: DBSession,
+    cleared: Clearance,
+    current_user: CurrentUserDep,
+    embedder: EmbedderDep,
+) -> DriftOut:
+    current_user.require(UserRole.MEMBER)
+    return DriftOut(
+        **await DriftService(session, cleared=cleared, embedder=embedder).confirm(
+            project=project, drift_id=drift_id, note=payload.note, actor_type="user", actor_id=current_user.user.id
+        )
+    )
+
+
+@router.post("/drift/{drift_id}/dismiss", response_model=DriftOut)
+async def dashboard_dismiss_drift(
+    drift_id: str,
+    payload: DriftDecisionIn,
+    project: UserProject,
+    session: DBSession,
+    cleared: Clearance,
+    current_user: CurrentUserDep,
+) -> DriftOut:
+    current_user.require(UserRole.MEMBER)
+    return DriftOut(
+        **await DriftService(session, cleared=cleared).dismiss(
+            project=project, drift_id=drift_id, note=payload.note, actor_type="user", actor_id=current_user.user.id
+        )
+    )
 
 
 @router.get("/customers/{customer_id}/compare", response_model=CompareOut)

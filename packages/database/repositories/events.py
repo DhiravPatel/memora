@@ -184,6 +184,54 @@ class EventRepository(BaseRepository):
         )
         return int(total or 0)
 
+    async def reaching_out_since(
+        self, *, project_id: str, customer_id: str, since: datetime, limit: int = 1000
+    ) -> list[tuple[str, str, dict[str, Any], str, datetime]]:
+        """(id, type, data, source, occurred_at) for a customer's events since a moment,
+        newest first — what drift reads for contacts and billing (§26 5.5). Bounded: a
+        pattern shows in the newest thousand."""
+        result = await self.session.execute(
+            select(Event.id, Event.event_type, Event.data, Event.source, Event.occurred_at)
+            .where(
+                Event.project_id == project_id,
+                Event.customer_id == customer_id,
+                Event.occurred_at > since,
+            )
+            .order_by(Event.occurred_at.desc())
+            .limit(limit)
+        )
+        return [(row[0], row[1], dict(row[2] or {}), row[3], row[4]) for row in result.all()]
+
+    async def last_feature_use(self, *, project_id: str, customer_id: str, feature: str) -> datetime | None:
+        """When the customer last used a feature, by the feature events themselves — not the
+        memory, which only moves when an event is important enough to be remembered."""
+        wanted = " ".join(feature.lower().replace("_", " ").replace("-", " ").split())
+        if not wanted:
+            return None
+        named = func.lower(
+            func.replace(
+                func.replace(
+                    func.coalesce(
+                        Event.data["feature"].astext,
+                        Event.data["feature_name"].astext,
+                        Event.data["action"].astext,
+                    ),
+                    "_",
+                    " ",
+                ),
+                "-",
+                " ",
+            )
+        )
+        return await self.session.scalar(
+            select(func.max(Event.occurred_at)).where(
+                Event.project_id == project_id,
+                Event.customer_id == customer_id,
+                or_(Event.event_type.ilike("%feature%"), Event.event_type.ilike("%action_performed%")),
+                named == wanted,
+            )
+        )
+
     async def window_counts_by_customer(
         self,
         *,

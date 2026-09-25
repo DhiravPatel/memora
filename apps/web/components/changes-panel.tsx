@@ -37,6 +37,7 @@ const BAD = new Set([
   "goal:stalled",
   "goal:abandoned",
   "signal:started",
+  "memory:outdated",
 ]);
 const GOOD = new Set([
   "problem:resolved",

@@ -378,3 +378,40 @@ def test_a_change_that_happened_is_not_an_intent():
     # A threat filed as a subscription statement still is one.
     threat = build(subscription=[memory("mem_threat", "The customer will cancel the Pro plan unless the sync is fixed.")])
     assert "cancellation" in threat.get("intents.kinds")
+
+
+
+def test_freshness_and_drift_are_facts_rules_can_read():
+    from memory_engine.freshness import assess
+
+    preference = memory("mem_pref", "The customer prefers email.", days_ago=60)
+    problem = memory("mem_prob", "The export times out.", days_ago=50)
+    problem.type, problem.status, problem.confidence = "problem", "active", 0.9
+    preference.type, preference.status, preference.confidence = "preference", "active", 0.9
+    flag = SimpleNamespace(
+        id="drf_1", kind="channel", memory_id="mem_pref", observed="WhatsApp", counts={"observed": 6, "total": 7}
+    )
+    fresh = {
+        "mem_pref": assess(preference, now=NOW, window_days=180, drift=[{"id": "drf_1", "kind": "channel", "summary": "x"}]),
+        "mem_prob": assess(problem, now=NOW, window_days=30),
+    }
+    facts = build_facts(
+        FactInputs(
+            customer=customer(),
+            now=NOW,
+            memories_by_type={"preference": [preference], "problem": [problem]},
+            freshness=fresh,
+            drift=[flag],
+        )
+    )
+    assert facts.get("preferences.channel") == "email", "never silently changed"
+    assert facts.get("preferences.channel_outdated") is True
+    assert facts.get("preferences.observed_channel") == "whatsapp"
+    assert facts.get("preferences.observed_share") == 0.857
+    assert facts.get("drift.open_count") == 1 and facts.get("drift.kinds") == ["channel"]
+    assert facts.get("memories.stale_count") == 1 and facts.get("memories.attention_count") == 2
+    assert facts.get("memories.stale_share") == 0.5
+    # A reader who may not see the preference sees neither it nor that it is outdated.
+    hidden = facts.redacted({"mem_pref"})
+    assert hidden.get("preferences.channel") is None and hidden.get("preferences.channel_outdated") is None
+    assert hidden.get("drift.kinds") == [] and hidden.get("drift.open_count") == 1, "counts stay whole"

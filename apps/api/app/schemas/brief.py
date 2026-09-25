@@ -71,6 +71,7 @@ class BriefIssueOut(BaseModel):
     first_seen_at: datetime | None = None
     age_days: int | None = None
     times_reported: int = 1
+    freshness: str | None = Field(default=None, description="active, aging, stale, outdated or conflicted.")
 
 
 class BriefGoalOut(BaseModel):
@@ -89,12 +90,17 @@ class BriefOptOutOut(BaseModel):
 class BriefStatementOut(BaseModel):
     id: str
     content: str
+    freshness: str | None = None
 
 
 class BriefPreferencesOut(BaseModel):
     channel: str | None = Field(default=None, description='The preferred channel as written: "email", "WhatsApp", "SMS".')
     opt_outs: list[BriefOptOutOut] = Field(default_factory=list)
     statements: list[BriefStatementOut] = Field(default_factory=list)
+    channel_outdated: bool = Field(
+        default=False, description="The stated channel is flagged possibly outdated by the channels they actually use."
+    )
+    observed_channel: str | None = None
 
 
 class BriefIntentOut(BaseModel):
@@ -121,6 +127,17 @@ class BriefConversationOut(BaseModel):
     turn_count: int | None = None
 
 
+class BriefDriftOut(BaseModel):
+    id: str
+    kind: str
+    kind_label: str
+    memory_id: str
+    stated: str
+    observed: str | None = None
+    summary: str
+    detected_at: datetime
+
+
 class BriefSetAsideOut(BaseModel):
     key: str
     action: str
@@ -141,6 +158,9 @@ class CustomerBriefOut(BaseModel):
     opportunities: list[SignalOut] = Field(default_factory=list)
     recent_changes: BriefChangesOut
     last_conversation: BriefConversationOut | None = None
+    drift: list[BriefDriftOut] = Field(
+        default_factory=list, description="What evidence says may be out of date — to ask about, not to act on."
+    )
     next_step: RecommendationOut | None = Field(
         default=None, description="The most urgent recommendation none of the cautions forbids."
     )

@@ -52,10 +52,17 @@ database_required = pytest.mark.skipif(
 def run_worker(event_id: str) -> dict:
     """The worker's ``process_event`` for one event, inline, on a fresh loop with its own
     engine — the real pipeline for e2e tests that go through ``POST /v1/events``."""
+    from worker.tasks.process_event import process_event
+
+    return run_job(process_event, event_id)
+
+
+def run_job(job, *args) -> dict:
+    """Any worker job, inline, the way the worker runs it: on a fresh loop with its own
+    engine — for the nightly sweeps as much as for events."""
     import anyio
 
     import database.session as db
-    from worker.tasks.process_event import process_event
 
     saved = (db._engine, db._session_factory)
     db._engine, db._session_factory = None, None
@@ -63,7 +70,7 @@ def run_worker(event_id: str) -> dict:
 
     async def run() -> None:
         try:
-            result.update(await process_event({}, event_id))
+            result.update(await job({}, *args))
         finally:
             await db.dispose_engine()
 

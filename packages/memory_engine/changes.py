@@ -81,6 +81,7 @@ _IMPORTANCE = {
     ("feedback", "fell"): 0.4,
     ("signal", "stopped"): 0.4,
     ("fact", "added"): 0.35,
+    ("memory", "outdated"): 0.7,
 }
 
 TYPES = (
@@ -172,6 +173,9 @@ class ChangeInputs:
     # When the customer's history begins — their first event or their record, whichever is
     # earlier. Activity is only compared with a window they existed for.
     customer_since: datetime | None = None
+    # Drift flags raised in the window (§26 5.5): evidence that a standing memory may be out
+    # of date. What a confirmation changed is a memory change of its own.
+    drift: Sequence[Any] = ()
 
 
 def detect(inputs: ChangeInputs) -> list[Change]:
@@ -185,6 +189,7 @@ def detect(inputs: ChangeInputs) -> list[Change]:
     found.extend(_from_snapshots(inputs, already={(change.type, change.kind) for change in found}))
     found.extend(_from_signals(inputs))
     found.extend(_from_activity(inputs))
+    found.extend(_from_drift(inputs))
     found.sort(key=lambda change: change.detected_at, reverse=True)
     return found
 
@@ -672,6 +677,25 @@ def _from_activity(inputs: ChangeInputs) -> Iterable[Change]:
 # -------------------------------------------------------------------- summary
 
 
+def _from_drift(inputs: ChangeInputs) -> Iterable[Change]:
+    for flag in inputs.drift:
+        detected = ensure_utc(flag.detected_at)
+        if not (ensure_utc(inputs.since) <= detected <= ensure_utc(inputs.until)):
+            continue
+        yield Change(
+            "memory",
+            "outdated",
+            f"Possibly out of date: {flag.summary}",
+            detected,
+            before=flag.stated,
+            after=flag.observed,
+            evidence=[flag.memory_id],
+            source="drift",
+            detail={"drift_id": flag.id, "kind": flag.kind, "status": flag.status},
+            subject=flag.memory_id,
+        )
+
+
 def summarise(changes: Sequence[Change], *, lead: str) -> str:
     """One sentence a person can read before a call: "In the last 7 days: …"."""
     if not changes:
@@ -709,6 +733,9 @@ def summarise(changes: Sequence[Change], *, lead: str) -> str:
             continue
         moved.add(track)
         parts.append(f"{_words(track)} moved to {change.after}")
+    outdated = len(by_kind.get(("memory", "outdated"), []))
+    if outdated:
+        parts.append("a memory may be out of date" if outdated == 1 else f"{outdated} memories may be out of date")
     health = first("health", "crossed", "fell", "rose")
     if health is not None:
         parts.append(_lower_first(health.title))

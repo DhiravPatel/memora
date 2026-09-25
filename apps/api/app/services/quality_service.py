@@ -26,14 +26,14 @@ from app.services.reader import Reader
 from common.settings import get_settings
 from common.time import utcnow
 from database.models import Project
-from database.repositories import EvalRepository
+from database.repositories import DriftRepository, EvalRepository, MemoryRepository
+from memory_engine.freshness import FALLBACK_WINDOW, windows
 from nlp.concepts import concepts_for
 from nlp.tokenize import surface_words
 
 # How close below the consolidation threshold a "create" has to be to count as a probable
 # duplicate — a statement that nearly merged.
 NEAR_MISS_BAND = 0.10
-STALE_DAYS = 90
 MIN_SAMPLE = 5
 # The language of asking, not of the thing asked about. Their absence from memory is not a
 # vocabulary gap — no memory says "wrong", and none should.
@@ -85,7 +85,7 @@ class QualityService:
 
         events = await self._events(project.id, since)
         actions = await self._actions(project.id, since, consolidation)
-        memories = await self._memories(project.id)
+        memories = await self._memories(project)
         searches = await self._searches(project.id, since)
         evaluation = await self._evaluation(project.id)
 
@@ -258,8 +258,8 @@ class QualityService:
             ],
         }
 
-    async def _memories(self, project_id: str) -> dict[str, Any]:
-        stale_before = utcnow() - timedelta(days=STALE_DAYS)
+    async def _memories(self, project: Project) -> dict[str, Any]:
+        project_id = project.id
         expiring_before = utcnow() + timedelta(days=7)
         row = (
             await self.session.execute(
@@ -268,24 +268,39 @@ class QualityService:
                     SELECT count(*) AS active,
                            avg(confidence) AS confidence,
                            count(*) FILTER (WHERE confidence < 0.5) AS low_confidence,
-                           count(*) FILTER (WHERE last_seen_at < :stale) AS stale,
                            count(*) FILTER (WHERE expires_at IS NOT NULL AND expires_at < :expiring) AS expiring,
                            count(*) FILTER (WHERE sensitivity = 'restricted') AS restricted
                     FROM memories
-                    WHERE project_id = :project AND status = 'active'
+                    WHERE project_id = :project AND status = 'active' AND (expires_at IS NULL OR expires_at > now())
                     """
                 ),
-                {"project": project_id, "stale": stale_before, "expiring": expiring_before},
+                {"project": project_id, "expiring": expiring_before},
             )
         ).one()
         active = int(row.active or 0)
+        # Freshness by each type's own window (§26 5.5), not one cut-off for everything: a
+        # problem unmentioned for 90 days and a job title unmentioned for 90 days are not
+        # the same news.
+        states = await MemoryRepository(self.session).freshness_counts(
+            project_id=project_id, windows=windows(project.settings), fallback=FALLBACK_WINDOW, now=utcnow()
+        )
+        judged = sum(states.values())
+        stale = int(states.get("stale", 0))
+        attention = sum(int(states.get(state, 0)) for state in ("stale", "outdated", "conflicted"))
+        drift = await DriftRepository(self.session).counts(project_id)
+        open_drift = drift.get("open", {})
         return {
             "active": active,
             "avg_confidence": round(float(row.confidence), 4) if row.confidence is not None else None,
             "low_confidence": int(row.low_confidence or 0),
             "low_confidence_rate": round(int(row.low_confidence or 0) / active, 4) if active else None,
-            "stale": int(row.stale or 0),
-            "stale_rate": round(int(row.stale or 0) / active, 4) if active else None,
+            "stale": stale,
+            "stale_rate": round(stale / judged, 4) if judged else None,
+            "freshness": {state: int(states.get(state, 0)) for state in ("active", "aging", "stale", "outdated", "conflicted")},
+            "needs_attention": attention,
+            "drift_open": sum(open_drift.values()),
+            "drift_open_by_kind": open_drift,
+            "drift_resolved": {status: sum(kinds.values()) for status, kinds in drift.items() if status != "open"},
             "expiring_soon": int(row.expiring or 0),
             "restricted": int(row.restricted or 0),
         }
@@ -339,7 +354,7 @@ class QualityService:
                 await self.session.execute(
                     text(
                         "SELECT DISTINCT unnest(concepts) FROM memories "
-                        "WHERE project_id = :project AND status = 'active' AND concepts IS NOT NULL"
+                        "WHERE project_id = :project AND status = 'active' AND (expires_at IS NULL OR expires_at > now()) AND concepts IS NOT NULL"
                     ),
                     {"project": project_id},
                 )
@@ -360,7 +375,7 @@ class QualityService:
                     SELECT word FROM unnest(CAST(:words AS text[])) AS word
                     WHERE NOT EXISTS (
                         SELECT 1 FROM memories
-                        WHERE project_id = :project AND status = 'active'
+                        WHERE project_id = :project AND status = 'active' AND (expires_at IS NULL OR expires_at > now())
                           AND to_tsvector('english', content) @@ plainto_tsquery('english', word)
                     )
                     """
@@ -430,7 +445,7 @@ class QualityService:
                 "key": "freshness",
                 "label": "Freshness",
                 "score": pct(None if memories["stale_rate"] is None else 1 - memories["stale_rate"]),
-                "detail": f"Share of active memories seen in the last {STALE_DAYS} days.",
+                "detail": "Share of standing memories within their type's freshness window.",
             },
             {
                 "key": "retrieval",
@@ -557,9 +572,30 @@ class QualityService:
                 Diagnostic(
                     key="stale_memories",
                     severity="info",
-                    title=f"{round(memories['stale_rate'] * 100)}% of memories have not been seen in {STALE_DAYS} days",
-                    detail="Stale memories still answer questions. Check the retention and decay settings.",
-                    fix={"action": "review", "where": "settings.retention"},
+                    title=f"{round(memories['stale_rate'] * 100)}% of memories are past their freshness window",
+                    detail=(
+                        "Stale memories still answer questions, marked as stale. If your customers "
+                        "change more slowly than the windows assume, lengthen them; if they are right, "
+                        "the memories need new evidence — a person can confirm the ones that still hold."
+                    ),
+                    fix={"action": "review", "where": "settings.freshness_days"},
+                )
+            )
+
+        if memories.get("drift_open", 0) >= 1:
+            kinds = ", ".join(
+                f"{count} {kind.replace('_', ' ')}" for kind, count in sorted(memories["drift_open_by_kind"].items())
+            )
+            found.append(
+                Diagnostic(
+                    key="drift_open",
+                    severity="warning" if memories["drift_open"] >= 10 else "info",
+                    title=f"{memories['drift_open']} memories may be out of date",
+                    detail=(
+                        f"Evidence since they were stated points the other way ({kinds}). Nothing was "
+                        "changed: confirm each flag to update the memory, or dismiss it to keep it."
+                    ),
+                    fix={"action": "review", "where": "drift"},
                 )
             )
 

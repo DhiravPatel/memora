@@ -44,6 +44,7 @@ from database.repositories import (
     AgentSessionRepository,
     CustomerSnapshotRepository,
     CustomerStateRepository,
+    DriftRepository,
     EventRepository,
     GoalRepository,
     MemoryRepository,
@@ -446,6 +447,7 @@ class ChangesService:
             signal_labels=labels,
             events_now=await self.events.count_between(**scope, since=since, until=until),
             events_before=await self.events.count_between(**scope, since=since - window.span, until=since),
+            drift=await DriftRepository(self.session).detected_between(**scope, since=since, until=until),
             customer_since=min(
                 (moment for moment in (customer.created_at, await self.events.first_occurred_at(**scope)) if moment),
                 key=ensure_utc,

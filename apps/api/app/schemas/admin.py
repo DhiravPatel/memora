@@ -214,6 +214,8 @@ WEBHOOK_EVENT_DESCRIPTIONS: dict[str, str] = {
     WebhookEvent.AGENT_APPROVAL_REQUESTED.value: "An agent needs a person to approve an action",
     WebhookEvent.AGENT_APPROVAL_DECIDED.value: "An approval request was approved, rejected or expired",
     WebhookEvent.AGENT_ACTION_COMPLETED.value: "An agent reported an action from the gateway done, failed or cancelled",
+    WebhookEvent.MEMORY_DRIFT_DETECTED.value: "Evidence says a standing memory may be out of date (a changed channel, plan or habit)",
+    WebhookEvent.MEMORY_DRIFT_RESOLVED.value: "A drift flag was confirmed, dismissed or cleared",
 }
 
 
@@ -243,3 +245,4 @@ class CustomerMergeResult(BaseModel):
     goals_moved: int = 0
     sessions_moved: int = 0
     agent_actions_moved: int = 0
+    drift_moved: int = 0

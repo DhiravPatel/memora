@@ -4,6 +4,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 
 import { GoalStatusBadge, TrajectoryBadge } from "@/components/foresight";
+import { FreshnessBadge } from "@/components/freshness";
 import { HealthBadge } from "@/components/health-card";
 import { StateBadge } from "@/components/lifecycle";
 import { Badge } from "@/components/ui/badge";
@@ -40,7 +41,7 @@ export function CustomerBriefPanel({
 }: {
   projectId: string | null;
   customerId: string;
-  onOpenTab?: (tab: "Changes" | "State" | "Agents" | "Goals") => void;
+  onOpenTab?: (tab: "Changes" | "State" | "Agents" | "Goals" | "Freshness") => void;
 }) {
   const [since, setSince] = useState("last_session");
   const [copied, setCopied] = useState(false);
@@ -126,6 +127,7 @@ export function CustomerBriefPanel({
         <div className="grid gap-6 lg:grid-cols-[3fr_2fr]">
           <div className="space-y-6">
             <TalkAbout brief={body} />
+            <Drift brief={body} onOpenFreshness={() => onOpenTab?.("Freshness")} />
             <Cautions brief={body} onOpenAgents={() => onOpenTab?.("Agents")} />
             <OpenIssues brief={body} />
             <WhatChanged brief={body} onOpenChanges={() => onOpenTab?.("Changes")} />
@@ -168,6 +170,39 @@ function TalkAbout({ brief }: { brief: CustomerBrief }) {
           ))}
         </ol>
       )}
+    </Card>
+  );
+}
+
+function Drift({ brief, onOpenFreshness }: { brief: CustomerBrief; onOpenFreshness: () => void }) {
+  const flags = brief.drift ?? [];
+  if (flags.length === 0) return null;
+  return (
+    <Card>
+      <CardHeader>
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <CardTitle>Possibly out of date</CardTitle>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Evidence since says otherwise. Ask before relying on it; nothing was changed.
+            </p>
+          </div>
+          <button onClick={onOpenFreshness} className="label hover:text-accent">
+            Review →
+          </button>
+        </div>
+      </CardHeader>
+      <ul>
+        {flags.map((flag) => (
+          <li
+            key={flag.id}
+            className="space-y-1 border-t border-l-2 border-t-border border-l-danger px-5 py-3"
+          >
+            <Badge className="border-danger/70 bg-danger/10 text-danger">{flag.kind_label}</Badge>
+            <p className="text-sm leading-snug text-foreground">{flag.summary}</p>
+          </li>
+        ))}
+      </ul>
     </Card>
   );
 }
@@ -260,6 +295,7 @@ function OpenIssues({ brief }: { brief: CustomerBrief }) {
                     reported {issue.times_reported}×
                   </Badge>
                 )}
+                <FreshnessBadge state={issue.freshness} />
               </div>
             </li>
           ))}

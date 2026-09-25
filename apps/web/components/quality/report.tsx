@@ -28,10 +28,12 @@ export function QualityReportView({
   projectId,
   report,
   onOpenEvaluation,
+  onOpenFreshness,
 }: {
   projectId: string | null;
   report: QualityReport;
   onOpenEvaluation: (runId?: string) => void;
+  onOpenFreshness?: () => void;
 }) {
   const { events, consolidation, memories, searches } = report.metrics;
   return (
@@ -75,6 +77,7 @@ export function QualityReportView({
               projectId={projectId}
               diagnostic={diagnostic}
               onOpenEvaluation={onOpenEvaluation}
+              onOpenFreshness={onOpenFreshness}
             />
           ))}
         </CardContent>
@@ -173,10 +176,12 @@ function DiagnosticRow({
   projectId,
   diagnostic,
   onOpenEvaluation,
+  onOpenFreshness,
 }: {
   projectId: string | null;
   diagnostic: QualityDiagnostic;
   onOpenEvaluation: (runId?: string) => void;
+  onOpenFreshness?: () => void;
 }) {
   const [open, setOpen] = useState(false);
   return (
@@ -201,7 +206,12 @@ function DiagnosticRow({
             </pre>
           )}
         </div>
-        <FixAction projectId={projectId} fix={diagnostic.fix} onOpenEvaluation={onOpenEvaluation} />
+        <FixAction
+          projectId={projectId}
+          fix={diagnostic.fix}
+          onOpenEvaluation={onOpenEvaluation}
+          onOpenFreshness={onOpenFreshness}
+        />
       </div>
     </div>
   );
@@ -212,10 +222,12 @@ function FixAction({
   projectId,
   fix,
   onOpenEvaluation,
+  onOpenFreshness,
 }: {
   projectId: string | null;
   fix: Record<string, any>;
   onOpenEvaluation: (runId?: string) => void;
+  onOpenFreshness?: () => void;
 }) {
   const queryClient = useQueryClient();
   const apply = useMutation({
@@ -282,6 +294,22 @@ function FixAction({
           className="label border border-border px-2.5 py-1.5 hover:border-accent hover:text-accent"
         >
           Add to vocabulary →
+        </Link>
+      );
+    case "review":
+      if (fix.where === "drift" && onOpenFreshness) {
+        return (
+          <Button size="sm" variant="outline" onClick={onOpenFreshness}>
+            Review drift
+          </Button>
+        );
+      }
+      return (
+        <Link
+          href={String(fix.where ?? "").startsWith("settings") ? "/settings" : "/memories"}
+          className="label border border-border px-2.5 py-1.5 hover:border-accent hover:text-accent"
+        >
+          {String(fix.where ?? "").startsWith("settings") ? "Open settings →" : "Review memories →"}
         </Link>
       );
     case "preview":

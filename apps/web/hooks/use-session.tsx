@@ -32,16 +32,22 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const queryClient = useQueryClient();
   const [projectId, setProjectId] = useState<string | null>(null);
+  // Follows the token store rather than reading it once: signing in happens on a page this
+  // provider has already rendered for.
+  const [signedIn, setSignedIn] = useState(false);
 
   useEffect(() => {
     setProjectId(projectStore.get());
+    const sync = () => setSignedIn(Boolean(tokenStore.access));
+    sync();
+    return tokenStore.subscribe(sync);
   }, []);
 
   const userQuery = useQuery({
     queryKey: ["me"],
     queryFn: () => api<SessionUser>("/v1/auth/me"),
     retry: false,
-    enabled: typeof window !== "undefined" && Boolean(tokenStore.access),
+    enabled: signedIn,
   });
 
   const projectsQuery = useQuery({

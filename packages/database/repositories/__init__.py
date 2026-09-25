@@ -14,6 +14,7 @@ from database.repositories.customer_state import (
     CustomerStateRepository,
 )
 from database.repositories.customers import CustomerRepository
+from database.repositories.drift import DriftRepository
 from database.repositories.entities import EntityRepository, RelationshipRepository, normalize_name
 from database.repositories.evaluation import EvalRepository
 from database.repositories.events import EventRepository
@@ -52,6 +53,7 @@ __all__ = [
     "CustomerRepository",
     "CustomerSnapshotRepository",
     "CustomerStateRepository",
+    "DriftRepository",
     "EntityRepository",
     "EvalRepository",
     "EventRepository",

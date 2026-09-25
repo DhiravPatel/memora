@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from common.enums import AuditAction, MemorySource, MemoryStatus, Sensitivity
 from common.errors import NotFoundError, ValidationError
 from common.logging import get_logger
+from common.time import utcnow
 from database.models import Memory, Project
 from database.repositories import AuditRepository, MemoryRepository
 from memory_engine.policy import classify
@@ -91,6 +92,20 @@ class FeedbackService:
         else:  # pragma: no cover - guarded by the schema
             raise ValidationError(f"Unknown verdict '{verdict}'.")
 
+        # A person acting on the memory itself settles any drift flag on it (§26 5.5):
+        # confirming it says the memory still stands; rejecting or correcting it retires it.
+        from app.services.drift_service import DriftService
+        from database.repositories.drift import CLEARED, DISMISSED
+
+        await DriftService(self.session).settle_for_memory(
+            project=project,
+            memory=memory,
+            status=DISMISSED if verdict == "confirm" else CLEARED,
+            note=f"A person {'confirmed' if verdict == 'confirm' else verdict + 'ed'} the memory.",
+            actor_type=actor_type,
+            actor_id=actor_id,
+        )
+
         await self.audit.record(
             action=AuditAction.MEMORY_CHANGE,
             actor_type=actor_type,
@@ -119,7 +134,13 @@ class FeedbackService:
             importance=min(1.0, memory.importance + 0.05),
             reason="feedback_confirmed",
         )
-        memory.meta = {**(memory.meta or {}), "human_confirmed": True, "feedback_note": note}
+        # When a person last vouched for it: freshness counts from here as from a new report.
+        memory.meta = {
+            **(memory.meta or {}),
+            "human_confirmed": True,
+            "confirmed_at": utcnow().isoformat(),
+            "feedback_note": note,
+        }
         await self.session.flush()
         return FeedbackResult(
             memory_id=memory.id,

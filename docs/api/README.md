@@ -240,6 +240,70 @@ Numbers are whole for every reader — a key without clearance is told how many 
 open — while words from memories it may not read are left out, their ids leave `evidence`,
 and `withheld` / `withheld_facts` say how much. Needs `memory:read`.
 
+## Freshness and drift
+
+A memory can be valid and still out of date. Every memory has a **freshness** state and an
+**effective confidence**, computed when read from its own evidence — the later of the last
+time the customer said it and the last time a person confirmed it:
+
+| State | Means |
+| --- | --- |
+| `active` | recently evidenced |
+| `aging` | past half its type's window with nothing new |
+| `stale` | past its window with nothing new |
+| `outdated` | evidence since points the other way (an open drift flag) |
+| `conflicted` | contradicted after its last support by a statement judged weaker, and not confirmed since |
+| `expired` / `superseded` | no longer standing |
+
+Windows are per memory type (problems 30 days, intents 45, behaviour 60, goals and feedback
+90, preferences 180, facts, subscriptions and relationships 365) and set in the project's
+`freshness_days`. Effective confidence halves every window without evidence and never falls
+below 15% of the stored confidence. Memory lists, memory detail, the agent context (each item
+carries `freshness`, `effective_confidence` and a `freshness_note`, and the prompt text marks
+it: `The customer prefers email. (possibly outdated: …)`), the brief and the quality report
+all carry it.
+
+### `GET /v1/customers/{customer_id}/freshness`
+
+Counts by state, the memories that are not fresh — most concerning first, each with its
+reasons — and the open drift flags. `?limit=` (default 50). Needs `memory:read`.
+
+### Drift flags
+
+**Drift** is evidence since a memory was stated that points the other way. Four detectors,
+each reading only records authoritative for its question:
+
+| Kind | Flags when | Reads |
+| --- | --- | --- |
+| `channel` | a stated channel preference, when enough of the customer's contacts since came through another channel (`drift_min_contacts`, default 5, and `drift_min_share`, default 60%) | inbound events (`whatsapp_message`, `email_received`, a `channel`/`via` field, Intercom as chat…) and agent sessions — never what you sent |
+| `plan` | the remembered plan, when the latest billing events name another (`drift_min_billing_events`, default 2) | billing events with `data.plan` — which create no memory of their own |
+| `usage` | a feature they said they use, unused for `drift_quiet_days.usage` (60) while the customer stayed active | feature events |
+| `quiet_problem` | an open problem not reported for `drift_quiet_days.problem` (30) while the customer stayed active (`drift_min_activity`, default 5 events) | the event stream |
+
+`channel` and `plan` are checked as events are processed; all four nightly and on demand. A
+flag is **never a change**: the memory stands until a person confirms or dismisses it.
+
+| Endpoint | |
+| --- | --- |
+| `GET /v1/drift?status=open&kind=&customer_id=` | flags, newest first; `status` is `open` (default), `confirmed`, `dismissed`, `cleared` or `all`. A flag on a memory this key may not read is not listed; `withheld` counts them |
+| `GET /v1/drift/{id}` | one flag: `stated`, `observed`, `summary`, `counts`, `evidence` (event and session ids), the memory and the customer |
+| `POST /v1/drift/{id}/confirm` `{ "note"?: … }` | write the change: a new preference ("The customer prefers WhatsApp."), plan ("upgraded from the Pro plan to the Enterprise plan"), habit ("has not used the Campaign Builder feature for 2 months") or the problem resolved — the old memory superseded (a plan *transition* is history and stays), with versions, audit and webhooks. Lifecycle and snapshots refresh at once |
+| `POST /v1/drift/{id}/dismiss` `{ "note"?: … }` | keep the memory; only evidence newer than the dismissal can raise it again |
+| `POST /v1/customers/{id}/drift/refresh` | run every detector for one customer now |
+
+Confirming or rejecting the memory itself through feedback settles its flags (confirming it
+is new evidence and dismisses them; rejecting or correcting clears them). A flag whose
+evidence no longer holds — the customer restated the preference, the problem was reported
+again — is `cleared` by the system. Reads need `memory:read`; confirm, dismiss and refresh
+need `memory:write`.
+
+Facts rules can read: `memories.stale_count`, `memories.attention_count`,
+`memories.stale_share`, `drift.open_count`, `drift.kinds`, `preferences.channel_outdated`,
+`preferences.observed_channel`, `preferences.observed_share`. The `channel_preference`
+guardrail still follows the stated preference — never silently changed — and says when the
+customer's own behaviour disagrees: *"The customer prefers email, not whatsapp — though 86% of
+their contacts since came through WhatsApp; a person can confirm the change."*
+
 ## Facts and conditions
 
 The language guardrails, the lifecycle, workflows and feature flags are written in.
@@ -839,6 +903,8 @@ Subscribe to changes rather than polling for them. Configure at
 | `agent.action_completed` | An agent reported an action from the gateway done, failed or cancelled |
 | `agent.approval_requested` | An agent needs a person to approve an action |
 | `agent.approval_decided` | A request was approved, rejected — or lapsed (`status: "expired"`) |
+| `memory.drift_detected` | Evidence says a standing memory may be out of date — a changed channel, plan or habit, a problem gone quiet ([drift](#freshness-and-drift)) |
+| `memory.drift_resolved` | A drift flag was confirmed (the memory was changed), dismissed, or cleared because the evidence no longer points the other way |
 
 Every request carries:
 

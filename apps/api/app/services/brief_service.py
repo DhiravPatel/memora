@@ -17,7 +17,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.services.changes_service import ChangesService
 from app.services.customer360_service import Customer360Service
 from app.services.customer_state_service import machines_for, track_label
+from app.services.drift_service import DriftService
 from app.services.facts_service import FactsService
+from app.services.freshness_service import FreshnessService
 from app.services.guardrail_service import GuardrailService
 from app.services.health_service import HealthService
 from app.services.reader import Reader
@@ -46,6 +48,7 @@ GOALS = 6
 PREFERENCES = 6
 CHANGES = 6
 SIGNALS = 4
+DRIFT = 10
 # An achieved goal is worth raising for a month; after that it is history.
 ACHIEVED_RECENTLY = timedelta(days=30)
 LIVE_GOALS = ("open", "progressing", "stalled")
@@ -110,6 +113,19 @@ class BriefService:
         opt_outs = [str(kind) for kind in visible.get("preferences.opt_outs") or []]
         conversation = _last_conversation(sections.get("recent_conversations") or [])
         change_items = [change.model_dump() for change in changes.changes]
+        # What evidence says may be out of date, and how current each quoted memory is (§26 5.5).
+        flags, _, _ = await DriftService(self.session, cleared=self.cleared).list(
+            project=project, customer=customer, status="open", limit=DRIFT
+        )
+        quoted_rows = await MemoryRepository(self.session, cleared=self.cleared).get_many(
+            [str(item["id"]) for item in (*problems, *preferences) if item.get("id")], project.id
+        )
+        states = {
+            ident: item.state
+            for ident, item in (
+                await FreshnessService(self.session, cleared=self.cleared).annotate(project=project, memories=quoted_rows)
+            ).items()
+        }
 
         parts = BriefParts(
             name=customer.name or customer.external_id,
@@ -139,6 +155,18 @@ class BriefService:
             conversation=conversation,
             changes={"summary": changes.summary, "label": changes.window.label, "items": change_items},
             cautions=cautions,
+            drift=[
+                {
+                    "id": flag["id"],
+                    "kind": flag["kind"],
+                    "stated": flag["stated"],
+                    "observed": flag["observed"],
+                    "summary": flag["summary"],
+                    "counts": flag["counts"],
+                    "memory_id": flag["memory"]["id"],
+                }
+                for flag in flags
+            ],
         )
         judged = compose(parts)
         brief: dict[str, Any] = {
@@ -182,6 +210,7 @@ class BriefService:
                     "first_seen_at": item.get("first_seen_at"),
                     "age_days": _days(item.get("first_seen_at"), now),
                     "times_reported": int(item.get("evidence_count") or 1),
+                    "freshness": states.get(str(item["id"])),
                 }
                 for item in problems
             ],
@@ -198,8 +227,26 @@ class BriefService:
             "preferences": {
                 "channel": parts.channel,
                 "opt_outs": opt_out_words(opt_outs),
-                "statements": [{"id": item["id"], "content": item["content"]} for item in preferences],
+                "statements": [
+                    {"id": item["id"], "content": item["content"], "freshness": states.get(str(item["id"]))}
+                    for item in preferences
+                ],
+                "channel_outdated": bool(visible.get("preferences.channel_outdated")),
+                "observed_channel": channel_name(visible.get("preferences.observed_channel")),
             },
+            "drift": [
+                {
+                    "id": flag["id"],
+                    "kind": flag["kind"],
+                    "kind_label": flag["kind_label"],
+                    "memory_id": flag["memory"]["id"],
+                    "stated": flag["stated"],
+                    "observed": flag["observed"],
+                    "summary": flag["summary"],
+                    "detected_at": flag["detected_at"],
+                }
+                for flag in flags
+            ],
             "intents": intents,
             "risks": parts.risks,
             "opportunities": parts.opportunities,

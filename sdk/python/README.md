@@ -37,6 +37,13 @@ if brief.forbids("offer_upgrade"):              # the guardrails' own verdict, f
     print(brief.caution_for("offer_upgrade").text)
 prompt = memory.brief_markdown("cus_123")        # the same brief as a page, for a system prompt
 
+# What may be out of date — a stated channel they no longer use, a plan billing disagrees with
+for flag in memory.drift("cus_123"):
+    print(flag.kind, flag.summary)        # "They said they prefer email on 8 Mar; since then 12 of …"
+    memory.confirm_drift(flag.id)          # write the change (the old memory is kept as history)
+    # …or memory.dismiss_drift(flag.id) to keep the memory; only newer evidence raises it again
+print(memory.freshness("cus_123")["counts"])  # {"active": 14, "aging": 3, "stale": 2, "outdated": 1, …}
+
 # Everything worth knowing, in one call — what an agent reads before it replies
 view = memory.customer_360("cus_123", include=["health", "active_problems", "goals"])
 print(view.summary)

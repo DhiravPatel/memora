@@ -25,6 +25,8 @@ from worker.tasks import (
     close_idle_sessions,
     consolidate_customer_memories,
     deliver_webhooks,
+    detect_drift,
+    detect_drift_all,
     expire_agent_approvals,
     generate_embeddings,
     link_memories,
@@ -119,6 +121,7 @@ class WorkerSettings:
         reclassify_memories,
         refresh_customer_states,
         run_evaluation,
+        detect_drift,
         backfill_memory_indexes,
         check_key_rotation,
         send_email,
@@ -136,6 +139,8 @@ class WorkerSettings:
         # so it is recomputed nightly rather than waiting for an event that never comes.
         cron(snapshot_signals_all, hour=4, minute=30),
         cron(sweep_stale_goals, hour=5, minute=0),
+        # Before the lifecycle (05:15), which can read drift facts; after signals and goals.
+        cron(detect_drift_all, hour=5, minute=5),
         # After signals (04:30) and goals (05:00), because the lifecycle reads both.
         cron(refresh_customer_states_all, hour=5, minute=15),
         # After the summaries, so a project's newest memories are in the corpus.

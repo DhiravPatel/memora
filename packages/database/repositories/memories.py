@@ -12,7 +12,7 @@ from collections.abc import Iterable, Sequence
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Float, Text, and_, cast, func, or_, select, update
+from sqlalchemy import Float, Text, and_, cast, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import ARRAY, array
 from sqlalchemy.orm import aliased
 
@@ -46,6 +46,27 @@ def _tsquery(query: str, *, any_word: bool = True) -> Any | None:
         # Only stopwords and generic words: the substring fallback may still find it.
         return func.websearch_to_tsquery("english", query)
     return func.to_tsquery("english", " | ".join(terms))
+
+
+
+def status_is(status: MemoryStatus | str) -> list[Any]:
+    """Conditions for a memory status as a reader means it.
+
+    *Active* means standing: a memory past its ``expires_at`` is expired now, whether or not
+    the nightly retention job has marked it yet — otherwise an intent that expired on Monday
+    is quoted in Wednesday's brief. *Expired* includes those not yet marked (§31.7).
+    """
+    value = str(status)
+    if value == MemoryStatus.ACTIVE.value:
+        return [Memory.status == MemoryStatus.ACTIVE, or_(Memory.expires_at.is_(None), Memory.expires_at > func.now())]
+    if value == MemoryStatus.EXPIRED.value:
+        return [
+            or_(
+                Memory.status == MemoryStatus.EXPIRED,
+                and_(Memory.status == MemoryStatus.ACTIVE, Memory.expires_at <= func.now()),
+            )
+        ]
+    return [Memory.status == value]
 
 
 class MemoryRepository(BaseRepository):
@@ -311,7 +332,7 @@ class MemoryRepository(BaseRepository):
                 Memory.project_id == project_id,
                 Memory.customer_id == customer_id,
                 Memory.content_hash == hash_value,
-                Memory.status == MemoryStatus.ACTIVE,
+                *status_is(MemoryStatus.ACTIVE),
             )
         )
         return result.scalars().first()
@@ -339,7 +360,7 @@ class MemoryRepository(BaseRepository):
         if type:
             conditions.append(Memory.type == type)
         if status:
-            conditions.append(Memory.status == status)
+            conditions.extend(status_is(status))
         conditions.extend(self._visible(cleared=cleared))
         total = await self.session.scalar(
             select(func.count()).select_from(Memory).where(*conditions)
@@ -394,7 +415,7 @@ class MemoryRepository(BaseRepository):
             select(Memory.id).where(
                 Memory.project_id == project_id,
                 Memory.customer_id == customer_id,
-                Memory.status == MemoryStatus.ACTIVE,
+                *status_is(MemoryStatus.ACTIVE),
                 Memory.sensitivity == Sensitivity.RESTRICTED,
             )
         )
@@ -463,7 +484,7 @@ class MemoryRepository(BaseRepository):
         if type:
             conditions.append(Memory.type == type)
         if status:
-            conditions.append(Memory.status == status)
+            conditions.extend(status_is(status))
         return int(
             await self.session.scalar(select(func.count()).select_from(Memory).where(*conditions))
             or 0
@@ -478,7 +499,7 @@ class MemoryRepository(BaseRepository):
         conditions = [
             Memory.project_id == project_id,
             Memory.customer_id.in_(list(customer_ids)),
-            Memory.status == MemoryStatus.ACTIVE,
+            *status_is(MemoryStatus.ACTIVE),
             *self._visible(),
         ]
         result = await self.session.execute(
@@ -502,7 +523,7 @@ class MemoryRepository(BaseRepository):
             .where(
                 Memory.project_id == project_id,
                 Memory.customer_id.in_(list(customer_ids)),
-                Memory.status == MemoryStatus.ACTIVE,
+                *status_is(MemoryStatus.ACTIVE),
                 Entity.type == EntityType.FEATURE.value,
             )
             .group_by(Memory.customer_id)
@@ -530,6 +551,61 @@ class MemoryRepository(BaseRepository):
         for version in result.scalars():
             grouped.setdefault(version.memory_id, []).append(version)
         return grouped
+
+    async def latest_contradictions(self, memory_ids: Sequence[str]) -> dict[str, datetime]:
+        """When each memory was last contradicted by a statement judged weaker
+        (``conflict_rejected``) — what makes a memory *conflicted* (§26 5.5)."""
+        if not memory_ids:
+            return {}
+        result = await self.session.execute(
+            select(MemoryVersion.memory_id, func.max(MemoryVersion.created_at))
+            .where(MemoryVersion.memory_id.in_(list(memory_ids)), MemoryVersion.reason == "conflict_rejected")
+            .group_by(MemoryVersion.memory_id)
+        )
+        return {memory_id: at for memory_id, at in result.all() if at is not None}
+
+    async def freshness_counts(
+        self, *, project_id: str, windows: dict[str, int], fallback: int, now: datetime
+    ) -> dict[str, int]:
+        """Active memories by freshness state, in one query — the same rules as
+        :func:`memory_engine.freshness.assess`, in SQL, for a project too big to load."""
+        # Typed casts: asyncpg infers an untyped parameter as text, and make_interval wants
+        # an integer.
+        window = "CASE m.type " + " ".join(
+            f"WHEN CAST(:type_{index} AS varchar) THEN CAST(:days_{index} AS integer)" for index in range(len(windows))
+        ) + " ELSE CAST(:fallback AS integer) END"
+        params: dict[str, Any] = {"project": project_id, "now": now, "fallback": fallback}
+        for index, (kind, days) in enumerate(windows.items()):
+            params[f"type_{index}"] = kind
+            params[f"days_{index}"] = int(days)
+        query = f"""
+            WITH base AS (
+                SELECT m.id,
+                       GREATEST(m.last_seen_at, COALESCE((m.metadata->>'confirmed_at')::timestamptz, m.last_seen_at))
+                           AS evidence_at,
+                       ({window}) AS window_days
+                FROM memories m
+                WHERE m.project_id = :project AND m.status = 'active'
+                  AND (m.expires_at IS NULL OR m.expires_at > CAST(:now AS timestamptz))
+            ), judged AS (
+                SELECT CASE
+                    WHEN EXISTS (
+                        SELECT 1 FROM memory_versions v
+                        WHERE v.memory_id = b.id AND v.reason = 'conflict_rejected' AND v.created_at > b.evidence_at
+                    ) THEN 'conflicted'
+                    WHEN EXISTS (
+                        SELECT 1 FROM memory_drift d WHERE d.memory_id = b.id AND d.status = 'open'
+                    ) THEN 'outdated'
+                    WHEN CAST(:now AS timestamptz) - b.evidence_at >= make_interval(days => b.window_days) THEN 'stale'
+                    WHEN (CAST(:now AS timestamptz) - b.evidence_at) * 2 >= make_interval(days => b.window_days) THEN 'aging'
+                    ELSE 'active'
+                END AS state
+                FROM base b
+            )
+            SELECT state, count(*) FROM judged GROUP BY state
+        """
+        result = await self.session.execute(text(query), params)
+        return {state: int(count) for state, count in result.all()}
 
     async def first_seen_between(
         self,
@@ -644,7 +720,7 @@ class MemoryRepository(BaseRepository):
             .where(
                 Memory.project_id == project_id,
                 Memory.customer_id == customer_id,
-                Memory.status == MemoryStatus.ACTIVE,
+                *status_is(MemoryStatus.ACTIVE),
                 hidden,
             )
             .order_by(Memory.last_seen_at.desc())
@@ -670,7 +746,7 @@ class MemoryRepository(BaseRepository):
     def _active(self, project_id: str, customer_id: str | None) -> list[Any]:
         conditions: list[Any] = [
             Memory.project_id == project_id,
-            Memory.status == MemoryStatus.ACTIVE,
+            *status_is(MemoryStatus.ACTIVE),
         ]
         if customer_id:
             conditions.append(Memory.customer_id == customer_id)
@@ -912,7 +988,7 @@ class MemoryRepository(BaseRepository):
     async def count(self, project_id: str, status: MemoryStatus | None = MemoryStatus.ACTIVE) -> int:
         conditions = [Memory.project_id == project_id]
         if status:
-            conditions.append(Memory.status == status)
+            conditions.extend(status_is(status))
         total = await self.session.scalar(
             select(func.count()).select_from(Memory).where(*conditions)
         )
@@ -929,7 +1005,7 @@ class MemoryRepository(BaseRepository):
         """How many memories a customer has. Used to detect summary drift cheaply."""
         conditions = [Memory.project_id == project_id, Memory.customer_id == customer_id]
         if status:
-            conditions.append(Memory.status == status)
+            conditions.extend(status_is(status))
         if exclude_types:
             conditions.append(Memory.type.notin_([str(item) for item in exclude_types]))
         total = await self.session.scalar(
@@ -940,7 +1016,7 @@ class MemoryRepository(BaseRepository):
     async def count_by_type(self, project_id: str) -> dict[str, int]:
         result = await self.session.execute(
             select(Memory.type, func.count())
-            .where(Memory.project_id == project_id, Memory.status == MemoryStatus.ACTIVE)
+            .where(Memory.project_id == project_id, *status_is(MemoryStatus.ACTIVE))
             .group_by(Memory.type)
         )
         return {str(memory_type): int(count) for memory_type, count in result}

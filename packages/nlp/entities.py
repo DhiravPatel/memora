@@ -227,6 +227,81 @@ def _stance(text: str) -> tuple[list[tuple[int, str]], list[tuple[int, str]]]:
     return wanted, avoided
 
 
+# ---------------------------------------------------------------- contact channels (§26 5.5)
+
+# Event types that are the customer reaching out — as opposed to us reaching them, or them
+# using the product. Only these say anything about how they like to be contacted.
+_CONTACT_MARKERS = (
+    "message", "ticket", "conversation", "chat", "call", "email_received", "inbound",
+    "support", "sms", "whatsapp", "reply_received", "voicemail",
+)
+_OUTBOUND_MARKERS = (
+    "sent", "outbound", "campaign", "broadcast", "notification", "newsletter", "admin",
+    "closed", "created_by_agent",
+)
+# Where a payload says which channel it came through. Zendesk's ``via`` is an object.
+_CHANNEL_FIELDS = ("contact_channel", "channel", "via", "medium", "source_channel", "platform")
+_CHANNEL_ALIASES = {
+    "voice": "phone", "phone call": "phone", "call": "phone", "telephone": "phone",
+    "livechat": "chat", "live chat": "chat", "web chat": "chat", "webchat": "chat",
+    "messenger": "chat", "web widget": "chat", "in app": "in-app", "inapp": "in-app",
+    "text": "SMS", "texts": "SMS", "sms": "SMS", "mail": "email", "e mail": "email",
+    "whats app": "WhatsApp",
+}
+# Sources that are one channel whatever the payload says.
+_SOURCE_CHANNELS = {
+    "intercom": "chat", "drift": "chat", "slack": "Slack", "whatsapp": "WhatsApp",
+    "twilio": "SMS", "aircall": "phone", "gmail": "email", "outlook": "email",
+}
+_DISPLAY = {display.lower(): display for display in CHANNELS.values()}
+
+
+def channel_named(value: Any) -> str | None:
+    """The one contact channel a payload value names, or None — "whatsapp", "web_chat",
+    "voice", {"channel": "email"}. Ambiguous values ("email or phone") name none."""
+    if isinstance(value, dict):
+        value = value.get("channel") or value.get("type")
+    if not isinstance(value, str):
+        return None
+    words = " ".join(value.lower().replace("_", " ").replace("-", " ").split())
+    if not words:
+        return None
+    if words in _CHANNEL_ALIASES:
+        return _CHANNEL_ALIASES[words]
+    found = channels_mentioned(words)
+    return found[0] if len(found) == 1 else None
+
+
+def contact_channel(event_type: str, data: dict[str, Any] | None, source: str | None) -> str | None:
+    """The channel a customer reached out through, if this event is them reaching out.
+
+    From the payload when it says (``channel``, ``via``…), else from the event type
+    ("whatsapp_message", "email_received", "call_logged"), else from a source that is one
+    channel (Intercom is chat). Outbound events and product usage are never contacts.
+    """
+    kind = (event_type or "").lower()
+    if any(marker in kind for marker in _OUTBOUND_MARKERS):
+        return None
+    if not any(marker in kind for marker in _CONTACT_MARKERS):
+        return None
+    payload = data or {}
+    for name in _CHANNEL_FIELDS:
+        found = channel_named(payload.get(name))
+        if found:
+            return found
+    found = channel_named(kind)
+    if found:
+        return found
+    return _SOURCE_CHANNELS.get((source or "").lower())
+
+
+def display_channel(channel: Any) -> str | None:
+    """A channel as people write it: facts say "whatsapp", sentences say "WhatsApp"."""
+    if not channel:
+        return None
+    return _DISPLAY.get(str(channel).lower(), str(channel))
+
+
 def _ordered(found: list[tuple[int, str]]) -> list[str]:
     seen: list[str] = []
     for _, display in sorted(found):

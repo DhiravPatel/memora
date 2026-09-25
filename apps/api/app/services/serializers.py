@@ -139,7 +139,7 @@ def _masked_outcome(outcome: dict[str, Any], hidden: frozenset[str]) -> dict[str
     return {**outcome, "memories": plans}
 
 
-def memory_out(memory: Memory) -> MemoryOut:
+def memory_out(memory: Memory, freshness: Any = None) -> MemoryOut:
     return MemoryOut(
         id=memory.id,
         project_id=memory.project_id,
@@ -159,6 +159,7 @@ def memory_out(memory: Memory) -> MemoryOut:
         expires_at=memory.expires_at,
         created_at=memory.created_at,
         updated_at=memory.updated_at,
+        freshness=freshness.as_dict() if freshness is not None else None,
     )
 
 

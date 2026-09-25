@@ -100,7 +100,7 @@ class MemoryService:
         withheld = await self.memories.withheld_count(
             project_id=project.id, customer_id=customer.id, type=type, status=status
         )
-        return [memory_out(memory) for memory in memories], total, withheld
+        return await self._with_freshness(project, memories), total, withheld
 
     async def list_for_project(
         self,
@@ -125,7 +125,14 @@ class MemoryService:
         withheld = await self.memories.withheld_count(
             project_id=project.id, customer_id=customer_id, type=type, status=status
         )
-        return [memory_out(memory) for memory in memories], total, withheld
+        return await self._with_freshness(project, memories), total, withheld
+
+    async def _with_freshness(self, project: Project, memories: list[Any]) -> list[MemoryOut]:
+        """Each memory with how current it is (§26 5.5): two lookups for the page."""
+        from app.services.freshness_service import FreshnessService
+
+        assessed = await FreshnessService(self.session, cleared=self.cleared).annotate(project=project, memories=memories)
+        return [memory_out(memory, assessed.get(memory.id)) for memory in memories]
 
     async def detail(self, *, project: Project, memory_id: str) -> MemoryDetail:
         memory = await self.memories.get(memory_id, project.id)
@@ -138,8 +145,11 @@ class MemoryService:
             project.id, await self.links.for_memory(project_id=project.id, memory_id=memory.id)
         )
         hydrated = await self.links.hydrate(project_id=project.id, links=links)
+        from app.services.freshness_service import FreshnessService
+
+        assessed = await FreshnessService(self.session, cleared=self.cleared).annotate(project=project, memories=[memory])
         return MemoryDetail(
-            **memory_out(memory).model_dump(),
+            **memory_out(memory, assessed.get(memory.id)).model_dump(),
             versions=[memory_version_out(version) for version in versions],
             entities=[entity_out(entity) for entity in entities],
             links=[_link_out(link, memory.id, hydrated) for link in links],

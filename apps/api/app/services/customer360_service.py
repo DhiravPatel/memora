@@ -39,11 +39,13 @@ from common.time import utcnow
 from database.models import Customer, Project
 from database.repositories import (
     AgentSessionRepository,
+    DriftRepository,
     EventRepository,
     MemoryRepository,
 )
 from memory_engine import MemoryEngine
 from memory_engine.consolidation.rules import current_plan
+from memory_engine.freshness import gather
 from memory_engine.policy import WITHHELD
 
 # Per section, and deliberately modest. Raising these is a decision about somebody's
@@ -102,6 +104,7 @@ class Customer360Service:
         self.health = HealthService(session)
         self.signals = SignalService(session, cleared=cleared)
         self.goals = GoalService(session, cleared=cleared)
+        self._freshness: dict[str, Any] = {}
 
     async def build(
         self, *, project: Project, customer: Customer, include: frozenset[str] | None = None
@@ -132,19 +135,28 @@ class Customer360Service:
             view.withheld = await self.memories.withheld_count(
                 project_id=project.id, customer_id=customer.id
             )
+            # How current each is (§26 5.5), so a stale preference reads as one.
+            self._freshness = await gather(
+                [memory for rows in grouped.values() for memory in rows],
+                project_id=project.id,
+                project_settings=project.settings,
+                memory_repository=MemoryRepository(self.session),
+                drift_repository=DriftRepository(self.session),
+                now=utcnow(),
+            )
 
         if "subscription" in wanted:
             view.sections["subscription"] = self._subscription(grouped)
 
         if "active_problems" in wanted:
             view.sections["active_problems"] = [
-                _memory_brief(memory)
+                _memory_brief(memory, self._freshness.get(memory.id))
                 for memory in grouped.get(MemoryType.PROBLEM.value, [])[:ACTIVE_PROBLEMS]
             ]
 
         if "preferences" in wanted:
             view.sections["preferences"] = [
-                _memory_brief(memory)
+                _memory_brief(memory, self._freshness.get(memory.id))
                 for memory in grouped.get(MemoryType.PREFERENCE.value, [])[:PREFERENCES]
             ]
 
@@ -262,7 +274,7 @@ class Customer360Service:
             return None
         current = max(rows, key=lambda memory: memory.last_seen_at)
         return {
-            **_memory_brief(current),
+            **_memory_brief(current, self._freshness.get(current.id)),
             "history": [_memory_brief(memory) for memory in rows if memory.id != current.id][:3],
         }
 
@@ -274,12 +286,19 @@ class Customer360Service:
         """
         everything = [memory for rows in grouped.values() for memory in rows]
         everything.sort(key=lambda memory: (memory.importance, memory.last_seen_at), reverse=True)
-        return [_memory_brief(memory) for memory in everything[:IMPORTANT_MEMORIES]]
+        return [_memory_brief(memory, self._freshness.get(memory.id)) for memory in everything[:IMPORTANT_MEMORIES]]
 
 
-def _memory_brief(memory: Any) -> dict[str, Any]:
-    """A memory as an agent needs it: the statement, and how much to trust it."""
+def _memory_brief(memory: Any, freshness: Any = None) -> dict[str, Any]:
+    """A memory as an agent needs it: the statement, how much to trust it — and, where
+    assessed, how current it is."""
+    current = (
+        {"freshness": freshness.state, "effective_confidence": round(freshness.effective_confidence, 3)}
+        if freshness is not None
+        else {}
+    )
     return {
+        **current,
         "id": memory.id,
         "type": str(memory.type),
         "content": memory.content,

@@ -30,6 +30,7 @@ from app.schemas.customers import (
     CustomerTimeline,
     CustomerUpsert,
 )
+from app.schemas.freshness import CustomerFreshnessOut, DriftOut, DriftRunOut
 from app.schemas.goals import GoalOut
 from app.schemas.health import HealthOut
 from app.schemas.memories import CustomerLinks, MemoryGraph, MemoryOut
@@ -50,7 +51,9 @@ from app.services.customer360_service import SECTIONS, Customer360Service
 from app.services.customer_service import CustomerService
 from app.services.customer_state_service import CustomerStateService
 from app.services.deletion_service import DeletionService
+from app.services.drift_service import DriftService
 from app.services.export_service import ExportService
+from app.services.freshness_service import FreshnessService
 from app.services.goal_service import GoalService
 from app.services.health_service import HealthService
 from app.services.memory_service import MemoryService
@@ -526,6 +529,41 @@ async def get_customer_brief(
     if fmt == "markdown":
         return PlainTextResponse(brief["markdown"], media_type="text/markdown; charset=utf-8")
     return CustomerBriefOut(**brief)
+
+
+# ------------------------------------------------------------ freshness and drift
+
+
+@router.get("/{customer_id}/freshness", response_model=CustomerFreshnessOut, dependencies=MEMORY_READ)
+async def get_customer_freshness(
+    customer: ApiCustomer,
+    project: ApiProject,
+    session: DBSession,
+    cleared: Clearance,
+    limit: int = Query(default=50, ge=1, le=200, description="Memories not fresh to list, most concerning first."),
+) -> CustomerFreshnessOut:
+    """How current what we know about this customer is: every standing memory's state —
+    active, aging, stale, outdated, conflicted — with the ones a person should look at first
+    and the open drift flags (§26 5.5)."""
+    return CustomerFreshnessOut(
+        **await FreshnessService(session, cleared=cleared).for_customer(project=project, customer=customer, limit=limit)
+    )
+
+
+@router.post(
+    "/{customer_id}/drift/refresh",
+    response_model=DriftRunOut,
+    dependencies=[Depends(require_scope(ApiKeyScope.MEMORY_WRITE))],
+)
+async def refresh_customer_drift(
+    customer: ApiCustomer, project: ApiProject, session: DBSession, cleared: Clearance
+) -> DriftRunOut:
+    """Run every drift detector for this customer now, rather than at the next event or the
+    nightly sweep."""
+    service = DriftService(session, cleared=cleared)
+    run = await service.detect(project=project, customer=customer)
+    flags, _, _ = await service.list(project=project, customer=customer, status="open", limit=100)
+    return DriftRunOut(**run.as_dict(), open=[DriftOut(**flag) for flag in flags])
 
 
 @router.get("/{customer_id}/export", summary="Export everything known about a customer")

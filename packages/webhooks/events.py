@@ -266,6 +266,44 @@ def agent_approval_decided(*, project_id: str, customer: Any, approval: Any) -> 
     )
 
 
+def memory_drift_detected(*, project_id: str, customer: Any, drift: Any) -> OutboundEvent:
+    """Evidence says a standing memory may be out of date (§26 5.5) — a stated channel the
+    customer no longer uses, a plan billing disagrees with. Nothing changed yet: a person
+    confirms or dismisses it."""
+    return OutboundEvent(
+        type=WebhookEvent.MEMORY_DRIFT_DETECTED,
+        project_id=project_id,
+        data={"customer": _customer_ref(customer), "drift": _drift(drift)},
+    )
+
+
+def memory_drift_resolved(*, project_id: str, customer: Any, drift: Any) -> OutboundEvent:
+    """A drift flag was confirmed (the memory was changed), dismissed, or cleared because
+    the evidence no longer points the other way."""
+    return OutboundEvent(
+        type=WebhookEvent.MEMORY_DRIFT_RESOLVED,
+        project_id=project_id,
+        data={"customer": _customer_ref(customer), "drift": _drift(drift)},
+    )
+
+
+def _drift(drift: Any) -> dict[str, Any]:
+    return {
+        "id": drift.id,
+        "memory_id": drift.memory_id,
+        "kind": drift.kind,
+        "status": drift.status,
+        "stated": drift.stated,
+        "observed": drift.observed,
+        "summary": drift.summary,
+        "counts": drift.counts or {},
+        "since": drift.since.isoformat() if drift.since else None,
+        "detected_at": drift.detected_at.isoformat() if drift.detected_at else None,
+        "resolved_at": drift.resolved_at.isoformat() if drift.resolved_at else None,
+        "replacement_memory_id": drift.replacement_memory_id,
+    }
+
+
 def _approval(approval: Any) -> dict[str, Any]:
     return {
         "id": approval.id,

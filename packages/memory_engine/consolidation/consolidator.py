@@ -54,6 +54,16 @@ RESOLUTION_OVERLAP = 0.2
 # this many days before it — and only when there is exactly one: with two it could be
 # either, and closing the wrong one is worse than closing neither.
 BARE_RESOLUTION_DAYS = 14
+# What a candidate's attributes contribute to the stored memory: how it was read, and the
+# structured values a template took from the payload — the plan a subscription change left
+# the customer on, the feature a usage event named — so facts and drift (§26 5.5) read them
+# rather than re-parsing the sentence. Free text (reasons, subjects) is already the content.
+_KEPT_ATTRIBUTES = frozenset(
+    {
+        "cues", "resolved", "quoted", "sentiment", "measurements", "channels",
+        "plan", "previous_plan", "direction", "feature", "integration", "product",
+    }
+)
 # A memory stands for every statement it absorbed, not only its newest wording. A new report
 # is compared with the latest few of them too, so "the export failed again last night"
 # still meets a problem whose text a later message rewrote into a threat to cancel.
@@ -636,7 +646,7 @@ class MemoryConsolidator:
                 **{
                     key: value
                     for key, value in (candidate.attributes or {}).items()
-                    if key in ("cues", "resolved", "quoted", "sentiment", "measurements", "channels")
+                    if key in _KEPT_ATTRIBUTES and value not in (None, "")
                 },
                 **({"restricted_by": verdict.reason} if verdict.restricted else {}),
                 **(metadata or {}),

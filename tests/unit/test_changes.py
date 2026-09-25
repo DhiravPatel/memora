@@ -388,3 +388,20 @@ def test_a_state_only_passed_through_ranks_below_where_the_customer_ended_up():
     text = summarise(ordered, lead="In the last 7 days")
     assert "engagement moved to at risk" in text and "lifecycle moved to at risk" in text
     assert "moved to activated" not in text
+
+
+def test_a_memory_flagged_possibly_outdated_is_a_change():
+    flag = SimpleNamespace(
+        id="drf_1", memory_id="m1", kind="channel", status="open", stated="email", observed="WhatsApp",
+        summary="They said they prefer email; since then 6 of their 7 contacts came through WhatsApp.",
+        detected_at=NOW - timedelta(days=2),
+    )
+    old_flag = SimpleNamespace(**{**vars(flag), "id": "drf_0", "detected_at": NOW - timedelta(days=30)})
+    found = detect(inputs(drift=[flag, old_flag]))
+    assert kinds(found) == [("memory", "outdated")]
+    change = found[0]
+    assert change.title.startswith("Possibly out of date: They said they prefer email")
+    assert (change.before, change.after, change.source) == ("email", "WhatsApp", "drift")
+    shown, withheld = shape(found, {"m1"})
+    assert shown == [] and withheld == 1, "a flag on a hidden memory is not shown"
+    assert summarise(found, lead="In the last 7 days") == "In the last 7 days: a memory may be out of date."

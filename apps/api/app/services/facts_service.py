@@ -22,9 +22,15 @@ from app.services.reader import Reader
 from app.services.signal_service import SignalService
 from common.time import utcnow
 from database.models import Customer, Project
-from database.repositories import AgentActionRepository, GoalRepository, MemoryRepository
+from database.repositories import (
+    AgentActionRepository,
+    DriftRepository,
+    GoalRepository,
+    MemoryRepository,
+)
 from memory_engine.conditions import Condition, Evaluation
 from memory_engine.facts import ACTION_HISTORY_DAYS, CustomerFacts, FactInputs, build_facts
+from memory_engine.freshness import gather
 
 # Deep enough that a customer's open problems and preferences are all present — the
 # fact builder reads every one of them — without reading their whole history.
@@ -82,6 +88,18 @@ class FactsService:
             project_id=project.id, customer_id=customer.id, since=now - timedelta(days=ACTION_HISTORY_DAYS)
         )
 
+        # How current each memory is, and what evidence says may be out of date (§26 5.5).
+        drift_repository = DriftRepository(self.session)
+        freshness = await gather(
+            [memory for rows in grouped.values() for memory in rows],
+            project_id=project.id,
+            project_settings=project.settings,
+            memory_repository=self.memories,
+            drift_repository=drift_repository,
+            now=now,
+        )
+        drift = await drift_repository.open_for_customer(project_id=project.id, customer_id=customer.id)
+
         if state is None or tracks is None:
             loaded_state, loaded_entered, loaded_pinned, loaded_tracks = await self._state(project, customer)
             if state is None:
@@ -106,6 +124,8 @@ class FactsService:
                 state_pinned=state_pinned,
                 tracks=tracks or {},
                 actions=actions,
+                freshness=freshness,
+                drift=drift,
             )
         )
 

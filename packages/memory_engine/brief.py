@@ -21,7 +21,7 @@ from typing import Any
 from common.time import ensure_utc
 from memory_engine.consolidation.rules import without_recurrence_note
 from memory_engine.reasons import sentence
-from nlp.lexicon import CHANNELS
+from nlp.entities import display_channel
 
 WITHHELD = "[withheld]"
 TALKING_POINTS = 6
@@ -100,6 +100,8 @@ class BriefParts:
     conversation: dict[str, Any] | None = None  # summary, agent, closed_at
     changes: dict[str, Any] | None = None  # summary, label, items
     cautions: list[dict[str, Any]] = field(default_factory=list)  # action, decision, summary, rules, evidence
+    # Open drift flags (§26 5.5): kind, stated, observed, summary, counts, memory_id.
+    drift: list[dict[str, Any]] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------- words
@@ -283,6 +285,8 @@ def talking_points(parts: BriefParts, step: dict[str, Any] | None = None) -> lis
         said = f": {_quote(parts.plan_statement)}" if parts.plan_statement else ""
         points.append(f"{what}{said}.")
 
+    # A problem drift says may be fixed is asked about, not quoted as still open.
+    quoted |= {str(flag.get("memory_id")) for flag in parts.drift if flag.get("kind") == "quiet_problem"}
     # The problems that weigh most: reported most often, then open longest.
     pressing = sorted(
         (item for item in parts.problems if str(item.get("id")) not in quoted),
@@ -294,6 +298,8 @@ def talking_points(parts: BriefParts, step: dict[str, Any] | None = None) -> lis
         again = f", reported {times} times" if times > 1 else ""
         opened = "Opened today" if age == "today" else f"Still open after {age}"
         points.append(f"{opened}{again}: {_quote(problem.get('content'))}.")
+
+    points.extend(drift_points(parts))
 
     if parts.changes and parts.changes.get("items") and parts.changes.get("summary"):
         points.append(_short(str(parts.changes["summary"])))
@@ -347,6 +353,41 @@ def _short(summary: str, clauses: int = CHANGE_CLAUSES) -> str:
         return summary
     more = len(items) - clauses
     return f"{lead}: {'; '.join(items[:clauses])} — and {more} more change{'' if more == 1 else 's'}."
+
+
+def drift_points(parts: BriefParts) -> list[str]:
+    """What evidence says may be out of date, each as a question to ask — never as fact."""
+    points: list[str] = []
+    for flag in parts.drift:
+        kind = flag.get("kind")
+        counts = flag.get("counts") or {}
+        stated = str(flag.get("stated") or "")
+        observed = str(flag.get("observed") or "")
+        if kind == "channel" and observed:
+            share = (
+                f"{counts['observed']} of their {counts['total']} contacts"
+                if counts.get("observed") and counts.get("total")
+                else "most of their contacts"
+            )
+            points.append(
+                f"They said they prefer {stated}, but {share} since came through {display_channel(observed)} "
+                "— ask which they prefer now."
+            )
+        elif kind == "plan" and observed:
+            events = counts.get("events")
+            billed = f"their last {events} billing events were" if events else "billing says it is"
+            points.append(
+                f"Memory says the {stated.title()} plan, but {billed} for {observed.title()} — check which plan they are on."
+            )
+        elif kind == "quiet_problem":
+            quiet = counts.get("quiet_days")
+            ago = f" in {_ago(int(quiet))}" if isinstance(quiet, (int, float)) else " for a while"
+            points.append(f"{_quote(stated)} has not come up{ago} while they stayed active — ask whether it is fixed.")
+        elif kind == "usage":
+            quiet = counts.get("quiet_days")
+            ago = f" in {_ago(int(quiet))}" if isinstance(quiet, (int, float)) else " for a while"
+            points.append(f"They have not used the {stated}{ago} while staying active — ask what changed.")
+    return points
 
 
 def _sort_time(value: Any) -> float:
@@ -492,6 +533,11 @@ def markdown(brief: dict[str, Any]) -> str:
     if prefer:
         lines += ["", "## What they prefer", *[f"- {item}" for item in prefer]]
 
+    drift = brief.get("drift") or []
+    if drift:
+        lines += ["", "## Possibly out of date"]
+        lines += [f"- {flag.get('summary')}" for flag in drift]
+
     signals = [("Risk", item) for item in (brief.get("risks") or [])[:3]]
     signals += [("Opportunity", item) for item in (brief.get("opportunities") or [])[:2]]
     if signals:
@@ -537,14 +583,11 @@ def _when(moment: datetime, now: datetime) -> str:
     return f"{_ago(days)} ago"
 
 
-_CHANNEL_NAMES = {display.lower(): display for display in CHANNELS.values()}
-
-
 def channel_name(channel: Any) -> str | None:
     """A channel as people write it: the fact is "whatsapp", the brief says "WhatsApp"."""
     if not channel or channel == WITHHELD:
         return channel or None
-    return _CHANNEL_NAMES.get(str(channel).lower(), str(channel))
+    return display_channel(channel)
 
 
 def opt_out_words(kinds: Sequence[str]) -> list[dict[str, str]]:

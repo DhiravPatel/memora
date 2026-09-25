@@ -117,3 +117,58 @@ class MemoryEntity(Base):
         String(ID_LENGTH), ForeignKey("entities.id", ondelete="CASCADE"), index=True
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class MemoryDrift(Base):
+    """Evidence that a standing memory may be out of date (§26 5.5).
+
+    A flag, never a change: the memory stands until a person confirms the flag — which
+    writes the change through the normal memory paths — or dismisses it, after which only
+    evidence newer than the dismissal counts. Re-detection updates an open flag's counts
+    rather than stacking another; one that no longer holds is cleared by the system.
+    """
+
+    __tablename__ = "memory_drift"
+    __table_args__ = (
+        Index("ix_memory_drift_project_status", "project_id", "status", "detected_at"),
+        Index("ix_memory_drift_customer_status", "customer_id", "status"),
+        # One open flag per memory and kind.
+        Index(
+            "uq_memory_drift_open",
+            "memory_id",
+            "kind",
+            unique=True,
+            postgresql_where=text("status = 'open'"),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(ID_LENGTH), primary_key=True)
+    project_id: Mapped[str] = mapped_column(
+        String(ID_LENGTH), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    customer_id: Mapped[str] = mapped_column(
+        String(ID_LENGTH), ForeignKey("customers.id", ondelete="CASCADE"), nullable=False
+    )
+    memory_id: Mapped[str] = mapped_column(
+        String(ID_LENGTH), ForeignKey("memories.id", ondelete="CASCADE"), index=True
+    )
+    # channel | plan | usage | quiet_problem
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    # open | confirmed | dismissed | cleared
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    stated: Mapped[str] = mapped_column(Text, nullable=False)
+    observed: Mapped[str | None] = mapped_column(Text)
+    summary: Mapped[str] = mapped_column(Text, nullable=False)
+    counts: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    # Event and session ids behind the flag, newest first.
+    evidence: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    # The moment counting started from: the memory's last evidence, or a dismissal.
+    since: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    detected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    resolved_by: Mapped[str | None] = mapped_column(String(ID_LENGTH))
+    # user | api_key | system
+    resolved_by_type: Mapped[str | None] = mapped_column(String(16))
+    note: Mapped[str | None] = mapped_column(Text)
+    replacement_memory_id: Mapped[str | None] = mapped_column(String(ID_LENGTH))

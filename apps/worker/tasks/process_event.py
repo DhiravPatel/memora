@@ -30,6 +30,7 @@ from webhooks import (
     signal_raised,
 )
 from worker.tasks.context import engine_for, worker_session
+from worker.tasks.drift import detect_for_event
 from worker.tasks.summarize import refresh_summary_if_drifted
 
 logger = get_logger(__name__)
@@ -144,9 +145,20 @@ async def process_event(ctx: dict[str, Any], event_id: str) -> dict[str, Any]:
                     ctx, session, project_id=project.id, customer_id=customer.id
                 )
 
+        # Drift (§26 5.5) moves on events that remember nothing too: "hi, any news?" on
+        # WhatsApp is still a contact on WhatsApp.
+        drift = await detect_for_event(
+            session,
+            project,
+            await CustomerRepository(session).get(event.customer_id, project.id),
+            event,
+            memories_changed=bool(result.created_memory_ids or result.updated_memory_ids),
+        )
+
         return {
             "event_id": event_id,
             "status": "processed" if result.processed else "skipped",
+            "drift": drift,
             "skipped_reason": result.skipped_reason,
             "created_memories": result.created_memory_ids,
             "updated_memories": result.updated_memory_ids,

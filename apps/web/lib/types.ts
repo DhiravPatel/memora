@@ -39,6 +39,8 @@ export interface Memory {
   last_seen_at: string;
   expires_at: string | null;
   created_at: string;
+  /** How current it is (§26 5.5), where the route assessed it. */
+  freshness?: Freshness | null;
 }
 
 export interface MemoryVersion {
@@ -1396,6 +1398,82 @@ export interface BriefTrack {
   reasons: string[];
 }
 
+// ------------------------------------------------------- freshness and drift (§26 5.5)
+
+export type FreshnessState =
+  "active" | "aging" | "stale" | "outdated" | "conflicted" | "expired" | "superseded";
+
+export interface Freshness {
+  state: FreshnessState;
+  effective_confidence: number;
+  evidence_at: string;
+  days_since_evidence: number;
+  window_days: number;
+  reasons: string[];
+  contradicted_at: string | null;
+  drift: { id: string; kind: string; summary: string }[];
+}
+
+export type DriftKind = "channel" | "plan" | "usage" | "quiet_problem";
+export type DriftStatus = "open" | "confirmed" | "dismissed" | "cleared";
+
+export interface DriftFlag {
+  id: string;
+  kind: DriftKind;
+  kind_label: string;
+  status: DriftStatus;
+  stated: string;
+  observed: string | null;
+  summary: string;
+  counts: Record<string, any>;
+  evidence: string[];
+  since: string;
+  detected_at: string;
+  updated_at: string;
+  resolved_at: string | null;
+  resolved_by_type: string | null;
+  note: string | null;
+  replacement_memory_id: string | null;
+  memory: {
+    id: string;
+    type?: string | null;
+    content?: string | null;
+    status?: string | null;
+    last_seen_at?: string | null;
+  };
+  customer: { id: string; external_id?: string | null; name?: string | null };
+}
+
+export interface CustomerFreshness {
+  customer_id: string;
+  counts: Record<FreshnessState, number>;
+  total: number;
+  needs_attention: number;
+  stale_share: number | null;
+  memories: {
+    id: string;
+    type: string;
+    content: string;
+    importance: number;
+    confidence: number;
+    last_seen_at: string;
+    freshness: Freshness;
+  }[];
+  drift: DriftFlag[];
+  windows: Record<string, number>;
+  fallback_window: number;
+  withheld: number;
+  truncated: boolean;
+  computed_at: string;
+}
+
+export interface DriftRun {
+  opened: string[];
+  refreshed: string[];
+  cleared: string[];
+  open: DriftFlag[];
+}
+
 export interface CustomerBrief {
   customer: {
     id: string;
@@ -1432,6 +1510,7 @@ export interface CustomerBrief {
     first_seen_at: string | null;
     age_days: number | null;
     times_reported: number;
+    freshness?: FreshnessState | null;
   }[];
   goals: {
     id: string;
@@ -1443,8 +1522,20 @@ export interface CustomerBrief {
   preferences: {
     channel: string | null;
     opt_outs: { kind: string; words: string }[];
-    statements: { id: string; content: string }[];
+    statements: { id: string; content: string; freshness?: FreshnessState | null }[];
+    channel_outdated?: boolean;
+    observed_channel?: string | null;
   };
+  drift?: {
+    id: string;
+    kind: DriftKind;
+    kind_label: string;
+    memory_id: string;
+    stated: string;
+    observed: string | null;
+    summary: string;
+    detected_at: string;
+  }[];
   intents: {
     id: string;
     type: string;

@@ -225,6 +225,8 @@ class WebhookEvent(StrEnum):
     AGENT_APPROVAL_REQUESTED = "agent.approval_requested"
     AGENT_APPROVAL_DECIDED = "agent.approval_decided"
     AGENT_ACTION_COMPLETED = "agent.action_completed"
+    MEMORY_DRIFT_DETECTED = "memory.drift_detected"
+    MEMORY_DRIFT_RESOLVED = "memory.drift_resolved"
 
     @classmethod
     def all(cls) -> list[WebhookEvent]:

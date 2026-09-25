@@ -1139,6 +1139,19 @@ class MemoryEngine:
             project_id=project.id, customer_id=customer.id, limit=8
         )
         edges = await self._relationship_summary(project_id=project.id, customer=customer)
+        # How current each candidate is (§26 5.5): a stale or possibly outdated memory is
+        # handed over marked, not silently.
+        from database.repositories import DriftRepository
+        from memory_engine.freshness import gather as gather_freshness
+
+        fresh = await gather_freshness(
+            [item.memory for item in memories],
+            project_id=project.id,
+            project_settings=project.settings,
+            memory_repository=self.memories,
+            drift_repository=DriftRepository(self.session),
+            now=utcnow(),
+        )
 
         context = self.context_builder.build(
             customer={
@@ -1158,6 +1171,7 @@ class MemoryEngine:
             ],
             relationships=edges,
             token_budget=token_budget,
+            freshness=fresh,
         )
         included = set(context.memory_ids)
         context.run_id = await self._record_run(

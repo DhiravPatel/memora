@@ -319,3 +319,23 @@ def test_channels_read_as_people_write_them():
 
     assert [channel_name(value) for value in ("whatsapp", "sms", "email", "in-app", None)] == ["WhatsApp", "SMS", "email", "in-app", None]
     assert talking_points(parts(channel=channel_name("whatsapp")))[-1] == "They prefer WhatsApp."
+
+
+
+def test_drift_is_raised_as_a_question_and_replaces_the_still_open_line():
+    flags = [
+        {"id": "d1", "kind": "channel", "stated": "email", "observed": "whatsapp", "counts": {"observed": 6, "total": 7}, "memory_id": "m9"},
+        {"id": "d2", "kind": "plan", "stated": "pro", "observed": "enterprise", "counts": {"events": 2}, "memory_id": "m8"},
+        {"id": "d3", "kind": "quiet_problem", "stated": "The export times out.", "counts": {"quiet_days": 45}, "memory_id": "p1"},
+        {"id": "d4", "kind": "usage", "stated": "Campaign Builder", "counts": {"quiet_days": 75}, "memory_id": "m7"},
+    ]
+    points = talking_points(parts(problems=[problem("p1", "The export times out.", days=45)], drift=flags))
+    assert points[:4] == [
+        "They said they prefer email, but 6 of their 7 contacts since came through WhatsApp — ask which they prefer now.",
+        "Memory says the Pro plan, but their last 2 billing events were for Enterprise — check which plan they are on.",
+        "“The export times out” has not come up in 6 weeks while they stayed active — ask whether it is fixed.",
+        "They have not used the Campaign Builder in 2 months while staying active — ask what changed.",
+    ]
+    assert not any(point.startswith("Still open") for point in points)
+    page = markdown({"customer": {"name": "Acme"}, "headline": "Acme.", "drift": [{"summary": "Mostly WhatsApp."}]})
+    assert "## Possibly out of date\n- Mostly WhatsApp." in page

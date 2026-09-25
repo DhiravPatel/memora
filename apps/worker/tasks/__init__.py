@@ -4,6 +4,7 @@ from worker.tasks.agents import expire_agent_approvals
 from worker.tasks.build_context import warm_context
 from worker.tasks.consolidate_memory import consolidate_customer_memories
 from worker.tasks.deliver_webhooks import deliver_webhooks, purge_old_deliveries
+from worker.tasks.drift import detect_drift, detect_drift_all
 from worker.tasks.email import render_invitation, send_email, send_invitation_email
 from worker.tasks.evaluation import run_evaluation
 from worker.tasks.foresight import (
@@ -36,6 +37,8 @@ __all__ = [
     "close_idle_sessions",
     "consolidate_customer_memories",
     "deliver_webhooks",
+    "detect_drift",
+    "detect_drift_all",
     "expire_agent_approvals",
     "generate_embeddings",
     "link_memories",

@@ -68,6 +68,23 @@ def test_the_preferred_channel_is_honoured():
     assert verdict.reasons[0].explanation == "The customer prefers whatsapp, not email."
 
 
+def test_a_preference_drift_says_otherwise_is_still_honoured_and_named():
+    """Never silently changed (§26 5.5): the stated channel decides; the agent is told."""
+    verdict = decide(
+        "contact_customer",
+        {"channel": "whatsapp"},
+        preferences__channel="email",
+        preferences__channel_outdated=True,
+        preferences__observed_channel="whatsapp",
+        preferences__observed_share=0.857,
+    )
+    assert verdict.decision == DENY
+    assert verdict.reasons[0].explanation == (
+        "The customer prefers email, not whatsapp — though 86% of their contacts since came through "
+        "WhatsApp; a person can confirm the change."
+    )
+
+
 def test_the_preferred_channel_matches_regardless_of_spelling():
     assert decide("contact_customer", {"channel": "WhatsApp"}, preferences__channel="whatsapp").decision == ALLOW
 

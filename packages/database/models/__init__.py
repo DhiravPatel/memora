@@ -13,7 +13,7 @@ from database.models.event import Event
 from database.models.goal import CustomerGoal
 from database.models.invitation import UserInvitation
 from database.models.link import MemoryLink
-from database.models.memory import Memory, MemoryEntity, MemoryVersion
+from database.models.memory import Memory, MemoryDrift, MemoryEntity, MemoryVersion
 from database.models.observability import AuditLog, QueryLog, UsageRecord
 from database.models.organization import Organization, User
 from database.models.project import DEFAULT_PROJECT_SETTINGS, Project
@@ -50,6 +50,7 @@ __all__ = [
     "Event",
     "LearnedTerm",
     "Memory",
+    "MemoryDrift",
     "MemoryEntity",
     "MemoryLink",
     "MemoryVersion",

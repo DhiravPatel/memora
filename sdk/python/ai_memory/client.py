@@ -31,6 +31,7 @@ from ai_memory.models import (
     CustomerBrief,
     CustomerChanges,
     CustomerContext,
+    DriftFlag,
     EventExplanation,
     Goal,
     Health,
@@ -97,6 +98,10 @@ def _changes_params(
     if types:
         params["types"] = ",".join(types)
     return params
+
+
+def _drift_params(customer_id: str | None, status: str, kind: str | None, limit: int, offset: int) -> dict[str, Any]:
+    return {"customer_id": customer_id, "status": status, "kind": kind, "limit": limit, "offset": offset}
 
 
 def _brief_params(since: datetime | str | None, agent: str | None) -> dict[str, Any]:
@@ -609,6 +614,47 @@ class MemoryClient(_BaseClient):
                 "GET", f"/v1/customers/{customer_id}/brief", params={**_brief_params(since, agent), "format": "markdown"}
             )
         )
+
+    # ------------------------------------------------------ freshness and drift
+
+    def freshness(self, customer_id: str, *, limit: int = 50) -> dict[str, Any]:
+        """How current what is known about a customer is (§26 5.5): every standing memory's
+        state — active, aging, stale, outdated, conflicted — the ones to look at first, and
+        the open drift flags."""
+        return self._request("GET", f"/v1/customers/{customer_id}/freshness", params={"limit": limit})
+
+    def drift(
+        self,
+        customer_id: str | None = None,
+        *,
+        status: str = "open",
+        kind: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[DriftFlag]:
+        """Drift flags — evidence that a standing memory may be out of date — open by default.
+
+            for flag in client.drift("cus_1"):
+                print(flag.kind, flag.summary)
+        """
+        body = self._request("GET", "/v1/drift", params=_drift_params(customer_id, status, kind, limit, offset))
+        return [DriftFlag.from_api(item) for item in body.get("data", [])]
+
+    def drift_flag(self, drift_id: str) -> DriftFlag:
+        return DriftFlag.from_api(self._request("GET", f"/v1/drift/{drift_id}"))
+
+    def confirm_drift(self, drift_id: str, *, note: str | None = None) -> DriftFlag:
+        """The evidence is right: write the change it points to (a new preference, plan or
+        habit, or the problem resolved). The replaced memory is kept as history."""
+        return DriftFlag.from_api(self._request("POST", f"/v1/drift/{drift_id}/confirm", json={"note": note}))
+
+    def dismiss_drift(self, drift_id: str, *, note: str | None = None) -> DriftFlag:
+        """The memory still holds: keep it, and count only evidence newer than now."""
+        return DriftFlag.from_api(self._request("POST", f"/v1/drift/{drift_id}/dismiss", json={"note": note}))
+
+    def refresh_drift(self, customer_id: str) -> dict[str, Any]:
+        """Run every drift detector for a customer now, rather than at the nightly sweep."""
+        return self._request("POST", f"/v1/customers/{customer_id}/drift/refresh")
 
     def customer_360(
         self, customer_id: str, *, include: Sequence[str] | None = None
@@ -1391,6 +1437,34 @@ class AsyncMemoryClient(_BaseClient):
                 "GET", f"/v1/customers/{customer_id}/brief", params={**_brief_params(since, agent), "format": "markdown"}
             )
         )
+
+    async def freshness(self, customer_id: str, *, limit: int = 50) -> dict[str, Any]:
+        """How current what is known about a customer is. See :meth:`MemoryClient.freshness`."""
+        return await self._request("GET", f"/v1/customers/{customer_id}/freshness", params={"limit": limit})
+
+    async def drift(
+        self,
+        customer_id: str | None = None,
+        *,
+        status: str = "open",
+        kind: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[DriftFlag]:
+        body = await self._request("GET", "/v1/drift", params=_drift_params(customer_id, status, kind, limit, offset))
+        return [DriftFlag.from_api(item) for item in body.get("data", [])]
+
+    async def drift_flag(self, drift_id: str) -> DriftFlag:
+        return DriftFlag.from_api(await self._request("GET", f"/v1/drift/{drift_id}"))
+
+    async def confirm_drift(self, drift_id: str, *, note: str | None = None) -> DriftFlag:
+        return DriftFlag.from_api(await self._request("POST", f"/v1/drift/{drift_id}/confirm", json={"note": note}))
+
+    async def dismiss_drift(self, drift_id: str, *, note: str | None = None) -> DriftFlag:
+        return DriftFlag.from_api(await self._request("POST", f"/v1/drift/{drift_id}/dismiss", json={"note": note}))
+
+    async def refresh_drift(self, customer_id: str) -> dict[str, Any]:
+        return await self._request("POST", f"/v1/customers/{customer_id}/drift/refresh")
 
     async def customer_360(
         self, customer_id: str, *, include: Sequence[str] | None = None

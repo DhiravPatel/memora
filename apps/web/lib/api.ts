@@ -18,6 +18,11 @@ export class ApiError extends Error {
   }
 }
 
+// Who wants to know when the tokens change: the session provider lives in the root layout,
+// which does not re-render on a client-side navigation — without this, signing in left the
+// dashboard with no user and no projects until a full reload.
+const tokenListeners = new Set<() => void>();
+
 export const tokenStore = {
   get access() {
     return typeof window === "undefined" ? null : localStorage.getItem(ACCESS_TOKEN_KEY);
@@ -28,10 +33,19 @@ export const tokenStore = {
   set(tokens: { access_token: string; refresh_token: string }) {
     localStorage.setItem(ACCESS_TOKEN_KEY, tokens.access_token);
     localStorage.setItem(REFRESH_TOKEN_KEY, tokens.refresh_token);
+    tokenListeners.forEach((listener) => listener());
   },
   clear() {
     localStorage.removeItem(ACCESS_TOKEN_KEY);
     localStorage.removeItem(REFRESH_TOKEN_KEY);
+    tokenListeners.forEach((listener) => listener());
+  },
+  /** Called whenever the tokens are set or cleared. Returns the unsubscribe. */
+  subscribe(listener: () => void): () => void {
+    tokenListeners.add(listener);
+    return () => {
+      tokenListeners.delete(listener);
+    };
   },
 };
 

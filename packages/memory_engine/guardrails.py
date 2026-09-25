@@ -46,6 +46,7 @@ from memory_engine.conditions import (
 )
 from memory_engine.facts import CustomerFacts
 from memory_engine.reasons import sentence
+from nlp.entities import display_channel
 from nlp.tokenize import root, surface_words
 
 ALLOW, REQUIRE_APPROVAL, DENY = "allow", "require_approval", "deny"
@@ -478,11 +479,22 @@ def _builtins(action: str, facts: CustomerFacts, visible: CustomerFacts, disable
     if on("channel_preference") and action in CONTACT and wanted and preferred and _channel(wanted) != _channel(preferred):
         shown = visible.get("preferences.channel")
         withheld = f"The customer's contact preference does not allow {wanted}."
+        explanation = f"The customer prefers {shown}, not {wanted}." if shown else withheld
+        # Never silently changed (§26 5.5): the stated preference still decides, but the
+        # agent is told when the customer's own behaviour says otherwise.
+        observed = visible.get("preferences.observed_channel")
+        share = visible.get("preferences.observed_share")
+        if shown and visible.get("preferences.channel_outdated") and observed:
+            portion = f"{float(share):.0%} of " if isinstance(share, (int, float)) else ""
+            explanation = (
+                f"The customer prefers {shown}, not {wanted} — though {portion}their contacts since came "
+                f"through {display_channel(observed)}; a person can confirm the change."
+            )
         yield Reason(
             rule="channel_preference",
             source="builtin",
             decision=DENY,
-            explanation=f"The customer prefers {shown}, not {wanted}." if shown else withheld,
+            explanation=explanation,
             evidence=visible.evidence_for("preferences.channel"),
             redacted_explanation=withheld,
         )

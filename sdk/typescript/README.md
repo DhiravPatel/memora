@@ -20,6 +20,12 @@ console.log(brief.headline, brief.talkingPoints);
 const noUpsell = brief.cautions.some((caution) => caution.actions.includes("offer_upgrade"));
 const page = await memory.customers.briefMarkdown("cus_123"); // the same brief, as Markdown
 
+// What may be out of date — confirm to write the change, dismiss to keep the memory
+const { data: flags } = await memory.drift.list({ customerId: "cus_123" });
+for (const flag of flags) console.log(flag.kind, flag.summary);
+if (flags[0]) await memory.drift.confirm(flags[0].id, { note: "They told us." });
+const { counts } = await memory.drift.freshness("cus_123");
+
 // Everything worth knowing, in one call — what an agent reads before it replies
 const view = await memory.customers.get360("cus_123", {
   include: ["health", "active_problems", "goals"],

@@ -11,6 +11,7 @@ from app.api import (
     context,
     customers,
     dashboard,
+    drift,
     evals,
     events,
     goals,
@@ -51,6 +52,9 @@ api_router.include_router(
 )
 api_router.include_router(
     memories.router, dependencies=[*rate_limited, Depends(require_scope(ApiKeyScope.MEMORY_READ))]
+)
+api_router.include_router(
+    drift.router, dependencies=[*rate_limited, Depends(require_scope(ApiKeyScope.MEMORY_READ))]
 )
 api_router.include_router(
     query.router, dependencies=[*rate_limited, Depends(require_scope(ApiKeyScope.MEMORY_READ))]

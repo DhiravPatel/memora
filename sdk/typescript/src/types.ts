@@ -64,6 +64,8 @@ export interface Memory {
   firstSeenAt: string;
   lastSeenAt: string;
   expiresAt: string | null;
+  /** How current it is (§26 5.5), where the endpoint assessed it. */
+  freshness?: Freshness | null;
 }
 
 export interface QueriedMemory {
@@ -119,6 +121,8 @@ export interface Page<T> {
   total: number;
   limit: number;
   offset: number;
+  /** How many matching records this key may not read. */
+  withheld?: number;
 }
 
 export interface TimelineEntry {
@@ -815,4 +819,81 @@ export interface CustomerBrief {
   generatedAt: string;
   /** The whole brief as a Markdown page. */
   markdown: string;
+}
+
+// -------------------------------------------------------- freshness and drift (§26 5.5)
+
+export type FreshnessState =
+  | "active"
+  | "aging"
+  | "stale"
+  | "outdated"
+  | "conflicted"
+  | "expired"
+  | "superseded";
+
+/** How current a memory is: its state, and the confidence left after time without evidence. */
+export interface Freshness {
+  state: FreshnessState;
+  effectiveConfidence: number;
+  evidenceAt: string;
+  daysSinceEvidence: number;
+  windowDays: number;
+  reasons: string[];
+  contradictedAt: string | null;
+  drift: { id: string; kind: string; summary: string }[];
+}
+
+export type DriftKind = "channel" | "plan" | "usage" | "quiet_problem";
+
+/** Evidence that a standing memory may be out of date. A flag, never a change. */
+export interface DriftFlag {
+  id: string;
+  kind: DriftKind;
+  kindLabel: string;
+  status: "open" | "confirmed" | "dismissed" | "cleared";
+  /** What the memory says: a channel, a plan (lowercase), a feature, a problem. */
+  stated: string;
+  /** What the evidence says instead, where it is one thing. */
+  observed: string | null;
+  summary: string;
+  counts: Record<string, unknown>;
+  /** Event and session ids behind it, newest first. */
+  evidence: string[];
+  since: string;
+  detectedAt: string;
+  resolvedAt: string | null;
+  resolvedByType: string | null;
+  note: string | null;
+  /** The memory confirming wrote. */
+  replacementMemoryId: string | null;
+  memory: { id: string; type?: string | null; content?: string | null; status?: string | null };
+  customer: { id: string; externalId?: string | null; name?: string | null };
+}
+
+export interface DriftRun {
+  opened: string[];
+  refreshed: string[];
+  cleared: string[];
+  open: DriftFlag[];
+}
+
+export interface CustomerFreshness {
+  customerId: string;
+  counts: Record<FreshnessState, number>;
+  total: number;
+  needsAttention: number;
+  staleShare: number | null;
+  memories: {
+    id: string;
+    type: string;
+    content: string;
+    importance: number;
+    confidence: number;
+    lastSeenAt: string;
+    freshness: Freshness;
+  }[];
+  drift: DriftFlag[];
+  windows: Record<string, number>;
+  withheld: number;
 }

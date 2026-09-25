@@ -25,6 +25,7 @@ import { HealthBadge, HealthCard, HealthMeter } from "@/components/health-card";
 import { MemoryGraphView } from "@/components/memory-graph";
 import { Customer360View } from "@/components/customer-360";
 import { FactsPanel } from "@/components/facts-panel";
+import { CustomerFreshnessPanel } from "@/components/freshness";
 import { StateBadge, StatePanel, useCustomerState } from "@/components/lifecycle";
 import { MemoryTable } from "@/components/memory-table";
 import { Timeline } from "@/components/timeline";
@@ -57,6 +58,7 @@ const TABS = [
   "Facts",
   "360",
   "Memories",
+  "Freshness",
   "Goals",
   "Signals",
   "Timeline",
@@ -208,13 +210,14 @@ export default function CustomerPage() {
 
       {health.data && <HealthCard health={health.data} />}
 
-      <div className="flex flex-wrap gap-px overflow-hidden rounded-md border border-border bg-border">
+      {/* One row, scrolling when narrow: fifteen tabs wrapped into two uneven rows. */}
+      <div className="flex gap-px overflow-x-auto rounded-md border border-border bg-border">
         {TABS.map((item) => (
           <button
             key={item}
             onClick={() => setTab(item)}
             className={cn(
-              "flex-1 px-4 py-2.5 font-mono text-[11px] uppercase tracking-label transition-colors",
+              "flex-1 whitespace-nowrap px-4 py-2.5 font-mono text-[11px] uppercase tracking-label transition-colors",
               tab === item
                 ? "bg-accent text-accent-foreground"
                 : "bg-surface text-muted-foreground hover:bg-surface-2 hover:text-foreground",
@@ -309,6 +312,10 @@ export default function CustomerPage() {
             <MemoryTable memories={memories.data.data} withheld={memories.data.withheld ?? 0} />
           )}
         </Card>
+      )}
+
+      {tab === "Freshness" && (
+        <CustomerFreshnessPanel projectId={projectId} customerId={customerId} />
       )}
 
       {tab === "Timeline" && (
