@@ -74,8 +74,10 @@ def test_every_track_places_the_customer_and_explains_itself(client, world):
     assert refreshed.status_code == 200, refreshed.text
     tracks = refreshed.json()["tracks"]
     assert set(tracks) == {"lifecycle", "engagement", "commercial"}
-    # An upgrade is two steps on the commercial track in one evaluation.
-    assert [step["to"] for step in tracks["commercial"]["transitions"]] == ["paying", "expanding"]
+    # An upgrade is two steps on the commercial track in one evaluation — taken when the
+    # memory was written, which refreshed the customer there and then.
+    steps = client.get("/v1/customers/acme/state/history", params={"track": "commercial"}, headers=h(world)).json()
+    assert [row["state"] for row in steps["data"]][:2] == ["expanding", "paying"]
 
     state = client.get("/v1/customers/acme/state", headers=h(world)).json()
     by_track = {track["track"]: track for track in state["tracks"]}

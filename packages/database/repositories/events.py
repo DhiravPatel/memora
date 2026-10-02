@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import datetime
-from typing import Any
+from typing import Any, NamedTuple
 
 from sqlalchemy import func, or_, select, text, update
 
@@ -13,6 +13,20 @@ from common.ids import new_id
 from common.time import utcnow
 from database.models import Event
 from database.repositories.base import BaseRepository
+
+
+class FeatureUse(NamedTuple):
+    """A feature or integration, as a customer's events use it."""
+
+    kind: str  # feature | integration
+    key: str
+    name: str
+    first_event_id: str
+    first_at: datetime
+    last_at: datetime
+    uses: int
+    recent: int
+    event_type: str
 
 
 class EventRepository(BaseRepository):
@@ -51,6 +65,7 @@ class EventRepository(BaseRepository):
         source: str = "api",
         importance: float = 0.0,
         status: EventStatus = EventStatus.PENDING,
+        contract: dict[str, Any] | None = None,
     ) -> Event:
         event = Event(
             id=new_id("evt"),
@@ -61,6 +76,7 @@ class EventRepository(BaseRepository):
             data=data,
             source=source,
             importance=importance,
+            contract=contract,
             occurred_at=occurred_at,
             created_at=utcnow(),
             status=status,
@@ -194,10 +210,10 @@ class EventRepository(BaseRepository):
         return found
 
     async def first_uses(
-        self, *, project_id: str, customer_id: str, limit: int = 200
-    ) -> list[tuple[str, str, str, str, datetime, datetime, int, str]]:
-        """(kind, key, name, first event id, first used, last used, uses, first event type)
-        for every feature and integration a customer's events name — oldest first.
+        self, *, project_id: str, customer_id: str, recent_since: datetime | None = None, limit: int = 200
+    ) -> list[FeatureUse]:
+        """Every feature and integration a customer's events name, oldest first: the first
+        use, the latest, how many uses — and how many since ``recent_since``.
 
         Read from the events themselves, the way the templates read them: a feature event's
         ``feature``/``feature_name``/``action``, an integration event's ``integration``/
@@ -219,14 +235,16 @@ class EventRepository(BaseRepository):
                       AND e.event_type ILIKE ANY (ARRAY['%integration%', '%connector%', '%oauth%', '%feature%', '%action_performed%'])
                       AND NOT (e.event_type ILIKE ANY (ARRAY['%fail%', '%error%', '%disconnect%', '%revoke%']))
                 ), named AS (
-                    SELECT uses.*, lower(regexp_replace(trim(name), '[_\s-]+', ' ', 'g')) AS key
+                    SELECT uses.*, lower(regexp_replace(trim(name), '[_\\s-]+', ' ', 'g')) AS key
                     FROM uses
                     WHERE name IS NOT NULL AND trim(name) <> ''
                 )
-                SELECT kind, key, name, id, occurred_at, last_at, uses, event_type FROM (
+                SELECT kind, key, name, id, occurred_at, last_at, uses, recent, event_type FROM (
                     SELECT DISTINCT ON (kind, key)
                            kind, key, name, id, occurred_at, event_type,
                            count(*) OVER (PARTITION BY kind, key) AS uses,
+                           count(*) FILTER (WHERE occurred_at >= CAST(:recent_since AS timestamptz))
+                               OVER (PARTITION BY kind, key) AS recent,
                            max(occurred_at) OVER (PARTITION BY kind, key) AS last_at
                     FROM named
                     ORDER BY kind, key, occurred_at, id
@@ -235,10 +253,10 @@ class EventRepository(BaseRepository):
                 LIMIT CAST(:limit AS integer)
                 """
             ),
-            {"project_id": project_id, "customer_id": customer_id, "limit": limit},
+            {"project_id": project_id, "customer_id": customer_id, "limit": limit, "recent_since": recent_since},
         )
         return [
-            (row.kind, row.key, row.name, row.id, row.occurred_at, row.last_at, int(row.uses), row.event_type)
+            FeatureUse(row.kind, row.key, row.name, row.id, row.occurred_at, row.last_at, int(row.uses), int(row.recent or 0), row.event_type)
             for row in result
         ]
 

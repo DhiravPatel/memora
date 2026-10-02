@@ -24,7 +24,12 @@ from database.models import (
     MemoryEntity,
     MemoryVersion,
 )
-from database.repositories import AuditRepository, CustomerRepository, MemoryRepository
+from database.repositories import (
+    AuditRepository,
+    ContractRepository,
+    CustomerRepository,
+    MemoryRepository,
+)
 from webhooks import WebhookDispatcher, customer_deleted
 
 logger = get_logger(__name__)
@@ -37,6 +42,7 @@ class DeletionCounts:
     embeddings: int = 0
     goals: int = 0
     agent_sessions: int = 0
+    refused_samples: int = 0
 
     def as_dict(self) -> dict[str, int]:
         return {
@@ -45,6 +51,7 @@ class DeletionCounts:
             "embeddings": self.embeddings,
             "goals": self.goals,
             "agent_sessions": self.agent_sessions,
+            "refused_samples": self.refused_samples,
         }
 
 
@@ -74,6 +81,11 @@ class DeletionService:
             raise NotFoundError(f"Customer '{customer_id}' not found.")
 
         counts = await self._count_for_customer(project_id, customer.id)
+        # Events a memory contract refused were never stored, so no cascade reaches them; the
+        # samples kept of them name the customer as the sender did.
+        counts.refused_samples = await ContractRepository(self.session).forget_customer(
+            project_id=project_id, customer_ids=[customer.external_id, customer.id]
+        )
         # Cascades remove events, memories, versions, embeddings and graph links.
         await self.customers.delete(customer)
         await self.audit.record(

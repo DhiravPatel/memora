@@ -301,6 +301,78 @@ def test_freshness_and_drift_through_the_sdk(memory):
     assert memory.memories("cus_kept", type="preference")[0].freshness.state == "active"
 
 
+def test_personalization_through_the_sdk(memory):
+    """§26 6.6 over a real socket: the document, its ETag cache, the batch and the rules."""
+    from ai_memory import Personalization
+
+    memory.upsert_customer("cus_personal", name="Globex")
+    memory.remember("cus_personal", "The customer prefers email.", type="preference")
+    memory.remember("cus_personal", "The Stripe sync fails every night.", type="problem")
+
+    first = memory.personalization("cus_personal")
+    assert isinstance(first, Personalization) and first.customer_id == "cus_personal"
+    assert first.preferred_channel == "email" and first.has_friction("stripe")
+    assert first.hint("suppress_upsell") is True and first.because("suppress_upsell")
+    assert first.hint("no_such_hint") is False and first.hint("no_such_hint", default=True) is True
+    again = memory.personalization("cus_personal")
+    assert again is first, "unchanged: answered 304 from the client's cache"
+    assert memory.personalization("cus_personal", fresh=True).version == first.version
+
+    batch = memory.personalization_batch(["cus_personal", "nobody"])
+    assert batch["nobody"] is None and batch["cus_personal"].ui == first.ui
+    assert batch["cus_personal"].details is None
+    rules = memory.personalization_rules()
+    assert "suppress_upsell" in rules["builtin_hints"]
+
+
+def test_memory_contracts_through_the_sdk(memory):
+    """§26 7.1 over a real socket: YAML in, checks out, refusals typed, batches split."""
+    from ai_memory import ContractViolationError, EventContract
+
+    saved = memory.save_contract(
+        yaml="event: refund_issued\nrequired: [amount]\nfields:\n  amount: {type: number, minimum: 0}\n"
+        "  note: {type: string}\ntext_field: note\n"
+    )
+    assert isinstance(saved, EventContract) and (saved.version, saved.mode, saved.required) == (1, "warn", ["amount"])
+    assert saved.text_field == "note"
+
+    kept = memory.track(customer_id="cus_contract", type="refund_issued", data={"amount": "₹500"})
+    assert kept.contract is not None and not kept.contract and kept.contract.violations[0].rule == "type"
+    assert memory.track(customer_id="cus_contract", type="support_message", data={"message": "Hi"}).contract is None
+
+    check = memory.test_contract("refund_issued", {"amount": 12, "note": "Refunded the duplicate charge."})
+    assert check and check.version == 1 and check.text == 'string ("Refunded the duplicate charge.")'
+    proposed = memory.test_contract("refund_issued", {"amount": 12}, contract={"required": ["reason"]})
+    assert not proposed and proposed.version is None and proposed.violations[0].path == "reason"
+
+    enforced = memory.save_contract({**saved.definition, "mode": "enforce"}, event_type="refund_issued")
+    assert enforced.version == 2
+    with pytest.raises(ContractViolationError) as refused:
+        memory.track(customer_id="cus_contract", type="refund_issued", data={"amount": -1})
+    assert refused.value.status == 422 and refused.value.contract_version == 2
+    assert [item.rule for item in refused.value.violations] == ["minimum"]
+
+    batch = memory.track_batch(
+        [
+            {"customer_id": "cus_contract", "type": "refund_issued", "data": {"amount": 5}},
+            {"customer_id": "cus_contract", "type": "refund_issued", "data": {}, "external_event_id": "r-2"},
+        ]
+    )
+    assert len(batch) == 1 and batch[0].contract and batch.rejected[0].index == 1
+    assert batch.rejected[0].external_event_id == "r-2" and batch.rejected[0].violations[0].rule == "required"
+
+    report = memory.contract("refund_issued")
+    assert report.report["violating"] == 1 and report.violations[0]["path"] == "amount"
+    assert report.rejected["count"] == 2
+    assert [item.event_type for item in memory.contracts()] == ["refund_issued"]
+    coverage = {item["event_type"]: item["mode"] for item in memory.contract_coverage()}
+    assert coverage["refund_issued"] == "enforce" and coverage["support_message"] is None
+    draft = memory.draft_contract("refund_issued")
+    assert draft["fields"]["amount"] == {"type": "any", "seen": {"string": 1, "integer": 1}}, "the traffic disagrees"
+    memory.delete_contract("refund_issued")
+    assert memory.contracts() == []
+
+
 def test_manual_memory_query_and_context(memory):
     memory.remember(
         "cus_sdk",
@@ -347,6 +419,11 @@ async def test_async_client_shares_the_same_surface(live_server):
         assert tracked.status == "accepted"
         health = await client.health("cus_async")
         assert health.customer_id
+        batch = await client.track_batch(
+            [{"customer_id": "cus_async", "type": "support_message", "data": {"message": "Still broken today."}}]
+        )
+        assert len(batch) == 1 and batch.rejected == []
+        assert (await client.contract_coverage())[0]["event_type"]
 
 
 def test_errors_are_typed(memory):
@@ -705,6 +782,11 @@ def test_the_mcp_server_over_http(live_server):
         assert changed["content"][0]["text"].startswith("In the last 7 days:")
         assert "TPS report" in changed["content"][0]["text"]
         assert changed["structuredContent"]["window"]["basis"] == "span"
+
+        pitched = call({"jsonrpc": "2.0", "id": 14, "method": "tools/call", "params": {"name": "customer_personalization", "arguments": {"customer_id": "cus_mcp"}}}).json()["result"]
+        assert pitched["isError"] is False and pitched["content"][0]["text"].startswith("Experience: ")
+        assert "Hints on:" in pitched["content"][0]["text"]
+        assert pitched["structuredContent"]["customer_id"] == "cus_mcp"
 
         walked = call({"jsonrpc": "2.0", "id": 13, "method": "tools/call", "params": {"name": "customer_journey", "arguments": {"customer_id": "cus_mcp"}}}).json()["result"]
         assert walked["isError"] is False

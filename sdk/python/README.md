@@ -5,7 +5,7 @@ pip install ai-memory
 ```
 
 ```python
-from ai_memory import MemoryClient
+from ai_memory import ContractViolationError, MemoryClient
 
 memory = MemoryClient(api_key=os.environ["MEMORY_API_KEY"])
 
@@ -28,6 +28,23 @@ if not preview:                      # nothing would be remembered
 for plan in preview.memories:
     print(plan.action, plan.type, plan.content, plan.reason)
 
+# Say what each event type must look like — the YAML you keep next to your code
+memory.save_contract(yaml=Path("contracts/payment_failed.yaml").read_text())   # needs admin
+check = memory.test_contract("payment_failed", fixture)     # in CI: nothing is sent
+assert check, [v.message for v in check.violations]          # "'amount' should be a number; received string ("₹500")."
+tracked = memory.track(customer_id="cus_123", type="payment_failed", data=payload)
+if tracked.contract is not None and not tracked.contract:     # warn mode: kept, and reported
+    log.warning(tracked.contract.violations)
+try:
+    memory.track(customer_id="cus_123", type="payment_failed", data={"amount": -5})
+except ContractViolationError as refused:                    # enforce mode: refused, nothing stored
+    print(refused.violations)
+batch = memory.track_batch(events)                             # still a list of what was accepted…
+for item in batch.rejected:                                    # …with what was refused, by position
+    print(item.index, item.violations[0].message)
+print(memory.contract("payment_failed").violations)          # expected vs received, how often, when last
+draft = memory.draft_contract("invoice_paid")                  # inferred from recent traffic, to adjust and save
+
 # Before a call or a reply: what to raise, what not to do and why, the next step
 brief = memory.brief("cus_123")                 # since the last conversation, by default
 print(brief.headline)    # "Acme: at risk (54), declining. On the Pro plan, customer for 8 months. …"
@@ -36,6 +53,13 @@ for point in brief.talking_points:
 if brief.forbids("offer_upgrade"):              # the guardrails' own verdict, for this key's profile
     print(brief.caution_for("offer_upgrade").text)
 prompt = memory.brief_markdown("cus_123")        # the same brief as a page, for a system prompt
+
+# What your product should do differently — computed as events arrive, cached by ETag
+p = memory.personalization("cus_123")
+if p.hint("suppress_upsell"):                    # the guardrails would refuse an upsell now
+    print(p.because("suppress_upsell"))          # ["The customer has 2 open problems; …"]
+print(p.experience, p.mood, p.known_frictions)   # "advanced" "frustrated" ["shopify"]
+many = memory.personalization_batch(["cus_123", "cus_456"])   # up to 50 at once
 
 # How they got here — milestones, not rows, each with what it did to health and the lifecycle
 for step in memory.journey("cus_123", min_importance=0.75).milestones:

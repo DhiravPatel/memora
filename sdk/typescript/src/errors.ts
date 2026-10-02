@@ -29,6 +29,37 @@ export class MemoryApiError extends Error {
   }
 }
 
+/** An enforcing memory contract refused the event (§26 7.1); nothing was stored.
+ * `violations` says every way the payload broke the contract. */
+export class ContractViolationError extends MemoryApiError {
+  constructor(
+    message: string,
+    options: ConstructorParameters<typeof MemoryApiError>[1],
+  ) {
+    super(message, options);
+    this.name = "ContractViolationError";
+  }
+
+  get eventType(): string | null {
+    return (this.details.event_type as string | undefined) ?? null;
+  }
+
+  get contractVersion(): number | null {
+    return (this.details.contract_version as number | undefined) ?? null;
+  }
+
+  get violations(): import("./types.js").ContractViolation[] {
+    const raw = (this.details.violations as any[] | undefined) ?? [];
+    return raw.map((item) => ({
+      path: item.path,
+      rule: item.rule,
+      expected: item.expected ?? null,
+      received: item.received ?? null,
+      message: item.message ?? "",
+    }));
+  }
+}
+
 export class MemoryTimeoutError extends Error {
   constructor(timeoutMs: number) {
     super(`Request timed out after ${timeoutMs}ms`);

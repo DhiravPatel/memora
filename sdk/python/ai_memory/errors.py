@@ -34,6 +34,28 @@ class MemoryAPIError(MemoryError):
         return f"[{self.status} {self.code}] {super().__str__()}{suffix}"
 
 
+class ContractViolationError(MemoryAPIError):
+    """An enforcing memory contract refused the event (§26 7.1); nothing was stored.
+
+    ``violations`` says every way the payload broke the contract — what was expected and
+    what arrived — so the sending code can be fixed, or the payload logged and dropped.
+    """
+
+    @property
+    def event_type(self) -> str | None:
+        return self.details.get("event_type")
+
+    @property
+    def contract_version(self) -> int | None:
+        return self.details.get("contract_version")
+
+    @property
+    def violations(self) -> list[Any]:
+        from ai_memory.models import ContractViolation
+
+        return [ContractViolation.from_api(item) for item in self.details.get("violations") or []]
+
+
 class MemoryConfigError(MemoryError):
     pass
 

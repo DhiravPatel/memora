@@ -46,6 +46,33 @@ export function ExplanationPanel({
         </p>
       </div>
 
+      {explanation.contract && (
+        <div
+          className={cn(
+            "border-l-2 px-3 py-2",
+            explanation.contract.valid
+              ? "border-success bg-success/5"
+              : explanation.contract.would_refuse
+                ? "border-danger bg-danger/[0.06]"
+                : "border-warning bg-warning/5",
+          )}
+        >
+          <p className="label">
+            Contract v{explanation.contract.version} · {explanation.contract.mode} ·{" "}
+            {explanation.contract.valid
+              ? "kept"
+              : explanation.contract.would_refuse
+                ? "would be refused"
+                : "broken — kept and reported"}
+          </p>
+          {explanation.contract.violations.map((item, index) => (
+            <p key={`${item.path}-${index}`} className="mt-1 text-[11px] leading-snug">
+              {item.message}
+            </p>
+          ))}
+        </div>
+      )}
+
       <div className="flex flex-wrap gap-x-6 gap-y-1">
         <Figure label="Importance" value={explanation.importance.toFixed(2)} />
         <Figure label="Threshold" value={explanation.threshold.toFixed(2)} />

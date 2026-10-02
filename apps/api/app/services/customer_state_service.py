@@ -197,7 +197,34 @@ class CustomerStateService:
                 row.snapshot_id = result.snapshot.id
             if entered:
                 await self.session.flush()
+        await self._personalize(project, customer, result.facts, reason=reason, emit=emit)
         return result
+
+    async def refresh_quietly(self, *, project: Project, customer: Customer, reason: str) -> None:
+        """Refresh after a write that did not come through an event — a memory written by
+        hand, feedback on one — so lifecycle, snapshots and personalization follow at once
+        rather than at the next event. In a savepoint: the write it follows must stand even
+        if this fails."""
+        try:
+            async with self.session.begin_nested():
+                await self.refresh(project=project, customer=customer, reason=reason)
+        except Exception as exc:  # noqa: BLE001 - recorded; the nightly sweep catches up
+            logger.error("lifecycle.refresh_failed", customer_id=customer.id, reason=reason, error=str(exc))
+
+    async def _personalize(
+        self, project: Project, customer: Customer, facts: CustomerFacts, *, reason: str, emit: bool
+    ) -> None:
+        """What a product should do differently follows from the same facts (§26 6.6) — in a
+        savepoint, so a personalization failure never undoes the refresh itself."""
+        from app.services.personalization_service import PersonalizationService
+
+        try:
+            async with self.session.begin_nested():
+                await PersonalizationService(self.session).refresh(
+                    project=project, customer=customer, facts=facts, reason=reason, emit=emit
+                )
+        except Exception as exc:  # noqa: BLE001 - recorded, and the refresh stands
+            logger.error("personalization.refresh_failed", customer_id=customer.id, reason=reason, error=str(exc))
 
     async def _advance(
         self,

@@ -15,6 +15,7 @@ from app.core.dependencies import (
 from app.schemas.common import DeletionResult, Page
 from app.schemas.health import FeedbackOut, FeedbackRequest
 from app.schemas.memories import EntityOut, MemoryCreate, MemoryDetail, MemoryOut
+from app.services.customer_state_service import CustomerStateService
 from app.services.deletion_service import DeletionService
 from app.services.feedback_service import FeedbackService
 from app.services.memory_service import MemoryService
@@ -78,8 +79,10 @@ async def create_memory(
         embedder=engine.embedder,
     )
     # A memory written by hand has to move goals too, otherwise a goal stated through this
-    # endpoint would sit untracked until some unrelated event happened to arrive.
+    # endpoint would sit untracked until some unrelated event happened to arrive — and the
+    # lifecycle, snapshots and personalization with them (§26 6.6).
     await engine.refresh_goals(project=project, customer=customer)
+    await CustomerStateService(session).refresh_quietly(project=project, customer=customer, reason="memory_written")
     return memory
 
 

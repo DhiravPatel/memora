@@ -73,6 +73,10 @@ SCOPE_DESCRIPTIONS: dict[str, str] = {
         "Approve or reject actions agents asked permission for. Granted on its own — admin "
         "does not confer it, and a key bound to an agent profile cannot use it"
     ),
+    ApiKeyScope.PERSONALIZATION_READ.value: (
+        "Read customers' personalization — experience, frictions, UI hints — and nothing else: "
+        "the key a product's backend holds to adapt its UI"
+    ),
     ApiKeyScope.ADMIN.value: (
         "Everything except clearance to read restricted memory and deciding agent approvals"
     ),
@@ -215,7 +219,13 @@ WEBHOOK_EVENT_DESCRIPTIONS: dict[str, str] = {
     WebhookEvent.AGENT_APPROVAL_DECIDED.value: "An approval request was approved, rejected or expired",
     WebhookEvent.AGENT_ACTION_COMPLETED.value: "An agent reported an action from the gateway done, failed or cancelled",
     WebhookEvent.MEMORY_DRIFT_DETECTED.value: "Evidence says a standing memory may be out of date (a changed channel, plan or habit)",
-    WebhookEvent.MEMORY_DRIFT_RESOLVED.value: "A drift flag was confirmed, dismissed or cleared",
+    WebhookEvent.MEMORY_DRIFT_RESOLVED.value: "A drift flag was confirmed, kept, dismissed or cleared",
+    WebhookEvent.CUSTOMER_PERSONALIZATION_CHANGED.value: (
+        "What a product should do differently for a customer changed — a UI hint, a friction, an experience level"
+    ),
+    WebhookEvent.EVENT_CONTRACT_VIOLATED.value: (
+        "Hourly: events of a contracted type broke their memory contract — how many, and how"
+    ),
 }
 
 

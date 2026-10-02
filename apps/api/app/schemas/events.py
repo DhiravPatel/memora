@@ -102,6 +102,13 @@ class EventExplanationOut(BaseModel):
     entities: list[EntityPlanOut] = Field(default_factory=list)
     entity_count: int = 0
     duration_ms: float = 0.0
+    contract: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "The memory contract check (§26 7.1) — {version, mode, valid, would_refuse, violations} — "
+            "when a contract covers the type."
+        ),
+    )
 
 
 class EventBatchIn(BaseModel):
@@ -114,11 +121,27 @@ class EventAccepted(BaseModel):
     customer_id: str
     importance: float = 0.0
     queued: bool = True
+    contract: dict[str, Any] | None = Field(
+        default=None,
+        description="The memory contract check — {version, mode, valid, violations} — when a contract covers the type.",
+    )
+
+
+class EventRejected(BaseModel):
+    """An event an enforcing memory contract refused (§26 7.1). Not stored."""
+
+    index: int = Field(description="Its position in the batch.")
+    event_type: str
+    customer_id: str
+    external_event_id: str | None = None
+    contract_version: int
+    violations: list[dict[str, Any]]
 
 
 class EventBatchAccepted(BaseModel):
     accepted: list[EventAccepted]
     duplicates: int = 0
+    rejected: list[EventRejected] = Field(default_factory=list)
 
 
 class EventOut(BaseModel):
@@ -140,3 +163,6 @@ class EventOut(BaseModel):
     outcome: EventExplanationOut | None = None
     # True when the payload fed a memory this caller may not read, so ``data`` is empty.
     withheld: bool = False
+    # The memory contract check made when it was received (§26 7.1); null when no contract
+    # covered the type. On a withheld event the received values are reduced to their types.
+    contract: dict[str, Any] | None = None

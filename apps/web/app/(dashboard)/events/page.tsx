@@ -1,11 +1,12 @@
 "use client";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import Link from "next/link";
 import { useCallback, useState } from "react";
 
 import { EventDryRun } from "@/components/event-dry-run";
 import { ExplanationPanel } from "@/components/event-explanation";
-import { ScoreBar, StatusBadge } from "@/components/ui/badge";
+import { Badge, ScoreBar, StatusBadge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input, Select } from "@/components/ui/input";
@@ -185,11 +186,38 @@ export default function EventsPage() {
                     >
                       {event.event_type}
                     </button>
+                    {event.contract && !event.contract.valid && (
+                      <Link
+                        href={`/contracts?type=${encodeURIComponent(event.event_type)}`}
+                        title={event.contract.violations.map((item) => item.message).join("\n")}
+                        className="ml-2 inline-block align-middle"
+                      >
+                        <Badge className="border-danger/60 bg-danger/10 text-danger">
+                          breaks contract v{event.contract.version}
+                        </Badge>
+                      </Link>
+                    )}
                     {expanded === event.id && (
                       <div className="mt-2 max-w-xl space-y-3">
                         <pre className="overflow-auto border border-border bg-surface-2 p-3 font-mono text-[10px] leading-relaxed text-muted-foreground">
                           {JSON.stringify(event.data, null, 2)}
                         </pre>
+                        {event.contract && !event.contract.valid && (
+                          <div className="border-l-2 border-danger bg-danger/[0.05] px-3 py-2">
+                            <p className="label">
+                              Broke its contract (version {event.contract.version},{" "}
+                              {event.contract.mode})
+                            </p>
+                            {event.contract.violations.map((item, index) => (
+                              <p
+                                key={`${item.path}-${index}`}
+                                className="mt-1 text-[11px] leading-snug"
+                              >
+                                {item.message}
+                              </p>
+                            ))}
+                          </div>
+                        )}
                         {event.outcome ? (
                           <ExplanationPanel explanation={event.outcome} />
                         ) : (

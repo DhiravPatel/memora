@@ -23,12 +23,14 @@ import { api } from "@/lib/api";
 import { formatDate } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { GuardrailsEditor } from "@/components/settings/guardrails-editor";
+import { PersonalizationEditor } from "@/components/settings/personalization-editor";
 import { LifecycleEditor } from "@/components/settings/lifecycle-editor";
 import { TracksEditor } from "@/components/settings/tracks-editor";
 import type {
   GuardrailSettings,
   LearnedTerm,
   LifecycleDefinition,
+  PersonalizationSettings,
   ProjectSettings,
   RestrictionRule,
   SettingField,
@@ -503,6 +505,24 @@ function Control({
               (value ?? { disabled: [], rules: [], approval_ttl_hours: 24 }) as GuardrailSettings
             }
             builtins={field.keys}
+            onChange={onChange}
+          />
+        }
+      >
+        {reset}
+      </Field>
+    );
+  }
+
+  if (field.kind === "personalization") {
+    return (
+      <Field
+        label={field.label}
+        help={field.help}
+        changed={changed}
+        hint={
+          <PersonalizationEditor
+            value={(value ?? {}) as PersonalizationSettings}
             onChange={onChange}
           />
         }

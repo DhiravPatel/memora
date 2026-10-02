@@ -1,6 +1,11 @@
 /** HTTP transport: retries, timeouts, and error mapping. */
 
-import { MemoryApiError, MemoryConfigError, MemoryTimeoutError } from "./errors.js";
+import {
+  ContractViolationError,
+  MemoryApiError,
+  MemoryConfigError,
+  MemoryTimeoutError,
+} from "./errors.js";
 import type { ClientOptions } from "./types.js";
 
 const DEFAULT_BASE_URL = "https://api.aimemorylayer.com";
@@ -13,6 +18,17 @@ export interface RequestOptions {
   query?: Record<string, string | number | boolean | undefined | null>;
   signal?: AbortSignal;
   idempotencyKey?: string;
+  headers?: Record<string, string>;
+  /** Resolve with the status and ETag too — and treat 304 Not Modified as an answer. */
+  raw?: boolean;
+}
+
+/** A response with its status and ETag, for conditional requests. */
+export interface RawResponse<T> {
+  status: number;
+  etag: string | null;
+  /** Null for 304 Not Modified. */
+  body: T | null;
 }
 
 export class HttpClient {
@@ -66,10 +82,22 @@ export class HttpClient {
             "X-API-Key": this.apiKey,
             ...(options.idempotencyKey ? { "Idempotency-Key": options.idempotencyKey } : {}),
             ...this.headers,
+            ...(options.headers ?? {}),
           },
           body: options.body === undefined ? undefined : JSON.stringify(options.body),
           signal: controller.signal,
         });
+
+        if (options.raw && (response.ok || response.status === 304)) {
+          const body =
+            response.status === 304 || response.status === 204 ? null : await response.json();
+          const raw: RawResponse<unknown> = {
+            status: response.status,
+            etag: response.headers.get("etag"),
+            body,
+          };
+          return raw as T;
+        }
 
         if (response.ok) {
           if (response.status === 204) return undefined as T;
@@ -81,7 +109,10 @@ export class HttpClient {
         }
 
         const payload = await safeJson(response);
-        const error = new MemoryApiError(
+        // A refusal by a memory contract is its own error, with the violations on it.
+        const Kind =
+          payload?.error?.code === "contract_violation" ? ContractViolationError : MemoryApiError;
+        const error = new Kind(
           payload?.error?.message ?? `Request failed with status ${response.status}`,
           {
             status: response.status,

@@ -52,7 +52,8 @@ run the exact same `MemoryEngine`.
 
 ## The write path is deliberately small
 
-`POST /v1/events` authenticates, validates, checks idempotency, writes an immutable row,
+`POST /v1/events` authenticates, validates, checks idempotency, checks the type's memory
+contract (refusing the event only when the contract enforces), writes an immutable row,
 enqueues a job and returns `202`. Everything that costs CPU — extraction, consolidation,
 embedding — happens in the worker, so ingestion latency stays flat under load and a slow
 queue is a processing delay rather than an ingestion failure.

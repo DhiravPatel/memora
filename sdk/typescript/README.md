@@ -7,7 +7,7 @@ npm install @ai-memory/sdk
 ```
 
 ```ts
-import { MemoryClient } from "@ai-memory/sdk";
+import { ContractViolationError, MemoryClient } from "@ai-memory/sdk";
 
 const memory = new MemoryClient({
   apiKey: process.env.MEMORY_API_KEY!,
@@ -19,6 +19,11 @@ const brief = await memory.brief("cus_123"); // since the last conversation, by 
 console.log(brief.headline, brief.talkingPoints);
 const noUpsell = brief.cautions.some((caution) => caution.actions.includes("offer_upgrade"));
 const page = await memory.customers.briefMarkdown("cus_123"); // the same brief, as Markdown
+
+// What your product should do differently — cached by ETag, so repeat reads are 304s
+const p = await memory.personalize("cus_123");
+if (p.ui.suppress_upsell) hideUpgradeBanner();
+if (p.knownFrictions.includes("shopify")) showShopifyStatusBanner();
 
 // How they got here — milestones, not rows: first uses, problems and their repeats, plan
 // changes, goals, health crossing a band, lifecycle moves — each with what it did to health
@@ -63,6 +68,20 @@ const preview = await memory.events.preview({
 });
 if (!preview.wouldProcess) console.log(preview.stopReason);
 preview.memories.forEach((plan) => console.log(plan.action, plan.type, plan.reason));
+
+// Say what each event type must look like — the YAML you keep next to your code
+await memory.contracts.save({ yaml: await readFile("contracts/payment_failed.yaml", "utf8") });
+const contractCheck = await memory.contracts.test("payment_failed", fixture); // in CI: nothing is sent
+if (!contractCheck.valid) throw new Error(contractCheck.violations.map((v) => v.message).join("\n"));
+try {
+  await memory.events.track({ customerId: "cus_123", type: "payment_failed", data: { amount: -5 } });
+} catch (error) {
+  if (error instanceof ContractViolationError) console.log(error.violations); // enforce: refused
+}
+const batch = await memory.events.trackBatch(events); // still an array of what was accepted…
+batch.rejected.forEach((item) => console.log(item.index, item.violations[0]?.message)); // …and what was not
+const { report } = await memory.contracts.get("payment_failed"); // expected vs received, how often
+const draft = await memory.contracts.draft("invoice_paid"); // inferred from recent traffic
 
 // Track what happened
 await memory.events.track({

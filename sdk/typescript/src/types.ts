@@ -49,6 +49,145 @@ export interface TrackEventResult {
   customerId: string;
   importance: number;
   queued: boolean;
+  /** The memory contract check, when a contract covers the event type (§26 7.1). */
+  contract: ContractCheck | null;
+}
+
+/** An event in a batch that an enforcing memory contract refused. It was not stored. */
+export interface RejectedEvent {
+  /** Its position in the batch. */
+  index: number;
+  eventType: string;
+  customerId: string;
+  externalEventId: string | null;
+  contractVersion: number;
+  violations: ContractViolation[];
+}
+
+/** The accepted events of a batch, in order — still an array — with what was refused. */
+export type TrackBatchResult = TrackEventResult[] & {
+  rejected: RejectedEvent[];
+  duplicates: number;
+};
+
+/** One way a payload broke its event type's memory contract (§26 7.1). */
+export interface ContractViolation {
+  path: string;
+  /** required, type, enum, minimum, maximum, max_length, pattern or unknown_field. */
+  rule: string;
+  expected: string | null;
+  /** Redacted and short: `string ("₹500")`, `missing`, `null`. */
+  received: string | null;
+  message: string;
+}
+
+/** A payload checked against its type's memory contract: on a tracked event, on a preview,
+ * and from `contracts.test`. */
+export interface ContractCheck {
+  mode: "warn" | "enforce" | "off";
+  valid: boolean;
+  violations: ContractViolation[];
+  /** The saved contract's version; null when checked against a proposed one. */
+  version: number | null;
+  wouldRefuse: boolean;
+  /** What the contract's text field holds, redacted (`contracts.test` only). */
+  text: string | null;
+  /** `contracts.test` only: the contract as the server read it — how YAML becomes fields. */
+  definition?: ContractDefinition;
+}
+
+/** A field's rule in the contract language — the same keys as the YAML. */
+export interface ContractFieldRule {
+  type?:
+    | "string"
+    | "number"
+    | "integer"
+    | "boolean"
+    | "object"
+    | "array"
+    | "timestamp"
+    | "email"
+    | "url"
+    | "any";
+  required?: boolean;
+  enum?: unknown[];
+  minimum?: number;
+  maximum?: number;
+  max_length?: number;
+  pattern?: string;
+  description?: string;
+  /** In drafts only: how often a field sent as different types arrived as each. */
+  seen?: Record<string, number>;
+}
+
+/** A contract in the contract language — the same keys as the YAML, so a contract file
+ * loaded from disk can be passed through as it is. */
+export interface ContractDefinition {
+  event_type?: string;
+  /** warn (default) keeps a violating event, enforce refuses it, off only applies text_field
+   * and importance. */
+  mode?: "warn" | "enforce" | "off";
+  description?: string;
+  /** Dotted paths into `data` that must be present. */
+  required?: string[];
+  fields?: Record<string, ContractFieldRule>;
+  /** The path that carries the human-written text, e.g. `details.reason`. */
+  text_field?: string | null;
+  importance?: number | null;
+  /** false flags fields the contract does not name. */
+  allow_extra?: boolean;
+}
+
+/** One way events broke a contract in a report's window. */
+export interface ContractViolationSummary {
+  path: string;
+  rule: string;
+  expected: string | null;
+  received: string | null;
+  events: number;
+  lastSeenAt: string | null;
+  latestEventId: string | null;
+}
+
+export interface ContractReport {
+  /** Events of the type received in the window. */
+  events: number;
+  /** Of those, checked against a contract. */
+  checked: number;
+  /** Of those, breaking it. */
+  violating: number;
+  violations: ContractViolationSummary[];
+  /** The latest violating events. */
+  recent: Record<string, unknown>[];
+}
+
+/** What one event type must look like (§26 7.1), and what it found. */
+export interface EventContract {
+  id: string;
+  eventType: string;
+  mode: "warn" | "enforce" | "off";
+  version: number;
+  definition: ContractDefinition;
+  /** Events an enforcing contract refused — counted here, since they were never stored. */
+  rejected: { count: number; lastAt: string | null; recent: Record<string, unknown>[] };
+  /** Lists: events of the type in the window, and how many broke the contract. */
+  events: number | null;
+  violating: number | null;
+  /** Read singly: what it found. */
+  report: ContractReport | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** An event type received in the window, and whether a contract covers it. */
+export interface ContractCoverage {
+  eventType: string;
+  events: number;
+  violating: number;
+  lastSeenAt: string | null;
+  /** null when no contract covers the type. */
+  mode: "warn" | "enforce" | "off" | null;
+  version: number | null;
 }
 
 export interface Memory {
@@ -410,6 +549,8 @@ export interface EventExplanation {
   entities: EntityPlan[];
   entityCount: number;
   durationMs: number;
+  /** The type's memory contract check, and whether it would refuse the event. */
+  contract: ContractCheck | null;
 }
 
 /** Everything worth knowing about one customer, from a single call.
@@ -487,6 +628,84 @@ export interface CustomerAt {
   takenAt: string | null;
   state: Record<string, unknown> | null;
   description: string | null;
+}
+
+/** Why each personalization value is what it is. */
+export interface PersonalizationDetails {
+  experience: { value: string | null; because: string[]; rule: string | null };
+  mood: { value: string | null; because: string[]; rule: string | null };
+  preferred_channel: {
+    value: string | null;
+    outdated: boolean | null;
+    observed: string | null;
+    opt_outs: string[];
+  };
+  current_goal: { id: string; key: string; label: string; status: string; progress: number } | null;
+  known_frictions: {
+    key: string;
+    label: string;
+    area: string | null;
+    mode: string;
+    problems: number;
+    reports: number;
+    since: string;
+    last_reported_at: string;
+    memory_ids: string[];
+  }[];
+  features_used: {
+    key: string;
+    name: string;
+    kind: string;
+    uses: number;
+    recent_uses: number;
+    first_used_at: string;
+    last_used_at: string;
+    relied_on: boolean;
+  }[];
+  stage: Record<string, string>;
+  health: { band: string | null; score: number | null };
+  ui: Record<
+    string,
+    {
+      value: boolean;
+      known: boolean;
+      because: string[];
+      rule: string;
+      description: string;
+      custom: boolean;
+    }
+  >;
+}
+
+/** What a product should do differently for a customer (§26 6.6). */
+export interface Personalization {
+  customerId: string;
+  /** new, beginner, intermediate, advanced — or the project's own levels. */
+  experience: string | null;
+  /** frustrated, happy, neutral — or the project's own. */
+  mood: string | null;
+  preferredChannel: string | null;
+  optOuts: string[];
+  /** The current goal's key, e.g. "launch_automation". */
+  currentGoal: string | null;
+  /** Keys: the product, integration or feature a problem names ("shopify"), else its area ("billing"). */
+  knownFrictions: string[];
+  featuresUsed: string[];
+  reliedOnFeatures: string[];
+  /** The primary lifecycle state. */
+  stage: string | null;
+  plan: string | null;
+  /** The health band. */
+  health: string | null;
+  /** UI hints: show_onboarding, show_advanced_features, suppress_upsell, suppress_marketing,
+   * offer_help, ask_for_review — and the project's own. */
+  ui: Record<string, boolean>;
+  evidence: string[];
+  details: PersonalizationDetails | null;
+  computedAt: string;
+  changedAt: string;
+  /** Changes only when what the product sees changes. */
+  version: string;
 }
 
 /** One moment in a customer's journey that changed something (§26 6.6). */

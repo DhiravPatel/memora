@@ -97,8 +97,9 @@ async def receive_webhook(
         return EventBatchAccepted(accepted=[], duplicates=0)
 
     payloads = [EventIn(**event.as_payload()) for event in normalized]
-    accepted, duplicates = await EventService(session).ingest_batch(
-        project=project, payloads=payloads
+    # Never refused by a contract: the provider would retry for ever. Violations are recorded.
+    accepted, duplicates, _ = await EventService(session).ingest_batch(
+        project=project, payloads=payloads, enforced=False
     )
     logger.info(
         "integration.ingested",

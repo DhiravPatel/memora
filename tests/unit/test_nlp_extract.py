@@ -33,6 +33,17 @@ def test_structured_events_use_templates():
     assert templated[0].type is MemoryType.SUBSCRIPTION
 
 
+def test_money_is_written_the_way_people_write_it():
+    def content(event_type: str, data: dict) -> str:
+        output = extract(event_type=event_type, data=data)
+        return next(memory.content for memory in output.memories if memory.source == "template")
+
+    assert content("payment_failed", {"amount": 499, "currency": "INR"}) == "The customer's payment failed for INR 499."
+    assert content("payment_failed", {"amount": "₹500"}) == "The customer's payment failed for ₹500."
+    assert content("refund_issued", {"amount": 12.0, "currency": "$"}) == "The customer was refunded $12."
+    assert content("order_placed", {"amount": 89.5, "currency": "eur", "product": "pro_plan"}).endswith("worth EUR 89.5.")
+
+
 def test_reason_fields_are_attributed_to_the_customer():
     output = extract(
         event_type="subscription_downgraded",

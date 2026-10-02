@@ -10,6 +10,7 @@ from typing import Any
 
 from sqlalchemy import select
 
+from app.services.contract_service import ContractService
 from common.enums import EventStatus
 from common.logging import get_logger
 from database.models import Event
@@ -28,7 +29,11 @@ async def reprocess_event(ctx: dict[str, Any], event_id: str) -> dict[str, Any]:
         if project is None:
             return {"event_id": event_id, "status": "project_missing"}
 
-        result = await engine_for(ctx, session).process_event(event=event, project=project)
+        # Replayed as it was received: under the type's memory contract (§26 7.1).
+        found = await ContractService(session).compiled(project_id=project.id, event_type=event.event_type)
+        result = await engine_for(ctx, session).process_event(
+            event=event, project=project, contract=found[1] if found else None
+        )
         return {
             "event_id": event_id,
             "status": "processed" if result.processed else "skipped",

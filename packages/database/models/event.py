@@ -26,6 +26,8 @@ class Event(Base):
         ),
         Index("ix_events_customer_occurred_at", "customer_id", "occurred_at"),
         Index("ix_events_project_status", "project_id", "status"),
+        # Contract violation reports read one project's events of one type over a window.
+        Index("ix_events_project_type_created", "project_id", "event_type", "created_at"),
     )
 
     id: Mapped[str] = mapped_column(String(ID_LENGTH), primary_key=True)
@@ -52,4 +54,7 @@ class Event(Base):
     # look identical to one that produced three, which made "why is my memory empty?"
     # unanswerable after the fact. Null for events processed before this existed.
     outcome: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    # The memory contract check (§26 7.1): {version, mode, valid, violations}. Null when no
+    # contract covers the event type.
+    contract: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
     attempts: Mapped[int] = mapped_column(nullable=False, default=0)

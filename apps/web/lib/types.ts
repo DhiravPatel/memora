@@ -68,6 +68,8 @@ export interface EventRecord {
   error: string | null;
   /** Why this event did or did not become a memory. Null for events processed before it existed. */
   outcome: EventExplanation | null;
+  /** The memory contract check made when it arrived; null when no contract covered the type. */
+  contract?: ContractCheck | null;
 }
 
 /** One statement the engine found, and what it did (or would do) with it. */
@@ -113,6 +115,136 @@ export interface EventExplanation {
   entities: EntityPlan[];
   entity_count: number;
   duration_ms: number;
+  /** The type's memory contract check (§26 7.1) — previews only. */
+  contract?: (ContractCheck & { would_refuse: boolean }) | null;
+}
+
+// ------------------------------------------------------------ memory contracts (§26 7.1)
+
+export type ContractMode = "warn" | "enforce" | "off";
+
+export const CONTRACT_FIELD_TYPES = [
+  "string",
+  "number",
+  "integer",
+  "boolean",
+  "object",
+  "array",
+  "timestamp",
+  "email",
+  "url",
+  "any",
+] as const;
+
+export type ContractFieldType = (typeof CONTRACT_FIELD_TYPES)[number];
+
+export interface ContractViolation {
+  path: string;
+  /** required, type, enum, minimum, maximum, max_length, pattern or unknown_field. */
+  rule: string;
+  expected: string | null;
+  /** Redacted and short: `string ("₹500")`, `missing`, `null`. */
+  received: string | null;
+  message: string;
+}
+
+export interface ContractCheck {
+  version: number | null;
+  mode: ContractMode;
+  valid: boolean;
+  violations: ContractViolation[];
+}
+
+export interface ContractFieldRule {
+  type?: ContractFieldType;
+  required?: boolean;
+  enum?: unknown[];
+  minimum?: number;
+  maximum?: number;
+  max_length?: number;
+  pattern?: string;
+  description?: string;
+  /** Drafts only: how often a field sent as different types arrived as each. */
+  seen?: Record<string, number>;
+}
+
+/** A contract in the contract language — the same keys as its YAML. */
+export interface ContractDefinition {
+  event_type?: string;
+  mode?: ContractMode;
+  description?: string;
+  required?: string[];
+  fields?: Record<string, ContractFieldRule>;
+  text_field?: string | null;
+  importance?: number | null;
+  allow_extra?: boolean;
+}
+
+export interface ContractDraft extends ContractDefinition {
+  samples: number;
+}
+
+export interface ContractViolationSummary {
+  path: string;
+  rule: string;
+  expected: string | null;
+  received: string | null;
+  events: number;
+  last_seen_at: string | null;
+  latest_event_id: string | null;
+}
+
+export interface ContractRejection {
+  at: string;
+  external_event_id: string | null;
+  customer_id: string;
+  violations: ContractViolation[];
+}
+
+export interface EventContract {
+  id: string;
+  event_type: string;
+  mode: ContractMode;
+  version: number;
+  definition: ContractDefinition;
+  rejected: { count: number; last_at: string | null; recent: ContractRejection[] };
+  created_at: string;
+  updated_at: string;
+  created_by: string | null;
+  updated_by: string | null;
+  events: number | null;
+  violating: number | null;
+  report: {
+    events: number;
+    checked: number;
+    violating: number;
+    violations: ContractViolationSummary[];
+    recent: {
+      event_id: string;
+      customer_id: string;
+      external_event_id: string | null;
+      received_at: string;
+      version: number | null;
+      violations: ContractViolation[];
+    }[];
+  } | null;
+}
+
+export interface ContractCoverage {
+  event_type: string;
+  events: number;
+  violating: number;
+  last_seen_at: string | null;
+  mode: ContractMode | null;
+  version: number | null;
+}
+
+export interface ContractTestResult extends ContractCheck {
+  event_type: string;
+  would_refuse: boolean;
+  text: string | null;
+  /** The contract as the server read it — how YAML becomes fields. */
+  definition: ContractDefinition;
 }
 
 export interface TimelineEntry {
@@ -402,7 +534,8 @@ export interface SettingField {
     | "policies"
     | "lifecycle"
     | "lifecycle_tracks"
-    | "guardrails";
+    | "guardrails"
+    | "personalization";
   default: unknown;
   help: string;
   minimum: number | null;
@@ -1408,6 +1541,121 @@ export interface BriefTrack {
   held_by?: string | null;
   /** Nothing keeps them here and a way out would fire: where the next refresh moves them. */
   moving_to?: string | null;
+}
+
+// ----------------------------------------------------- personalization (§26 6.6)
+
+export interface PersonalizationHint {
+  value: boolean;
+  /** False when a fact the hint reads is unknown — the hint is then off. */
+  known: boolean;
+  because: string[];
+  rule: string;
+  description: string;
+  custom: boolean;
+}
+
+export interface Personalization {
+  customer_id: string;
+  experience: string | null;
+  mood: string | null;
+  preferred_channel: string | null;
+  opt_outs: string[];
+  current_goal: string | null;
+  known_frictions: string[];
+  features_used: string[];
+  relied_on_features: string[];
+  stage: string | null;
+  plan: string | null;
+  health: string | null;
+  ui: Record<string, boolean>;
+  evidence: string[];
+  details?: {
+    experience: { value: string | null; because: string[]; rule: string | null };
+    mood: { value: string | null; because: string[]; rule: string | null };
+    preferred_channel: {
+      value: string | null;
+      outdated: boolean | null;
+      observed: string | null;
+      opt_outs: string[];
+    };
+    current_goal: {
+      id: string;
+      key: string;
+      label: string;
+      status: string;
+      progress: number;
+      memory_id: string | null;
+    } | null;
+    known_frictions: {
+      key: string;
+      label: string;
+      area: string | null;
+      mode: string;
+      problems: number;
+      reports: number;
+      since: string;
+      last_reported_at: string;
+      memory_ids: string[];
+    }[];
+    features_used: {
+      key: string;
+      name: string;
+      kind: string;
+      uses: number;
+      recent_uses: number;
+      first_used_at: string;
+      last_used_at: string;
+      relied_on: boolean;
+    }[];
+    stage: Record<string, string>;
+    health: { band: string | null; score: number | null };
+    ui: Record<string, PersonalizationHint>;
+  } | null;
+  computed_at: string;
+  changed_at: string;
+  version: string;
+}
+
+export interface PersonalizationRuleEntry {
+  level?: string;
+  mood?: string;
+  when: string | null;
+}
+
+/** As stored in settings: only what differs from the built-in rules. */
+export interface PersonalizationSettings {
+  experience?: { level: string; when: string | null }[];
+  mood?: { mood: string; when: string | null }[];
+  hints?: Record<string, { when?: string; description?: string; enabled?: boolean }>;
+  relied_on_uses?: number;
+  relied_on_days?: number;
+}
+
+export interface PersonalizationRules {
+  experience: { level: string; when: string | null }[];
+  mood: { mood: string; when: string | null }[];
+  hints: { key: string; when: string; description: string; custom: boolean }[];
+  relied_on_uses: number;
+  relied_on_days: number;
+  builtin_hints: string[];
+  defaults: {
+    experience: { level: string; when: string | null }[];
+    mood: { mood: string; when: string | null }[];
+    hints: Record<string, { when: string; description: string }>;
+    relied_on_uses: number;
+    relied_on_days: number;
+  };
+}
+
+export interface PersonalizationSummary {
+  customers: number;
+  hints: Record<string, number>;
+  experience: Record<string, number>;
+  mood: Record<string, number>;
+  frictions: { key: string; customers: number }[];
+  relied_on_features: { key: string; customers: number }[];
+  oldest_computed_at: string | null;
 }
 
 // ------------------------------------------------------------- journey (§26 6.6)

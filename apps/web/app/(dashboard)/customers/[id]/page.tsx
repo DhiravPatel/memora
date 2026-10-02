@@ -15,6 +15,7 @@ import { CausalChains } from "@/components/causal-chains";
 import { ChangesPanel } from "@/components/changes-panel";
 import { CustomerBriefPanel } from "@/components/customer-brief";
 import { CustomerJourneyPanel } from "@/components/customer-journey";
+import { PersonalizationPanel } from "@/components/personalization-panel";
 import {
   ForecastCard,
   GoalList,
@@ -56,6 +57,7 @@ const TABS = [
   "Actions",
   "Changes",
   "Journey",
+  "Personalize",
   "State",
   "Facts",
   "360",
@@ -259,6 +261,10 @@ export default function CustomerPage() {
       {tab === "Changes" && <ChangesPanel projectId={projectId} customerId={customerId} />}
 
       {tab === "Journey" && <CustomerJourneyPanel projectId={projectId} customerId={customerId} />}
+
+      {tab === "Personalize" && (
+        <PersonalizationPanel projectId={projectId} customerId={customerId} />
+      )}
 
       {tab === "State" && <StatePanel projectId={projectId} customerId={customerId} />}
 

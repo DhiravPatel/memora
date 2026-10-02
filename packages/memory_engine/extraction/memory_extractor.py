@@ -45,6 +45,7 @@ class MemoryExtractor:
             data=event.data,
             max_memories=self.max_memories,
             customer_label=customer_name or "The customer",
+            text_fields=event.text_fields,
         )
 
         memories: list[ExtractedMemory] = []

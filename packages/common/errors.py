@@ -30,6 +30,12 @@ class ValidationError(AppError):
     code = "validation_error"
 
 
+class ContractViolationError(ValidationError):
+    """An event broke the memory contract its type is enforced with (§26 7.1)."""
+
+    code = "contract_violation"
+
+
 class AuthenticationError(AppError):
     status_code = 401
     code = "authentication_error"

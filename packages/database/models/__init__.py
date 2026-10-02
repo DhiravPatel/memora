@@ -3,6 +3,7 @@
 from database.models.agent import AgentSession, AgentTurn
 from database.models.agent_policy import AgentAction, AgentApproval, AgentCheck, AgentProfile
 from database.models.api_key import ApiKey
+from database.models.contract import EventContract
 from database.models.customer import Customer, CustomerView
 from database.models.customer_state import CustomerSnapshot, CustomerState
 from database.models.embedding import EMBEDDING_DIMENSIONS, Embedding
@@ -16,6 +17,7 @@ from database.models.link import MemoryLink
 from database.models.memory import Memory, MemoryDrift, MemoryEntity, MemoryVersion
 from database.models.observability import AuditLog, QueryLog, UsageRecord
 from database.models.organization import Organization, User
+from database.models.personalization import CustomerPersonalization
 from database.models.project import DEFAULT_PROJECT_SETTINGS, Project
 from database.models.signal import SignalSnapshot
 from database.models.vocabulary import LearnedTerm
@@ -42,11 +44,13 @@ __all__ = [
     "CustomerState",
     "CustomerView",
     "CustomerGoal",
+    "CustomerPersonalization",
     "Embedding",
     "EncryptionKeyUse",
     "EvalCase",
     "EvalRun",
     "EvalSet",
+    "EventContract",
     "Entity",
     "Event",
     "LearnedTerm",

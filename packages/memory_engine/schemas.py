@@ -107,6 +107,8 @@ class NormalizedEvent:
     text: str
     occurred_at: datetime
     importance: float
+    # Payload paths a memory contract names as carrying the text (§26 7.1), read first.
+    text_fields: tuple[str, ...] = ()
 
 
 @dataclass(slots=True)

@@ -25,6 +25,7 @@ from database.models import Customer, Project
 from database.repositories import (
     AgentActionRepository,
     DriftRepository,
+    EventRepository,
     GoalRepository,
     MemoryRepository,
 )
@@ -126,6 +127,9 @@ class FactsService:
                 actions=actions,
                 freshness=freshness,
                 drift=drift,
+                first_event_at=await EventRepository(self.session).first_occurred_at(
+                    project_id=project.id, customer_id=customer.id
+                ),
             )
         )
 

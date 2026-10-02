@@ -9,6 +9,7 @@ from app.api import (
     auth,
     conditions,
     context,
+    contracts,
     customers,
     dashboard,
     drift,
@@ -19,6 +20,7 @@ from app.api import (
     integrations,
     lifecycle,
     memories,
+    personalization,
     projects,
     quality,
     query,
@@ -46,6 +48,17 @@ rate_limited = [Depends(enforce_rate_limit)]
 api_router.include_router(
     events.router, dependencies=[*rate_limited, Depends(require_scope(ApiKeyScope.EVENTS_WRITE))]
 )
+# Before the customers router: /v1/customers/{id}/personalization answers a key with only
+# personalization:read — the narrow key a product's backend holds (§26 6.6).
+api_router.include_router(
+    personalization.router,
+    dependencies=[
+        *rate_limited,
+        Depends(
+            require_scope(ApiKeyScope.PERSONALIZATION_READ, ApiKeyScope.CUSTOMERS_READ, ApiKeyScope.MEMORY_READ)
+        ),
+    ],
+)
 api_router.include_router(
     customers.router,
     dependencies=[*rate_limited, Depends(require_scope(ApiKeyScope.CUSTOMERS_READ))],
@@ -61,6 +74,11 @@ api_router.include_router(
 )
 api_router.include_router(
     context.router, dependencies=[*rate_limited, Depends(require_scope(ApiKeyScope.MEMORY_READ))]
+)
+# Contracts are read and tested by the ingestion key; saving one needs admin (see the module).
+api_router.include_router(
+    contracts.router,
+    dependencies=[*rate_limited, Depends(require_scope(ApiKeyScope.EVENTS_WRITE, ApiKeyScope.ADMIN))],
 )
 api_router.include_router(
     integrations.router,

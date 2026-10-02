@@ -20,6 +20,7 @@ from app.schemas.events import (
     EventOut,
     EventPreviewIn,
 )
+from app.services.contract_service import ContractService
 from app.services.event_service import EventService
 from app.services.reader import Reader
 from app.services.serializers import event_out
@@ -88,10 +89,10 @@ async def track_events(
     payload: EventBatchIn, project: ApiProject, session: DBSession
 ) -> EventBatchAccepted:
     await _check_quota(session, project, cost=len(payload.events))
-    accepted, duplicates = await EventService(session).ingest_batch(
+    accepted, duplicates, rejected = await EventService(session).ingest_batch(
         project=project, payloads=payload.events
     )
-    return EventBatchAccepted(accepted=accepted, duplicates=duplicates)
+    return EventBatchAccepted(accepted=accepted, duplicates=duplicates, rejected=rejected)
 
 
 @router.post(
@@ -124,14 +125,19 @@ async def preview_event(
     if customer is None:
         raise NotFoundError(f"Customer '{payload.customer_id}' not found.")
 
+    check = await ContractService(session).check(project=project, event_type=payload.event_type, data=payload.data)
     explanation = await engine.preview_event(
         project=project,
         customer=customer,
         event_type=payload.event_type,
         data=payload.data,
         occurred_at=payload.occurred_at,
+        contract=check.contract if check is not None else None,
     )
-    return EventExplanationOut(**explanation.as_dict(), duration_ms=explanation.duration_ms)
+    contract = None
+    if check is not None:
+        contract = {**check.stored(), "would_refuse": check.refuses}
+    return EventExplanationOut(**explanation.as_dict(), duration_ms=explanation.duration_ms, contract=contract)
 
 
 @router.get("", response_model=Page[EventOut])

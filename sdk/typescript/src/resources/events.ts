@@ -1,7 +1,15 @@
 /** Event ingestion. */
 
 import type { HttpClient } from "../client.js";
-import type { EventExplanation, TrackEventInput, TrackEventResult } from "../types.js";
+import type {
+  ContractCheck,
+  ContractViolation,
+  EventExplanation,
+  RejectedEvent,
+  TrackBatchResult,
+  TrackEventInput,
+  TrackEventResult,
+} from "../types.js";
 
 interface RawTrackResult {
   event_id: string;
@@ -9,6 +17,42 @@ interface RawTrackResult {
   customer_id: string;
   importance: number;
   queued: boolean;
+  contract?: any;
+}
+
+export function toViolation(raw: any): ContractViolation {
+  return {
+    path: raw.path,
+    rule: raw.rule,
+    expected: raw.expected ?? null,
+    received: raw.received ?? null,
+    message: raw.message ?? "",
+  };
+}
+
+/** A memory contract check (§26 7.1), or null when no contract covers the type. */
+export function toContractCheck(raw: any): ContractCheck | null {
+  if (!raw) return null;
+  return {
+    mode: raw.mode,
+    valid: Boolean(raw.valid),
+    violations: (raw.violations ?? []).map(toViolation),
+    version: raw.version ?? null,
+    wouldRefuse: Boolean(raw.would_refuse),
+    text: raw.text ?? null,
+    ...(raw.definition ? { definition: raw.definition } : {}),
+  };
+}
+
+function toRejected(raw: any): RejectedEvent {
+  return {
+    index: raw.index,
+    eventType: raw.event_type,
+    customerId: raw.customer_id,
+    externalEventId: raw.external_event_id ?? null,
+    contractVersion: raw.contract_version,
+    violations: (raw.violations ?? []).map(toViolation),
+  };
 }
 
 function toPayload(input: TrackEventInput): Record<string, unknown> {
@@ -57,6 +101,7 @@ interface RawExplanation {
   entities: { name: string; type: string; status: string; entity_id: string | null }[];
   entity_count: number;
   duration_ms: number;
+  contract?: any;
 }
 
 function fromExplanation(raw: RawExplanation): EventExplanation {
@@ -95,6 +140,7 @@ function fromExplanation(raw: RawExplanation): EventExplanation {
     })),
     entityCount: raw.entity_count,
     durationMs: raw.duration_ms,
+    contract: toContractCheck(raw.contract),
   };
 }
 
@@ -105,6 +151,7 @@ function fromResult(raw: RawTrackResult): TrackEventResult {
     customerId: raw.customer_id,
     importance: raw.importance,
     queued: raw.queued,
+    contract: toContractCheck(raw.contract),
   };
 }
 
@@ -153,14 +200,22 @@ export class Events {
     return fromExplanation(raw);
   }
 
-  /** Send up to 500 events in one request. */
-  async trackBatch(inputs: TrackEventInput[]): Promise<TrackEventResult[]> {
-    const raw = await this.http.request<{ accepted: RawTrackResult[]; duplicates: number }>({
+  /** Send up to 500 events in one request. Returns the accepted ones, in order; events an
+   * enforcing memory contract refused are in `.rejected`, each with its position. */
+  async trackBatch(inputs: TrackEventInput[]): Promise<TrackBatchResult> {
+    const raw = await this.http.request<{
+      accepted: RawTrackResult[];
+      duplicates: number;
+      rejected?: any[];
+    }>({
       method: "POST",
       path: "/v1/events/batch",
       body: { events: inputs.map(toPayload) },
     });
-    return raw.accepted.map(fromResult);
+    return Object.assign(raw.accepted.map(fromResult), {
+      rejected: (raw.rejected ?? []).map(toRejected),
+      duplicates: raw.duplicates ?? 0,
+    });
   }
 
   async list(params: {

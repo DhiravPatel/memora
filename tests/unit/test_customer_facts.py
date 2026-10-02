@@ -52,6 +52,16 @@ def build(**grouped):
 # ------------------------------------------------------------------------- who
 
 
+def test_a_customers_age_starts_with_their_history_not_their_record():
+    """An import can date a customer's first event long before the record was created."""
+    imported = build_facts(
+        FactInputs(customer=customer(created_at=NOW - timedelta(days=5)), now=NOW, first_event_at=NOW - timedelta(days=60))
+    )
+    assert imported.get("customer.age_days") == pytest.approx(60, abs=0.01)
+    created_first = build_facts(FactInputs(customer=customer(), now=NOW, first_event_at=NOW - timedelta(days=10)))
+    assert created_first.get("customer.age_days") == pytest.approx(90, abs=0.01)
+
+
 def test_the_customer_block_is_derived_from_the_customer_row():
     facts = build()
     assert facts.get("customer.external_id") == "cus_1"

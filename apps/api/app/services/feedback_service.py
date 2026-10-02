@@ -18,7 +18,7 @@ from common.errors import NotFoundError, ValidationError
 from common.logging import get_logger
 from common.time import utcnow
 from database.models import Memory, Project
-from database.repositories import AuditRepository, MemoryRepository
+from database.repositories import AuditRepository, CustomerRepository, MemoryRepository
 from memory_engine.policy import classify
 from webhooks import WebhookDispatcher, memory_conflict
 
@@ -124,6 +124,13 @@ class FeedbackService:
             confidence=result.confidence,
             status=result.status,
         )
+        # What the customer is follows at once: a rejected problem is no longer open, a
+        # confirmed preference is current — for the lifecycle and for personalization.
+        customer = await CustomerRepository(self.session).get(memory.customer_id, project.id)
+        if customer is not None:
+            from app.services.customer_state_service import CustomerStateService
+
+            await CustomerStateService(self.session).refresh_quietly(project=project, customer=customer, reason="feedback")
         return result
 
     async def _confirm(self, memory: Memory, *, note: str | None) -> FeedbackResult:

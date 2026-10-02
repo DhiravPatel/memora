@@ -19,6 +19,7 @@ from typing import Any
 from memory_engine.facts import (
     CATALOG,
     DAYS_SUFFIX,
+    GUARDRAIL_PREFIX,
     LIFECYCLE_PREFIX,
     METADATA_PREFIX,
     REQUEST_PREFIX,
@@ -126,6 +127,14 @@ _TEMPLATES: dict[str, Callable[[Any], str | None]] = {
     "request.channel": lambda v: f"via {v}",
     "request.plan": lambda v: f"the {_words(v)} plan",
     "memories.restricted_count": lambda v: _plural(v, "restricted memory", "restricted memories"),
+    "personalization.experience": lambda v: f"experience is {_words(v)}",
+    "personalization.mood": lambda v: f"seems {_words(v)}",
+}
+
+_GUARDRAIL_WORDS = {
+    "allow": "{action} is allowed",
+    "require_approval": "{action} would need a person's approval",
+    "deny": "{action} would be refused",
 }
 
 # Content facts whose words must not appear in a sentence shown to a reader who may not
@@ -141,6 +150,9 @@ def sentence(fact: str, actual: Any) -> str | None:
     try:
         if template is not None:
             return template(actual)
+        if fact.startswith(GUARDRAIL_PREFIX):
+            template = _GUARDRAIL_WORDS.get(str(actual))
+            return template.format(action=_words(fact[len(GUARDRAIL_PREFIX) :])) if template else None
         if fact.startswith(LIFECYCLE_PREFIX):
             track = fact[len(LIFECYCLE_PREFIX) :]
             if track.endswith(DAYS_SUFFIX):

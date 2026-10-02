@@ -63,6 +63,7 @@ from memory_engine.analytics import compute as compute_health
 from memory_engine.analytics.signals import WINDOW_DAYS
 from memory_engine.consolidation.consolidator import MemoryConsolidator
 from memory_engine.context.builder import ContextBuilder, CustomerContext
+from memory_engine.contracts import Contract
 from memory_engine.explain import EntityPlan, EventExplanation, MemoryPlan
 from memory_engine.extraction.memory_extractor import MemoryExtractor
 from memory_engine.extraction.normalizer import normalize_event
@@ -265,6 +266,7 @@ class MemoryEngine:
         event_type: str,
         data: dict[str, Any],
         occurred_at: datetime | None = None,
+        contract: Contract | None = None,
     ) -> EventExplanation:
         """What this event *would* do, without doing any of it.
 
@@ -279,6 +281,7 @@ class MemoryEngine:
         started = time.perf_counter()
         config = self._configure(project)
         moment = occurred_at or utcnow()
+        overrides, text_fields = _contract_inputs(config.importance_overrides, event_type, contract)
 
         def flatten(redact: bool) -> NormalizedEvent:
             return normalize_event(
@@ -288,8 +291,9 @@ class MemoryEngine:
                 event_type=event_type,
                 data=data,
                 occurred_at=moment,
-                importance_overrides=config.importance_overrides,
+                importance_overrides=overrides,
                 redact_pii=redact,
+                text_fields=text_fields,
             )
 
         # Flattened twice when redaction is on, so the preview can name what was removed.
@@ -405,12 +409,17 @@ class MemoryEngine:
             )
         return plans
 
-    async def process_event(self, *, event: Event, project: Project) -> ProcessingResult:
+    async def process_event(
+        self, *, event: Event, project: Project, contract: Contract | None = None
+    ) -> ProcessingResult:
+        """``contract`` is the event type's memory contract (§26 7.1), if it has one: its
+        importance and text field apply here, as they did when the event was received."""
         started = time.perf_counter()
         result = ProcessingResult(event_id=event.id, processed=False)
 
         config = self._configure(project)
         threshold = config.threshold
+        overrides, text_fields = _contract_inputs(config.importance_overrides, event.event_type, contract)
 
         normalized = normalize_event(
             event_id=event.id,
@@ -419,8 +428,9 @@ class MemoryEngine:
             event_type=event.event_type,
             data=event.data,
             occurred_at=event.occurred_at,
-            importance_overrides=config.importance_overrides,
+            importance_overrides=overrides,
             redact_pii=config.redact,
+            text_fields=text_fields,
         )
 
         # The record of what happened, built as the pipeline decides it and written to the
@@ -1411,3 +1421,15 @@ def _as_relationship_type(value: Any) -> RelationshipType:
         return RelationshipType(str(value))
     except ValueError:
         return RelationshipType.RELATED_TO
+
+
+def _contract_inputs(
+    overrides: dict[str, float], event_type: str, contract: Contract | None
+) -> tuple[dict[str, float], tuple[str, ...]]:
+    """A memory contract's importance (over the project's per-type table) and text field."""
+    if contract is None:
+        return overrides, ()
+    merged = dict(overrides)
+    if contract.importance is not None:
+        merged[event_type.strip().lower()] = contract.importance
+    return merged, ((contract.text_field,) if contract.text_field else ())

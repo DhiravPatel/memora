@@ -19,13 +19,14 @@ something outside them.
 
 | Scope | Allows |
 | --- | --- |
-| `events:write` | `POST /v1/events`, `/batch`, `/retry`, integration webhooks |
+| `events:write` | `POST /v1/events`, `/batch`, `/retry`, integration webhooks; reading, testing and drafting [memory contracts](#memory-contracts) |
 | `customers:read` | Customer profiles, timelines, health, links, exports |
 | `customers:write` | Create, bulk upsert, merge and delete customers |
 | `memory:read` | `/v1/memories`, `/v1/memory/query`, `/search`, `/context` |
 | `memory:write` | Create memories, submit feedback, delete memories |
 | `memory:restricted` | Read memories the project's policy marked restricted |
 | `approvals:decide` | Approve or reject actions agents asked permission for |
+| `personalization:read` | [Personalization](#personalization) only — the narrow key a product's backend holds to adapt its UI |
 | `admin` | Everything, including webhook configuration — **except** `memory:restricted` and `approvals:decide` |
 
 `memory:restricted` and `approvals:decide` are the scopes `admin` does not imply. Clearance
@@ -67,9 +68,28 @@ project's last active key cannot be revoked.
 `customer_id` is *your* identifier; the customer is created on first use. Re-sending the
 same `external_event_id` returns `200` with `"status": "duplicate"` and stores nothing.
 
+When a [memory contract](#memory-contracts) covers the event type, the response carries the
+check — and an enforcing contract refuses a payload that breaks it with
+`422 contract_violation`, storing nothing:
+
+```json
+{ "event_id": "evt_…", "status": "accepted", "importance": 0.95, "queued": true,
+  "contract": { "version": 3, "mode": "warn", "valid": false, "violations": [
+    { "path": "amount", "rule": "type", "expected": "number", "received": "string (\"₹500\")",
+      "message": "'amount' should be a number; received string (\"₹500\")." } ] } }
+```
+
 ### `POST /v1/events/batch`
 
-Up to 500 events per request; each is deduplicated independently.
+Up to 500 events per request; each is deduplicated independently. An event an enforcing
+contract refuses does not fail the batch — it is listed in `rejected`, with its position, and
+the rest are kept:
+
+```json
+{ "accepted": [ … ], "duplicates": 0,
+  "rejected": [ { "index": 1, "event_type": "payment_failed", "customer_id": "cus_123",
+                  "external_event_id": "pay_88", "contract_version": 3, "violations": [ … ] } ] }
+```
 
 ### Idempotency and limits
 
@@ -129,6 +149,92 @@ because the consolidation threshold is set higher than your wording actually var
 This is the real pipeline stopped before it writes, not a simulation, so what it reports is
 what will happen. Needs `memory:read` as well as `events:write`, because it reads existing
 memories to decide what a candidate would merge into.
+
+When a memory contract covers the type, `contract` holds its check plus `would_refuse` —
+`true` when an enforcing contract would turn the event away — and the preview reads the
+contract's text field and importance exactly as ingestion would.
+
+## Memory contracts
+
+The commonest integration problem is not retrieval — it is events sent in the wrong shape:
+`{"amount": "₹500"}` where a number was meant, a `reason` that is sometimes `note`, the text
+buried in a nested object. A **contract** per event type says what its payload must contain,
+which field carries the human-written text, and how important the type is. It is written the
+way you would keep it next to your code:
+
+```yaml
+event: payment_failed
+description: A card or bank payment did not go through.
+required: [amount, currency]
+fields:
+  amount: {type: number, minimum: 0}
+  currency: {type: string, enum: [USD, EUR, INR]}
+  details.reason: {type: string, max_length: 500}
+text_field: details.reason
+importance: 0.95
+mode: warn
+```
+
+| Key | Meaning |
+| --- | --- |
+| `event` (or `event_type`) | The event type it covers. One contract per type. |
+| `required` | Dotted paths into `data` that must be present and not null. `customer_id` is the envelope's and always required. |
+| `fields` | Path → `{type, enum, minimum, maximum, max_length, pattern, description}` — or `required: true` on the field. `type` is `string`, `number`, `integer`, `boolean`, `object`, `array`, `timestamp`, `email`, `url` or `any`. |
+| `text_field` | The path that carries the human-written text. Extraction reads it first — nested paths included — instead of guessing from field names. |
+| `importance` | 0–1. Replaces the importance inferred from the type's name. |
+| `allow_extra` | `false` flags every field the contract does not name (`rule: unknown_field`). Default `true`. |
+| `mode` | `warn` (default) keeps an event that breaks the contract and records how; `enforce` refuses it with `422 contract_violation`; `off` checks nothing but still applies `text_field` and `importance`. |
+
+Every way a payload breaks the contract is reported, not just the first: `rule` is
+`required`, `type`, `enum`, `minimum`, `maximum`, `max_length`, `pattern` or
+`unknown_field`, with what was `expected` and what was `received`. Received values are
+short (40 characters) and PII-redacted; a text that is too long is measured
+(`"612 characters"`), never quoted. The check is stored on the event (`contract` on
+`GET /v1/events/{id}`; on an event whose payload you may not read, received values are
+reduced to their types).
+
+A contract is compiled when it is saved — an unknown type, a bad regular expression, a
+minimum above its maximum are a `422` then, not an error on every event later. Its `version`
+moves only when it changes; every save and delete is in the audit log with before and after.
+
+Two senders are never refused, since refusing them would lose data a person cannot resend:
+integration webhooks (the provider would retry for ever) and agent turns. For them an
+enforcing contract behaves like a warning one.
+
+| Route | Scope | |
+| --- | --- | --- |
+| `GET /v1/contracts?since=7d` | `events:write` | Every contract, with events of its type in the window and how many broke it. `since` is `24h`, `7d` (default), `30d` — at most 90 days. |
+| `GET /v1/contracts/coverage?since=7d` | `events:write` | Every event type received in the window, and its contract's `mode` — `null` for a type nothing covers. |
+| `POST /v1/contracts` | `admin` | Create (`201`) or replace (`200`). The fields as JSON, or the whole contract as YAML in `{"yaml": "…"}`. |
+| `GET /v1/contracts/{event_type}?since=7d` | `events:write` | The contract and its `report` (below). |
+| `PUT /v1/contracts/{event_type}` | `admin` | Replace. JSON or `{"yaml": …}`; a contract naming another type is a `422`. |
+| `DELETE /v1/contracts/{event_type}` | `admin` | `204`. Events of the type are no longer checked. |
+| `POST /v1/contracts/{event_type}/test` | `events:write` | Check `{"data": {…}}` against the saved contract — or a proposed one in `contract` or `yaml` — without sending anything. Returns `valid`, `would_refuse`, `violations`, what the text field holds (`text`, redacted) and the contract as the server read it (`definition`). Made for CI. |
+| `POST /v1/contracts/{event_type}/draft?limit=200` | `events:write` | A contract inferred from the type's recent payloads: a field present in every one is required, its type the one it always has, a short label with a handful of values an enum, the longest free-text field the text field. A field sent as different types is `any` with `seen` counting each — the disagreement a contract exists to settle. `404` when nothing of the type was received. |
+
+```json
+{
+  "event_type": "payment_failed", "mode": "enforce", "version": 3,
+  "definition": { "required": ["amount", "currency"], "fields": { … }, "text_field": "details.reason", "importance": 0.95, … },
+  "rejected": { "count": 2, "last_at": "2026-10-02T11:39:21Z",
+                "recent": [ { "at": "…", "customer_id": "cus_123", "external_event_id": "pay_88", "violations": [ … ] } ] },
+  "report": {
+    "events": 412, "checked": 412, "violating": 37,
+    "violations": [ { "path": "amount", "rule": "type", "expected": "number",
+                      "received": "string (\"₹500\")", "events": 31,
+                      "last_seen_at": "…", "latest_event_id": "evt_…" } ],
+    "recent": [ { "event_id": "evt_…", "customer_id": "cus_123", "received_at": "…", "version": 3, "violations": [ … ] } ]
+  }
+}
+```
+
+`report` reads stored events; `rejected` is the only record of refused ones, since they were
+never stored — a count and the latest twenty. Once an hour each contract with new violations
+or refusals sends [`event.contract_violated`](#outbound-webhooks).
+
+The dashboard's **Contracts** page (Pipeline) shows coverage, each contract's report, and an
+editor — fields or YAML, "Generate from recent events", and a payload check against the
+contract as written, saved or not.
 
 ## Customer 360
 
@@ -531,6 +637,125 @@ across reads. Milestones about memories or goals this key may not read are left 
 counted in `withheld`; a quoted older statement it may not read is dropped from the sentence;
 a first use named by an event that fed a hidden memory is left out. Needs `memory:read`.
 
+
+## Personalization
+
+### `GET /v1/customers/{customer_id}/personalization`
+
+What your product should do differently for this customer — so the product adapts, not just
+remembers. Flat values to branch on, and `details` saying why each is what it is:
+
+```json
+{
+  "customer_id": "acme",
+  "experience": "advanced",
+  "mood": "frustrated",
+  "preferred_channel": "whatsapp",
+  "opt_outs": ["phone"],
+  "current_goal": "launch_automation",
+  "known_frictions": ["shopify", "billing"],
+  "features_used": ["campaign_builder", "reports", "shopify"],
+  "relied_on_features": ["campaign_builder"],
+  "stage": "at_risk", "plan": "pro", "health": "watch",
+  "ui": {
+    "show_onboarding": false, "show_advanced_features": true, "suppress_upsell": true,
+    "suppress_marketing": false, "offer_help": true, "ask_for_review": false
+  },
+  "evidence": ["mem_…", "goal_…"],
+  "details": {
+    "experience": { "value": "advanced", "because": ["uses 6 features"], "rule": "activity.distinct_features >= 5 or lifecycle.engagement == \"power_user\"" },
+    "ui": {
+      "suppress_upsell": { "value": true, "known": true, "because": ["The customer has 2 open problems; resolve them before selling."],
+                           "rule": "guardrail.offer_upgrade != \"allow\"", "description": "…", "custom": false }
+    },
+    "known_frictions": [{ "key": "shopify", "label": "Shopify", "area": "integration", "mode": "broken", "problems": 1, "reports": 3,
+                          "since": "…", "last_reported_at": "…", "memory_ids": ["mem_…"] }],
+    "features_used": [{ "key": "campaign_builder", "name": "Campaign Builder", "kind": "feature", "uses": 40, "recent_uses": 9,
+                        "first_used_at": "…", "last_used_at": "…", "relied_on": true }],
+    "current_goal": { "id": "goal_…", "key": "launch_automation", "label": "Launch automation", "status": "progressing", "progress": 0.4 },
+    "preferred_channel": { "value": "whatsapp", "outdated": false, "observed": null, "opt_outs": ["phone"] },
+    "stage": { "lifecycle": "at_risk", "engagement": "adopting", "commercial": "paying" },
+    "health": { "band": "watch", "score": 64.0 },
+    "mood": { "value": "frustrated", "because": ["2 negative pieces of feedback in 14 days"], "rule": "…" }
+  },
+  "computed_at": "…", "changed_at": "…", "version": "a2768c2f167b0d328c2a"
+}
+```
+
+| Value | Read from |
+| --- | --- |
+| `experience` | the first of the project's experience rules that holds — by default `new` (a customer for under 14 days using under 3 features), `advanced` (5+ features, or `power_user` on the engagement track), `intermediate` (3+), else `beginner`. Age starts at the customer's first event |
+| `mood` | the first mood rule that holds — `frustrated` (negative feedback in 14 days, said they may cancel, or a problem reported 3+ times), `happy` (the *happy and unblocked* signal), else `neutral` |
+| `preferred_channel`, `opt_outs` | the fact document; `details.preferred_channel.outdated` when [drift](#freshness-and-drift) says otherwise |
+| `current_goal` | the progressing goal, else an open one, else a stalled one — as a key and a label |
+| `known_frictions` | open problems as stable keys: the product, integration or feature they name (`shopify`), else the area they are about (`billing`, `login`, `data_export`, `reporting`, `onboarding`, …); `mode` is `broken`, `slow` or `other` |
+| `features_used`, `relied_on_features` | feature and integration events (and what the customer said they use); *relied on* is 3+ uses in the last 30 days |
+| `stage`, `plan`, `health` | the primary lifecycle state, the plan, the health band |
+| `ui` | **hints**: conditions over the fact document plus `personalization.experience`, `personalization.mood` and `guardrail.<action>` — what the [guardrails](#guardrails) would say to that action now (`allow`, `require_approval`, `deny`), so the product never shows the upsell an agent would be refused |
+
+Built-in hints: `show_onboarding` (`personalization.experience in ["new", "beginner"]`),
+`show_advanced_features` (`== "advanced"`), `suppress_upsell` (`guardrail.offer_upgrade !=
+"allow"`), `suppress_marketing` (`guardrail.send_marketing != "allow"`), `offer_help` (an open
+problem reported recently), `ask_for_review` (`guardrail.request_review == "allow"` and a happy
+customer). A hint whose condition reads an unknown fact is off, with `known: false`.
+
+| Parameter | Meaning |
+| --- | --- |
+| `details` | `true` (default) adds `details`; `false` is the flat document — for a frontend |
+| `fresh` | `true` recomputes now instead of reading the stored document |
+
+**Fast, and current.** Personalization is computed whenever the customer's state is refreshed —
+after every processed event, after feedback or a memory written by hand, after a drift decision,
+and nightly — and stored, so a read is one row. A read recomputes first when there is nothing
+stored, the project's settings changed since, or it is more than a day old. Responses carry an
+`ETag` and `Cache-Control: private, max-age=30`; send the ETag back as `If-None-Match` and the
+answer is `304 Not Modified` while nothing changed (both SDKs do this for you). The `version`
+changes only when what the product sees changes, and then `customer.personalization_changed`
+says what moved.
+
+**Privacy.** Personalization reads no restricted memory — it drives a product's UI, and nothing in
+it may quote what a restriction policy protects. Counts stay whole (an open restricted problem
+still counts towards `offer_help`); words and keys never come from one. Guardrail verdicts are
+decided over everything, as an agent's check is, and explained without content.
+
+Needs `personalization:read`, `customers:read` or `memory:read`. A key with only
+`personalization:read` can read personalization and nothing else.
+
+### `POST /v1/personalization/batch`
+
+`{ "customer_ids": ["acme", "globex"], "details": false }` — up to 50 → `{ "data": [{
+"customer_id", "personalization", "error" }] }`; an id that names no customer comes back with
+`error: "not_found"`.
+
+### `GET /v1/personalization/rules`
+
+The rules in force — experience levels, moods, hints (built-in and the project's own), the
+relied-on threshold — and `defaults`, the built-ins, for comparison.
+
+### Rules
+
+Set in the project's `personalization` setting (Settings → Personalization), validated when
+saved — every condition compiled against the catalog — and stored as only what differs from the
+built-ins:
+
+```json
+{
+  "experience": [{ "level": "new", "when": "customer.age_days < 7" }, { "level": "regular", "when": null }],
+  "mood": [{ "mood": "frustrated", "when": "problems.max_repeats >= 2" }, { "mood": "neutral", "when": null }],
+  "hints": {
+    "offer_help": { "enabled": false },
+    "beta_invite": { "when": "personalization.experience == \"advanced\" and subscription.plan == \"pro\"",
+                     "description": "Invite power users to the beta." }
+  },
+  "relied_on_uses": 5, "relied_on_days": 14
+}
+```
+
+Rules are tried in order and the first that holds wins; only the last may have no condition (the
+fallback). Up to 20 hints of your own. The dashboard's rules editor previews unsaved rules on a
+customer (`POST /v1/projects/{id}/personalization/preview`), and the Personalization page shows
+how many customers each hint is on for.
+
 ## Quality
 
 ### `GET /v1/quality?days=30`
@@ -907,7 +1132,7 @@ ai-memory-mcp --transport http --port 8765                                      
 ```
 
 Tools: `ask_memory`, `search_memory`, `customer_360`, `customer_brief`, `customer_changes`,
-`customer_journey`, `customer_timeline`, `get_health`, `get_goals`, `get_recommendations`, `check_action`,
+`customer_journey`, `customer_personalization`, `customer_timeline`, `get_health`, `get_goals`, `get_recommendations`, `check_action`,
 `request_action`, `proceed_action`, `report_action`, `explain_answer`, `remember`. Over HTTP each caller sends their own key as
 `Authorization: Bearer mk_…`; the key's scopes, clearance and profile apply to every tool.
 `customer_brief` returns the [brief](#customer-brief)'s Markdown page (with the JSON as
@@ -1019,6 +1244,8 @@ Subscribe to changes rather than polling for them. Configure at
 | `agent.approval_decided` | A request was approved, rejected — or lapsed (`status: "expired"`) |
 | `memory.drift_detected` | Evidence says a standing memory may be out of date — a changed channel, plan or habit, a problem gone quiet ([drift](#freshness-and-drift)) |
 | `memory.drift_resolved` | A drift flag was decided or closed: `confirmed` (the memory was changed), `kept` (a person vouched for the memory), `dismissed` (the evidence was set aside), or `cleared` (the evidence stopped holding, or the memory is no longer standing) |
+| `event.contract_violated` | Events broke their type's [memory contract](#memory-contracts). At most hourly per contract: `violating_events` kept since the last digest, `refused_events`, `mode`, `contract_version`, the window (`since`, `until`) and the five commonest `violations` (`path`, `rule`, `expected`, `received`, `events`) |
+| `customer.personalization_changed` | What a product should do differently changed — a hint on or off, a new friction, another experience level. `changes` lists `{field, before, after}` (`ui.<hint>` for hints); `personalization` is the new document without details |
 
 Every request carries:
 
@@ -1136,8 +1363,9 @@ instead (see the security guide).
 ## Deletion
 
 `DELETE /v1/customers/{customer_id}` removes the customer, their events, memories, memory
-versions, embeddings and graph links, and writes an audit entry. `DELETE /v1/memories/{id}`
-removes a single memory.
+versions, embeddings and graph links, and the samples a [memory contract](#memory-contracts)
+kept of events it refused from them (`removed.refused_samples`; the refusal counts stay), and
+writes an audit entry. `DELETE /v1/memories/{id}` removes a single memory.
 
 ## Errors
 
@@ -1152,6 +1380,7 @@ removes a single memory.
 | 404 | `not_found` | unknown resource *in this project* |
 | 409 | `conflict` | duplicate name or resource |
 | 422 | `validation_error` | request body failed validation |
+| 422 | `contract_violation` | an enforcing [memory contract](#memory-contracts) refused the event; `details` holds `event_type`, `contract_version` and every `violation`. Nothing was stored |
 | 429 | `rate_limited` | upstream provider throttled the request |
 | 502 | `provider_error` | an upstream dependency failed |
 

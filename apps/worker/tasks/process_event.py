@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.services.contract_service import ContractService
 from app.services.customer_state_service import CustomerStateService
 from common.enums import EventStatus
 from common.logging import get_logger
@@ -66,18 +67,27 @@ async def process_event(ctx: dict[str, Any], event_id: str) -> dict[str, Any]:
         await events.mark_status(event_id, EventStatus.PROCESSING, increment_attempts=True)
         engine = engine_for(ctx, session)
 
+        # The event type's memory contract (§26 7.1): its importance and text field apply
+        # here as they did when the event was received.
+        found = await ContractService(session).compiled(project_id=project.id, event_type=event.event_type)
+        project_id = project.id
+        attempts = (event.attempts or 0) + 1
         try:
-            result = await engine.process_event(event=event, project=project)
+            result = await engine.process_event(event=event, project=project, contract=found[1] if found else None)
         except Exception as exc:  # noqa: BLE001 - recorded on the event, then re-raised
-            attempts = (event.attempts or 0) + 1
+            # An attempt either completes or leaves nothing: what it wrote is undone — and a
+            # failed flush leaves the session unusable until it is rolled back anyway. The
+            # failure, and the attempt, are then recorded on a clean transaction.
+            await session.rollback()
+            await session.refresh(event)
             status = EventStatus.FAILED if attempts >= MAX_ATTEMPTS else EventStatus.PENDING
-            await events.mark_status(event_id, status, error=str(exc)[:1000])
+            await events.mark_status(event_id, status, error=str(exc)[:1000], increment_attempts=True)
 
             if status == EventStatus.FAILED:
                 # A permanently failed event is something the customer's team should hear
                 # about; it means data they sent never became memory.
                 await WebhookDispatcher(session).emit(
-                    event_failed(project_id=project.id, event=event, error=str(exc))
+                    event_failed(project_id=project_id, event=event, error=str(exc))
                 )
             await session.commit()
 

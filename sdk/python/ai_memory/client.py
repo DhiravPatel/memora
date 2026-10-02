@@ -11,13 +11,19 @@ from __future__ import annotations
 import asyncio
 import random
 import time
+from collections import OrderedDict
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime
 from typing import Any
 
 import httpx
 
-from ai_memory.errors import MemoryAPIError, MemoryConfigError, MemoryTimeoutError
+from ai_memory.errors import (
+    ContractViolationError,
+    MemoryAPIError,
+    MemoryConfigError,
+    MemoryTimeoutError,
+)
 from ai_memory.models import (
     ActionCheck,
     AgentAction,
@@ -26,6 +32,7 @@ from ai_memory.models import (
     AgentSession,
     Approval,
     ConditionResult,
+    ContractCheck,
     Customer,
     Customer360,
     CustomerBrief,
@@ -33,16 +40,19 @@ from ai_memory.models import (
     CustomerContext,
     CustomerJourney,
     DriftFlag,
+    EventContract,
     EventExplanation,
     Goal,
     Health,
     LifecycleState,
     Memory,
+    Personalization,
     QueryResult,
     Recommendation,
     RunExplanation,
     RunTrace,
     SignalReport,
+    TrackedBatch,
     TrackedEvent,
     TurnResult,
 )
@@ -124,6 +134,16 @@ def _journey_params(
     return params
 
 
+PERSONALIZATION_CACHE = 1024
+
+
+def _remember(cache: OrderedDict[Any, Any], key: Any, value: Any) -> None:
+    cache[key] = value
+    cache.move_to_end(key)
+    while len(cache) > PERSONALIZATION_CACHE:
+        cache.popitem(last=False)
+
+
 def _brief_params(since: datetime | str | None, agent: str | None) -> dict[str, Any]:
     params: dict[str, Any] = {}
     if since:
@@ -173,7 +193,9 @@ def _raise_for_status(response: httpx.Response) -> None:
         error = payload.get("error", {})
     except ValueError:
         error = {}
-    raise MemoryAPIError(
+    # A refusal by a memory contract is its own error, with the violations on it.
+    kind = ContractViolationError if error.get("code") == "contract_violation" else MemoryAPIError
+    raise kind(
         error.get("message") or f"Request failed with status {response.status_code}",
         status=response.status_code,
         code=error.get("code", "error"),
@@ -210,6 +232,12 @@ def _check_payload(
     )
 
 
+def _contract_body(contract: Mapping[str, Any] | None, yaml: str | None) -> dict[str, Any]:
+    if (contract is None) == (yaml is None):
+        raise MemoryConfigError("Pass the contract as a mapping or as YAML — one of the two.")
+    return {"yaml": yaml} if yaml is not None else dict(contract or {})
+
+
 def _profile_payload(**fields: Any) -> dict[str, Any]:
     return {key: (list(value) if isinstance(value, (tuple, set)) else value) for key, value in fields.items() if value is not None}
 
@@ -240,6 +268,8 @@ class _BaseClient:
         self.timeout = timeout
         self.max_retries = max(0, max_retries)
         self._extra_headers = dict(headers or {})
+        # The last personalization per customer and its ETag: a repeat read is a 304.
+        self._personalization_cache: OrderedDict[tuple[str, bool], tuple[str, Personalization]] = OrderedDict()
         # Labels this client's runs and checks. A key bound to an agent profile is
         # labelled by the profile instead, whatever this says.
         if agent_name:
@@ -283,6 +313,8 @@ class MemoryClient(_BaseClient):
         json: Any = None,
         params: Mapping[str, Any] | None = None,
         idempotency_key: str | None = None,
+        headers: Mapping[str, str] | None = None,
+        raw: bool = False,
     ) -> Any:
         last_error: Exception | None = None
         for attempt in range(self.max_retries + 1):
@@ -292,7 +324,7 @@ class MemoryClient(_BaseClient):
                     path,
                     json=json,
                     params={k: v for k, v in (params or {}).items() if v is not None},
-                    headers=self._headers(idempotency_key),
+                    headers={**self._headers(idempotency_key), **(headers or {})},
                 )
                 if response.status_code in RETRYABLE_STATUS and attempt < self.max_retries:
                     last_error = MemoryAPIError(
@@ -301,7 +333,7 @@ class MemoryClient(_BaseClient):
                     time.sleep(_backoff(attempt))
                     continue
                 _raise_for_status(response)
-                return _body(response)
+                return response if raw else _body(response)
             except httpx.TimeoutException as exc:
                 last_error = MemoryTimeoutError(f"Request timed out after {self.timeout}s")
                 if attempt >= self.max_retries:
@@ -358,10 +390,11 @@ class MemoryClient(_BaseClient):
             )
         )
 
-    def track_batch(self, events: Iterable[Mapping[str, Any]]) -> list[TrackedEvent]:
+    def track_batch(self, events: Iterable[Mapping[str, Any]]) -> TrackedBatch:
+        """Up to 500 events in one request. Returns the accepted ones, in order; events an
+        enforcing memory contract refused are in ``.rejected``, each with its position."""
         payload = {"events": [_event_payload(**dict(event)) for event in events]}
-        body = self._request("POST", "/v1/events/batch", json=payload)
-        return [TrackedEvent.from_api(item) for item in body.get("accepted", [])]
+        return TrackedBatch.from_api(self._request("POST", "/v1/events/batch", json=payload))
 
     def retry_event(self, event_id: str) -> TrackedEvent:
         return TrackedEvent.from_api(self._request("POST", f"/v1/events/{event_id}/retry"))
@@ -678,6 +711,114 @@ class MemoryClient(_BaseClient):
         """The journey as a Markdown page, grouped by month."""
         params = {**_journey_params(since, until, categories, min_importance, limit), "format": "markdown"}
         return str(self._request("GET", f"/v1/customers/{customer_id}/journey", params=params))
+
+    # ---------------------------------------------------------- memory contracts
+
+    def contracts(self, *, since: str | None = None) -> list[EventContract]:
+        """Every memory contract (§26 7.1), with how many events of its type arrived in the
+        window — ``since`` is 24h, 7d (the default) or 30d — and how many broke it."""
+        return [EventContract.from_api(item) for item in self._request("GET", "/v1/contracts", params={"since": since})]
+
+    def contract(self, event_type: str, *, since: str | None = None) -> EventContract:
+        """One contract and its report: each way events broke it — expected, received, how
+        often, when last — and the latest events that did."""
+        return EventContract.from_api(self._request("GET", f"/v1/contracts/{event_type}", params={"since": since}))
+
+    def save_contract(
+        self, contract: Mapping[str, Any] | None = None, *, yaml: str | None = None, event_type: str | None = None
+    ) -> EventContract:
+        """Create or replace a contract — as a mapping, or as the YAML kept next to your code.
+        Needs an ``admin`` key. The version moves only when the contract changes.
+
+            memory.save_contract(yaml=Path("contracts/payment_failed.yaml").read_text())
+        """
+        body = _contract_body(contract, yaml)
+        if event_type:
+            return EventContract.from_api(self._request("PUT", f"/v1/contracts/{event_type}", json=body))
+        return EventContract.from_api(self._request("POST", "/v1/contracts", json=body))
+
+    def delete_contract(self, event_type: str) -> None:
+        """Remove a contract; events of the type are no longer checked. Needs ``admin``."""
+        self._request("DELETE", f"/v1/contracts/{event_type}")
+
+    def test_contract(
+        self,
+        event_type: str,
+        data: Mapping[str, Any],
+        *,
+        contract: Mapping[str, Any] | None = None,
+        yaml: str | None = None,
+    ) -> ContractCheck:
+        """Check a payload without sending it — against the saved contract, or against a
+        proposed one. Made for CI: run your fixtures through it before deploying.
+
+            check = memory.test_contract("payment_failed", fixture)
+            assert check, [v.message for v in check.violations]
+        """
+        body: dict[str, Any] = {"data": dict(data)}
+        if contract is not None or yaml is not None:
+            body.update(_contract_body(contract, yaml) if yaml is not None else {"contract": dict(contract or {})})
+        result = ContractCheck.from_api(self._request("POST", f"/v1/contracts/{event_type}/test", json=body))
+        assert result is not None
+        return result
+
+    def draft_contract(self, event_type: str, *, limit: int = 200) -> dict[str, Any]:
+        """A contract inferred from the type's recent payloads — required fields, types,
+        enums, the text field. Read it, adjust it, then :meth:`save_contract` it."""
+        return self._request("POST", f"/v1/contracts/{event_type}/draft", params={"limit": limit})
+
+    def contract_coverage(self, *, since: str | None = None) -> list[dict[str, Any]]:
+        """Every event type received in the window, and the contract covering it — ``mode``
+        is ``None`` for a type nothing covers."""
+        return self._request("GET", "/v1/contracts/coverage", params={"since": since})
+
+    # ----------------------------------------------------------- personalization
+
+    def personalization(self, customer_id: str, *, details: bool = True, fresh: bool = False) -> Personalization:
+        """What your product should do differently for this customer (§26 6.6): experience,
+        mood, preferred channel, current goal, known frictions, features used, stage, plan,
+        health and UI hints — each with the facts behind it.
+
+        The client remembers each customer's last answer and sends its ETag, so while nothing
+        changed the server answers 304 and nothing is recomputed or re-sent.
+
+            p = client.personalization("cus_1")
+            if p.hint("suppress_upsell"):
+                hide_upgrade_banner()
+        """
+        key = (customer_id, details)
+        cached = self._personalization_cache.get(key)
+        headers = {"If-None-Match": cached[0]} if cached and not fresh else None
+        response = self._request(
+            "GET",
+            f"/v1/customers/{customer_id}/personalization",
+            params={"details": "true" if details else "false", "fresh": "true" if fresh else None},
+            headers=headers,
+            raw=True,
+        )
+        if response.status_code == 304 and cached:
+            _remember(self._personalization_cache, key, cached)
+            return cached[1]
+        result = Personalization.from_api(response.json())
+        if response.headers.get("etag"):
+            _remember(self._personalization_cache, key, (response.headers["etag"], result))
+        return result
+
+    def personalization_batch(
+        self, customer_ids: Sequence[str], *, details: bool = False
+    ) -> dict[str, Personalization | None]:
+        """Up to 50 customers at once — ``None`` for an id that names no customer."""
+        body = self._request(
+            "POST", "/v1/personalization/batch", json={"customer_ids": list(customer_ids), "details": details}
+        )
+        return {
+            item["customer_id"]: Personalization.from_api(item["personalization"]) if item.get("personalization") else None
+            for item in body.get("data") or []
+        }
+
+    def personalization_rules(self) -> dict[str, Any]:
+        """The rules in force: experience levels, moods and UI hints, built-ins included."""
+        return self._request("GET", "/v1/personalization/rules")
 
     # ------------------------------------------------------ freshness and drift
 
@@ -1255,6 +1396,8 @@ class AsyncMemoryClient(_BaseClient):
         json: Any = None,
         params: Mapping[str, Any] | None = None,
         idempotency_key: str | None = None,
+        headers: Mapping[str, str] | None = None,
+        raw: bool = False,
     ) -> Any:
         import asyncio
 
@@ -1266,13 +1409,13 @@ class AsyncMemoryClient(_BaseClient):
                     path,
                     json=json,
                     params={k: v for k, v in (params or {}).items() if v is not None},
-                    headers=self._headers(idempotency_key),
+                    headers={**self._headers(idempotency_key), **(headers or {})},
                 )
                 if response.status_code in RETRYABLE_STATUS and attempt < self.max_retries:
                     await asyncio.sleep(_backoff(attempt))
                     continue
                 _raise_for_status(response)
-                return _body(response)
+                return response if raw else _body(response)
             except httpx.TimeoutException as exc:
                 last_error = MemoryTimeoutError(f"Request timed out after {self.timeout}s")
                 if attempt >= self.max_retries:
@@ -1540,6 +1683,91 @@ class AsyncMemoryClient(_BaseClient):
         params = {**_journey_params(since, until, categories, min_importance, limit), "format": "markdown"}
         return str(await self._request("GET", f"/v1/customers/{customer_id}/journey", params=params))
 
+    # ---------------------------------------------------------- memory contracts
+
+    async def contracts(self, *, since: str | None = None) -> list[EventContract]:
+        """Every memory contract. See :meth:`MemoryClient.contracts`."""
+        body = await self._request("GET", "/v1/contracts", params={"since": since})
+        return [EventContract.from_api(item) for item in body]
+
+    async def contract(self, event_type: str, *, since: str | None = None) -> EventContract:
+        """One contract and its report. See :meth:`MemoryClient.contract`."""
+        return EventContract.from_api(
+            await self._request("GET", f"/v1/contracts/{event_type}", params={"since": since})
+        )
+
+    async def save_contract(
+        self, contract: Mapping[str, Any] | None = None, *, yaml: str | None = None, event_type: str | None = None
+    ) -> EventContract:
+        """Create or replace a contract. See :meth:`MemoryClient.save_contract`."""
+        body = _contract_body(contract, yaml)
+        if event_type:
+            return EventContract.from_api(await self._request("PUT", f"/v1/contracts/{event_type}", json=body))
+        return EventContract.from_api(await self._request("POST", "/v1/contracts", json=body))
+
+    async def delete_contract(self, event_type: str) -> None:
+        await self._request("DELETE", f"/v1/contracts/{event_type}")
+
+    async def test_contract(
+        self,
+        event_type: str,
+        data: Mapping[str, Any],
+        *,
+        contract: Mapping[str, Any] | None = None,
+        yaml: str | None = None,
+    ) -> ContractCheck:
+        """Check a payload without sending it. See :meth:`MemoryClient.test_contract`."""
+        body: dict[str, Any] = {"data": dict(data)}
+        if contract is not None or yaml is not None:
+            body.update(_contract_body(contract, yaml) if yaml is not None else {"contract": dict(contract or {})})
+        result = ContractCheck.from_api(await self._request("POST", f"/v1/contracts/{event_type}/test", json=body))
+        assert result is not None
+        return result
+
+    async def draft_contract(self, event_type: str, *, limit: int = 200) -> dict[str, Any]:
+        return await self._request("POST", f"/v1/contracts/{event_type}/draft", params={"limit": limit})
+
+    async def contract_coverage(self, *, since: str | None = None) -> list[dict[str, Any]]:
+        return await self._request("GET", "/v1/contracts/coverage", params={"since": since})
+
+    async def personalization(
+        self, customer_id: str, *, details: bool = True, fresh: bool = False
+    ) -> Personalization:
+        """What your product should do differently for this customer. See
+        :meth:`MemoryClient.personalization` — cached by ETag the same way."""
+        key = (customer_id, details)
+        cached = self._personalization_cache.get(key)
+        headers = {"If-None-Match": cached[0]} if cached and not fresh else None
+        response = await self._request(
+            "GET",
+            f"/v1/customers/{customer_id}/personalization",
+            params={"details": "true" if details else "false", "fresh": "true" if fresh else None},
+            headers=headers,
+            raw=True,
+        )
+        if response.status_code == 304 and cached:
+            _remember(self._personalization_cache, key, cached)
+            return cached[1]
+        result = Personalization.from_api(response.json())
+        if response.headers.get("etag"):
+            _remember(self._personalization_cache, key, (response.headers["etag"], result))
+        return result
+
+    async def personalization_batch(
+        self, customer_ids: Sequence[str], *, details: bool = False
+    ) -> dict[str, Personalization | None]:
+        """Up to 50 customers at once — ``None`` for an id that names no customer."""
+        body = await self._request(
+            "POST", "/v1/personalization/batch", json={"customer_ids": list(customer_ids), "details": details}
+        )
+        return {
+            item["customer_id"]: Personalization.from_api(item["personalization"]) if item.get("personalization") else None
+            for item in body.get("data") or []
+        }
+
+    async def personalization_rules(self) -> dict[str, Any]:
+        return await self._request("GET", "/v1/personalization/rules")
+
     async def freshness(self, customer_id: str, *, limit: int = 50) -> dict[str, Any]:
         """How current what is known about a customer is. See :meth:`MemoryClient.freshness`."""
         return await self._request("GET", f"/v1/customers/{customer_id}/freshness", params={"limit": limit})
@@ -1598,6 +1826,11 @@ class AsyncMemoryClient(_BaseClient):
                 idempotency_key=payload.get("external_event_id"),
             )
         )
+
+    async def track_batch(self, events: Iterable[Mapping[str, Any]]) -> TrackedBatch:
+        """Up to 500 events in one request. See :meth:`MemoryClient.track_batch`."""
+        payload = {"events": [_event_payload(**dict(event)) for event in events]}
+        return TrackedBatch.from_api(await self._request("POST", "/v1/events/batch", json=payload))
 
     async def query(
         self,

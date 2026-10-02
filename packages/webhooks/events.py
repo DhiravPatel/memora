@@ -288,6 +288,50 @@ def memory_drift_resolved(*, project_id: str, customer: Any, drift: Any) -> Outb
     )
 
 
+def customer_personalization_changed(
+    *, project_id: str, customer: Any, changes: list[dict[str, Any]], personalization: dict[str, Any]
+) -> OutboundEvent:
+    """What a product should do differently for a customer changed (§26 6.6) — a hint
+    turned on or off, a new friction, a different experience level. ``changes`` says what
+    moved; ``personalization`` is the new document without its details, ready to cache."""
+    return OutboundEvent(
+        type=WebhookEvent.CUSTOMER_PERSONALIZATION_CHANGED,
+        project_id=project_id,
+        data={"customer": _customer_ref(customer), "changes": changes, "personalization": personalization},
+    )
+
+
+def event_contract_violated(
+    *,
+    project_id: str,
+    event_type: str,
+    contract_version: int,
+    mode: str,
+    since: Any,
+    until: Any,
+    violating_events: int,
+    refused_events: int,
+    violations: list[dict[str, Any]],
+) -> OutboundEvent:
+    """Events of a contracted type broke their memory contract (§26 7.1) — sent at most hourly
+    per contract, with how many were kept (``warn``) or refused (``enforce``) and the commonest
+    ways they broke it."""
+    return OutboundEvent(
+        type=WebhookEvent.EVENT_CONTRACT_VIOLATED,
+        project_id=project_id,
+        data={
+            "event_type": event_type,
+            "contract_version": contract_version,
+            "mode": mode,
+            "since": since.isoformat() if hasattr(since, "isoformat") else since,
+            "until": until.isoformat() if hasattr(until, "isoformat") else until,
+            "violating_events": violating_events,
+            "refused_events": refused_events,
+            "violations": violations,
+        },
+    )
+
+
 def _drift(drift: Any) -> dict[str, Any]:
     return {
         "id": drift.id,

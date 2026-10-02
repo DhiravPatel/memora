@@ -43,6 +43,8 @@ from memory_engine.facts import (
     ACTIONS_PREFIX,
     CATALOG,
     DAYS_SUFFIX,
+    GUARDRAIL_DECISIONS,
+    GUARDRAIL_PREFIX,
     LIFECYCLE_PREFIX,
     METADATA_PREFIX,
     REQUEST_PREFIX,
@@ -372,6 +374,15 @@ def _spec_for(fact: str) -> FactSpec:
             f"Unknown fact {fact!r}. Action history reads actions.<action or family>.<metric>, "
             f"with a metric of {', '.join(ACTION_METRICS)}."
         )
+    if fact.startswith(GUARDRAIL_PREFIX):
+        if ACTION_NAME.match(fact[len(GUARDRAIL_PREFIX) :]):
+            return FactSpec(
+                name=fact,
+                type="enum",
+                description="What the guardrails would say to this action now — personalization hints only",
+                values=GUARDRAIL_DECISIONS,
+            )
+        raise ConditionError(f"Unknown fact {fact!r}. Guardrail verdicts read guardrail.<action>, e.g. guardrail.offer_upgrade.")
     if fact.startswith(LIFECYCLE_PREFIX) and _TRACK_NAME.match(fact[len(LIFECYCLE_PREFIX):].removesuffix(DAYS_SUFFIX)):
         if fact.endswith(DAYS_SUFFIX):
             return FactSpec(name=fact, type="number", description="Days in the track's current state", unit="days")

@@ -113,6 +113,17 @@ def _integration(data: dict[str, Any], event_type: str) -> TemplatedMemory | Non
     )
 
 
+def _money(currency: Any, amount: Any) -> str:
+    """'₹500', 'INR 499', '$12.5' — a symbol is written against the amount and a currency
+    code apart from it, the way people write them ('INR499' reads as an identifier)."""
+    if isinstance(amount, float) and amount.is_integer():
+        amount = int(amount)
+    code = str(currency or "").strip()
+    if not code:
+        return str(amount)
+    return f"{code.upper()} {amount}" if code.isalpha() else f"{code}{amount}"
+
+
 def _payment(data: dict[str, Any], event_type: str) -> TemplatedMemory | None:
     amount = _get(data, "amount", "total", "value")
     currency = _get(data, "currency") or ""
@@ -122,7 +133,7 @@ def _payment(data: dict[str, Any], event_type: str) -> TemplatedMemory | None:
     if failed:
         sentence = "The customer's payment failed"
         if amount:
-            sentence += f" for {currency}{amount}".rstrip()
+            sentence += f" for {_money(currency, amount)}"
         if reason:
             sentence += f" ({reason})"
         return TemplatedMemory(
@@ -136,7 +147,7 @@ def _payment(data: dict[str, Any], event_type: str) -> TemplatedMemory | None:
     if "refund" in event_type:
         return TemplatedMemory(
             type=MemoryType.SUBSCRIPTION,
-            content=f"The customer was refunded {currency}{amount}." if amount else "The customer received a refund.",
+            content=f"The customer was refunded {_money(currency, amount)}." if amount else "The customer received a refund.",
             importance=0.8,
             confidence=0.95,
             rule="template:refund",
@@ -173,7 +184,7 @@ def _purchase(data: dict[str, Any], event_type: str) -> TemplatedMemory | None:
     if product:
         parts.append(f"for {_label(product)}")
     if amount:
-        parts.append(f"worth {currency}{amount}")
+        parts.append(f"worth {_money(currency, amount)}")
     return TemplatedMemory(
         type=MemoryType.BEHAVIOR,
         content=" ".join(parts) + ".",

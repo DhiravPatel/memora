@@ -19,12 +19,14 @@
 import { HttpClient } from "./client.js";
 import { Admin } from "./resources/admin.js";
 import { Agent } from "./resources/agent.js";
+import { Contracts } from "./resources/contracts.js";
 import { Customers, type JourneyOptions } from "./resources/customers.js";
 import { Drift } from "./resources/drift.js";
 import { Events } from "./resources/events.js";
 import { Foresight } from "./resources/foresight.js";
 import { Actions, Guardrails, Profiles, Runs } from "./resources/guardrails.js";
 import { MemoryResource } from "./resources/memory.js";
+import { PersonalizationResource } from "./resources/personalization.js";
 import { Quality } from "./resources/quality.js";
 import { State } from "./resources/state.js";
 import type {
@@ -32,6 +34,7 @@ import type {
   ContextResult,
   CustomerBrief,
   CustomerJourney,
+  Personalization,
   QueryResult,
   Recommendations,
   SignalReport,
@@ -59,8 +62,12 @@ export class MemoryClient {
   readonly runs: Runs;
   /** Agent profiles: which memory an agent may read and which actions it may take. */
   readonly profiles: Profiles;
+  /** What your product should do differently for a customer — cached by ETag. */
+  readonly personalization: PersonalizationResource;
   /** Freshness and drift: how current memory is, and what evidence says may be out of date. */
   readonly drift: Drift;
+  /** Memory contracts: what each event type must look like, checked as events arrive. */
+  readonly contracts: Contracts;
 
   constructor(options: ClientOptions) {
     const http = new HttpClient(options);
@@ -76,7 +83,9 @@ export class MemoryClient {
     this.actions = new Actions(http);
     this.runs = new Runs(http);
     this.profiles = new Profiles(http);
+    this.personalization = new PersonalizationResource(http);
     this.drift = new Drift(http);
+    this.contracts = new Contracts(http);
   }
 
   /** Shorthand for `guardrails.check`. */
@@ -120,6 +129,14 @@ export class MemoryClient {
     return this.customers.journey(customerId, options);
   }
 
+  /** Shorthand for `personalization.get`: what your product should do differently. */
+  personalize(
+    customerId: string,
+    options: { details?: boolean; fresh?: boolean } = {},
+  ): Promise<Personalization> {
+    return this.personalization.get(customerId, options);
+  }
+
   /** Shorthand for `foresight.signals`. */
   signals(customerId: string): Promise<SignalReport> {
     return this.foresight.signals(customerId);
@@ -147,6 +164,7 @@ export class MemoryClient {
 export {
   ActionDeniedError,
   ApprovalRequiredError,
+  ContractViolationError,
   MemoryApiError,
   MemoryConfigError,
   MemoryTimeoutError,
@@ -165,5 +183,6 @@ export {
 export type { WebhookEventEnvelope } from "./webhooks.js";
 export type { Expectation } from "./resources/quality.js";
 export type { JourneyOptions } from "./resources/customers.js";
+export type { ContractWindow } from "./resources/contracts.js";
 export * from "./types.js";
 export default MemoryClient;

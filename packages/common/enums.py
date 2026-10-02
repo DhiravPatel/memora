@@ -178,6 +178,9 @@ class ApiKeyScope(StrEnum):
     # Approve or reject an action an agent asked permission for (§26 3.3). Like clearance
     # it is a grant, not a consequence of admin — see ``not_implied_by_admin``.
     APPROVALS_DECIDE = "approvals:decide"
+    # Read a customer's personalization (§26 6.6) and nothing else: the narrow key a
+    # product's backend uses to adapt its UI, which has no business reading memories.
+    PERSONALIZATION_READ = "personalization:read"
     ADMIN = "admin"
 
     @classmethod
@@ -227,6 +230,8 @@ class WebhookEvent(StrEnum):
     AGENT_ACTION_COMPLETED = "agent.action_completed"
     MEMORY_DRIFT_DETECTED = "memory.drift_detected"
     MEMORY_DRIFT_RESOLVED = "memory.drift_resolved"
+    CUSTOMER_PERSONALIZATION_CHANGED = "customer.personalization_changed"
+    EVENT_CONTRACT_VIOLATED = "event.contract_violated"
 
     @classmethod
     def all(cls) -> list[WebhookEvent]:

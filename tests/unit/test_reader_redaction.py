@@ -111,3 +111,30 @@ def test_a_reason_is_generalised_only_when_what_it_quotes_is_hidden():
     hidden = redact_reason(reason, {"mem_pref"})
     assert hidden["explanation"] == reason["redacted_explanation"]
     assert hidden["evidence"] == []
+
+
+def test_a_withheld_events_contract_check_keeps_shapes_not_words():
+    from app.services.serializers import _masked_contract
+
+    check = {
+        "version": 2,
+        "mode": "warn",
+        "valid": False,
+        "violations": [
+            {
+                "path": "reason",
+                "rule": "type",
+                "expected": "number",
+                "received": 'string ("refund for Priya\'s cancelled order")',
+                "message": "'reason' should be a number; received string (\"refund for Priya's cancelled order\").",
+            },
+            {"path": "amount", "rule": "required", "expected": "present", "received": "missing", "message": "x"},
+        ],
+    }
+    masked = _masked_contract(check)
+    assert (masked["version"], masked["valid"]) == (2, False)
+    first, second = masked["violations"]
+    assert first["received"] == "string" and "Priya" not in first["message"]
+    assert first["message"] == "'reason' broke its type rule (expected number)."
+    assert second["received"] == "missing"
+    assert _masked_contract(None) is None

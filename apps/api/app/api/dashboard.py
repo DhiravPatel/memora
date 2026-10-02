@@ -25,6 +25,13 @@ from app.schemas.agents import SessionOut
 from app.schemas.brief import CustomerBriefOut
 from app.schemas.changes import ChangesOut, CompareOut
 from app.schemas.common import DeletionResult, Message, Page
+from app.schemas.contracts import (
+    ContractCoverageOut,
+    ContractIn,
+    ContractOut,
+    ContractTestIn,
+    ContractTestOut,
+)
 from app.schemas.customers import Customer360, CustomerOut, CustomerTimeline
 from app.schemas.evaluation import (
     EvalCaseOut,
@@ -57,6 +64,12 @@ from app.schemas.memories import (
     MemoryGraph,
     MemoryOut,
     VocabularyOut,
+)
+from app.schemas.personalization import (
+    PersonalizationOut,
+    PersonalizationPreviewIn,
+    PersonalizationRulesOut,
+    PersonalizationSummaryOut,
 )
 from app.schemas.quality import QualityReport
 from app.schemas.query import (
@@ -92,6 +105,7 @@ from app.services import evaluation_views, state_views
 from app.services.agent_service import AgentService
 from app.services.brief_service import BriefService
 from app.services.changes_service import ChangesService
+from app.services.contract_service import ContractService
 from app.services.customer360_service import Customer360Service
 from app.services.customer_state_service import CustomerStateService
 from app.services.deletion_service import DeletionService
@@ -105,6 +119,7 @@ from app.services.goal_service import GoalService
 from app.services.health_service import HealthService
 from app.services.journey_service import JourneyService
 from app.services.memory_service import MemoryService
+from app.services.personalization_service import PersonalizationService, rules_for
 from app.services.quality_service import QualityService
 from app.services.reader import Reader
 from app.services.serializers import (
@@ -137,6 +152,7 @@ from database.repositories import (
     VocabularyRepository,
 )
 from memory_engine.journey import markdown as journey_markdown
+from memory_engine.personalization import describe as describe_personalization
 
 router = APIRouter(prefix="/v1/projects/{project_id}", tags=["dashboard"])
 
@@ -548,14 +564,17 @@ async def preview_event(
     of bug it prevents is a route that silently swallows the literal id "preview".
     """
     customer = await _resolve_customer(session, project.id, payload.customer_id)
+    check = await ContractService(session).check(project=project, event_type=payload.event_type, data=payload.data)
     explanation = await engine.preview_event(
         project=project,
         customer=customer,
         event_type=payload.event_type,
         data=payload.data,
         occurred_at=payload.occurred_at,
+        contract=check.contract if check is not None else None,
     )
-    return EventExplanationOut(**explanation.as_dict(), duration_ms=explanation.duration_ms)
+    contract = {**check.stored(), "would_refuse": check.refuses} if check is not None else None
+    return EventExplanationOut(**explanation.as_dict(), duration_ms=explanation.duration_ms, contract=contract)
 
 
 @router.post("/events/{event_id}/retry", response_model=Message)
@@ -1052,6 +1071,144 @@ async def dashboard_customer_journey(
     if fmt == "markdown":
         return PlainTextResponse(journey_markdown(journey), media_type="text/markdown; charset=utf-8")
     return CustomerJourneyOut(**journey)
+
+
+# ------------------------------------------------------------- memory contracts
+
+
+@router.get("/contracts", response_model=list[ContractOut])
+async def dashboard_contracts(
+    project: UserProject, session: DBSession, since: str | None = Query(default=None, max_length=8)
+) -> list[ContractOut]:
+    return [ContractOut(**row) for row in await ContractService(session).list(project=project, since=since)]
+
+
+@router.get("/contracts/coverage", response_model=list[ContractCoverageOut])
+async def dashboard_contract_coverage(
+    project: UserProject, session: DBSession, since: str | None = Query(default=None, max_length=8)
+) -> list[ContractCoverageOut]:
+    return [ContractCoverageOut(**row) for row in await ContractService(session).coverage(project=project, since=since)]
+
+
+@router.post("/contracts", response_model=ContractOut)
+async def dashboard_save_contract(
+    payload: ContractIn, project: UserProject, session: DBSession, current_user: CurrentUserDep
+) -> ContractOut:
+    current_user.require(UserRole.MEMBER)
+    return ContractOut(
+        **await ContractService(session).save(
+            project=project, raw=payload.raw(), yaml_text=payload.yaml, actor_type="user", actor_id=current_user.user.id
+        )
+    )
+
+
+@router.get("/contracts/{event_type}", response_model=ContractOut)
+async def dashboard_contract(
+    event_type: str, project: UserProject, session: DBSession, since: str | None = Query(default=None, max_length=8)
+) -> ContractOut:
+    return ContractOut(**await ContractService(session).get(project=project, event_type=event_type, since=since))
+
+
+@router.put("/contracts/{event_type}", response_model=ContractOut)
+async def dashboard_replace_contract(
+    event_type: str, payload: ContractIn, project: UserProject, session: DBSession, current_user: CurrentUserDep
+) -> ContractOut:
+    current_user.require(UserRole.MEMBER)
+    return ContractOut(
+        **await ContractService(session).save(
+            project=project,
+            raw=payload.raw(),
+            yaml_text=payload.yaml,
+            event_type=event_type.strip().lower(),
+            actor_type="user",
+            actor_id=current_user.user.id,
+        )
+    )
+
+
+@router.delete("/contracts/{event_type}", response_model=Message)
+async def dashboard_delete_contract(
+    event_type: str, project: UserProject, session: DBSession, current_user: CurrentUserDep
+) -> Message:
+    current_user.require(UserRole.MEMBER)
+    await ContractService(session).delete(project=project, event_type=event_type, actor_type="user", actor_id=current_user.user.id)
+    return Message(message=f"The {event_type} contract was deleted.")
+
+
+@router.post("/contracts/{event_type}/test", response_model=ContractTestOut)
+async def dashboard_test_contract(
+    event_type: str, payload: ContractTestIn, project: UserProject, session: DBSession
+) -> ContractTestOut:
+    return ContractTestOut(
+        **await ContractService(session).test(
+            project=project, event_type=event_type.strip().lower(), data=payload.data, raw=payload.contract, yaml_text=payload.yaml
+        )
+    )
+
+
+@router.post("/contracts/{event_type}/draft", response_model=dict)
+async def dashboard_draft_contract(
+    event_type: str, project: UserProject, session: DBSession, limit: int = Query(default=200, ge=1, le=1000)
+) -> dict:
+    return await ContractService(session).draft(project=project, event_type=event_type.strip().lower(), limit=limit)
+
+
+# ------------------------------------------------------------ personalization
+
+
+@router.get("/customers/{customer_id}/personalization", response_model=PersonalizationOut)
+async def dashboard_customer_personalization(
+    customer_id: str,
+    project: UserProject,
+    session: DBSession,
+    cleared: Clearance,
+    details: bool = Query(default=True),
+    fresh: bool = Query(default=False),
+) -> PersonalizationOut:
+    """What the product is told about this customer. See the API-key route."""
+    customer = await _resolve_customer(session, project.id, customer_id)
+    body = await PersonalizationService(session).for_reader(
+        project=project, customer=customer, cleared=cleared, details=details, fresh=fresh
+    )
+    return PersonalizationOut(**body)
+
+
+@router.post("/customers/{customer_id}/personalization/refresh", response_model=PersonalizationOut)
+async def dashboard_refresh_personalization(
+    customer_id: str,
+    project: UserProject,
+    session: DBSession,
+    cleared: Clearance,
+    current_user: CurrentUserDep,
+) -> PersonalizationOut:
+    """Recompute now — and tell webhook subscribers if anything changed."""
+    current_user.require(UserRole.MEMBER)
+    customer = await _resolve_customer(session, project.id, customer_id)
+    service = PersonalizationService(session)
+    await service.refresh(project=project, customer=customer, reason="manual")
+    return PersonalizationOut(**await service.for_reader(project=project, customer=customer, cleared=cleared))
+
+
+@router.get("/personalization/summary", response_model=PersonalizationSummaryOut)
+async def dashboard_personalization_summary(project: UserProject, session: DBSession) -> PersonalizationSummaryOut:
+    """Across customers: each hint's reach, experience levels, moods, frictions, relied-on features."""
+    return PersonalizationSummaryOut(**await PersonalizationService(session).summary(project=project))
+
+
+@router.get("/personalization/rules", response_model=PersonalizationRulesOut)
+async def dashboard_personalization_rules(project: UserProject) -> PersonalizationRulesOut:
+    return PersonalizationRulesOut(**describe_personalization(rules_for(project)))
+
+
+@router.post("/personalization/preview", response_model=PersonalizationOut)
+async def dashboard_personalization_preview(
+    payload: PersonalizationPreviewIn, project: UserProject, session: DBSession
+) -> PersonalizationOut:
+    """What proposed rules would tell the product about one customer — nothing saved."""
+    customer = await _resolve_customer(session, project.id, payload.customer_id)
+    return PersonalizationOut(
+        **await PersonalizationService(session).preview(project=project, customer=customer, raw_rules=payload.rules)
+    )
 
 
 # ------------------------------------------------------------ freshness and drift

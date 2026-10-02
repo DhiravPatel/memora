@@ -54,6 +54,10 @@ RECENT_DAYS = 14
 # never credited.
 ACTIONS_PREFIX = "actions."
 ACTION_METRICS = ("count_7d", "count_30d", "amount_30d", "days_since_last")
+# What the guardrails would say to an action now, for personalization hints (§26 6.6):
+# `guardrail.offer_upgrade != "allow"`. Present only when personalization is computed.
+GUARDRAIL_PREFIX = "guardrail."
+GUARDRAIL_DECISIONS = ("allow", "require_approval", "deny")
 ZERO_ACTION_METRICS = ("count_7d", "count_30d", "amount_30d")
 ACTION_HISTORY_DAYS = 90
 
@@ -155,6 +159,20 @@ CATALOG: dict[str, FactSpec] = {
         _spec("intents.kinds", "list", "What the customer intends", values=INTENT_KINDS),
         _spec("intents.latest_kind", "enum", "The most recent intent", values=INTENT_KINDS),
         _spec("intents.latest_days_ago", "number", "Days since the most recent intent", unit="days"),
+        # ---------------------------------------------------- personalization
+        # Computed with personalization (§26 6.6), for its hints; unknown anywhere else.
+        _spec(
+            "personalization.experience",
+            "string",
+            "How experienced with the product the customer is: new, beginner, intermediate, advanced "
+            "(or the project's own levels) — personalization hints only",
+        ),
+        _spec(
+            "personalization.mood",
+            "string",
+            "How the customer seems right now: frustrated, happy, neutral (or the project's own) — "
+            "personalization hints only",
+        ),
         # ---------------------------------------------------------- activity
         _spec("activity.last_event_days_ago", "number", "Days since the last event", unit="days"),
         _spec("activity.events_recent", "number", "Events in the recent signal window (14 days)"),
@@ -389,6 +407,9 @@ class FactInputs:
     # customer's open drift flags (§26 5.5).
     freshness: dict[str, Any] = field(default_factory=dict)
     drift: Sequence[Any] = ()
+    # When the customer's first event happened. An import can date a customer's history long
+    # before their record was created, and their age starts with the history.
+    first_event_at: datetime | None = None
 
 
 def _days_since(moment: datetime | None, now: datetime) -> float | None:
@@ -593,7 +614,8 @@ def build_facts(inputs: FactInputs) -> CustomerFacts:
     values["customer.name"] = getattr(customer, "name", None)
     values["customer.email"] = email
     values["customer.email_domain"] = email.split("@", 1)[1].lower() if email and "@" in email else None
-    values["customer.age_days"] = _days_since(getattr(customer, "created_at", None), now)
+    began = [moment for moment in (getattr(customer, "created_at", None), inputs.first_event_at) if moment is not None]
+    values["customer.age_days"] = _days_since(min(began, key=ensure_utc), now) if began else None
     values["customer.metadata"] = dict(_mapping(customer))
 
     # --------------------------------------------------------------- health

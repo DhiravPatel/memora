@@ -12,7 +12,17 @@ An integration must decide four things:
 3. **Idempotency.** Pass the provider's own event id as `external_event_id`; webhooks are
    redelivered and the API must store the event exactly once.
 4. **Text.** Put human-written text in `message`, `body`, `feedback` or `reason` — those
-   fields raise the importance score and carry most of the meaning for extraction.
+   fields raise the importance score and carry most of the meaning for extraction. When the
+   text lives elsewhere (`details.reason`, `ticket.description`), say so in the type's
+   memory contract's `text_field` rather than renaming it.
+
+Then write the type's **memory contract** — required fields, their types, the text field, the
+importance — and run your fixtures through `POST /v1/contracts/{event_type}/test` in CI. Start
+in `warn` mode: events that break it are kept and the Contracts page shows exactly how
+(`amount` expected a number, received `string ("₹500")`). Switch to `enforce` once the report
+is clean; a payload that breaks it is then refused with `422 contract_violation` instead of
+being remembered wrongly. `POST /v1/contracts/{event_type}/draft` writes a first version from
+the traffic you already send. See [Memory contracts](../api/README.md#memory-contracts).
 
 ```
 Stripe customer.subscription.updated

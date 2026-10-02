@@ -206,6 +206,8 @@ class AgentService:
                     occurred_at=occurred_at,
                     source="agent",
                 ),
+                # A conversation turn is never refused by a contract; violations are recorded.
+                enforced=False,
             )
             event_id = accepted.event_id
 

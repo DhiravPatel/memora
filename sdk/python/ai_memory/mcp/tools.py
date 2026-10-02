@@ -244,6 +244,28 @@ def customer_journey(client: Any, args: dict[str, Any]) -> ToolResult:
     return ToolResult(text=text, data=journey.raw)
 
 
+def customer_personalization(client: Any, args: dict[str, Any]) -> ToolResult:
+    """How to pitch an answer to this customer: experience, mood, channel, what is in their
+    way and what they are working towards — the same values the product adapts to."""
+    personalization = client.personalization(_required(args, "customer_id"), details=True)
+    on = [name for name, value in personalization.ui.items() if value]
+    lines = [
+        f"Experience: {personalization.experience or 'unknown'}; mood: {personalization.mood or 'unknown'}.",
+        f"Preferred channel: {personalization.preferred_channel or 'not stated'}"
+        + (f"; opted out of {', '.join(personalization.opt_outs)}" if personalization.opt_outs else "")
+        + ".",
+        f"Working towards: {personalization.current_goal or 'no goal recorded'}.",
+        f"In their way: {', '.join(personalization.known_frictions) or 'nothing open'}.",
+        f"Relies on: {', '.join(personalization.relied_on_features) or 'nothing yet'}.",
+        f"Hints on: {', '.join(on) or 'none'}.",
+    ]
+    for name in on:
+        reasons = personalization.because(name)
+        if reasons:
+            lines.append(f"- {name}: {'; '.join(reasons)}")
+    return ToolResult(text="\n".join(lines), data=personalization.raw)
+
+
 def get_health(client: Any, args: dict[str, Any]) -> ToolResult:
     customer = _required(args, "customer_id")
     health = client.health(customer)
@@ -567,6 +589,15 @@ TOOLS: tuple[Tool, ...] = (
             ["customer_id"],
         ),
         customer_journey,
+    ),
+    Tool(
+        "customer_personalization",
+        "How to pitch it",
+        "What the product adapts to for this customer — experience level, mood, preferred channel and opt-outs, "
+        "current goal, known frictions, relied-on features and UI hints such as suppress_upsell — each with the "
+        "facts behind it. Use it to pitch a reply at the right level and tone.",
+        _schema({"customer_id": CUSTOMER_ID}, ["customer_id"]),
+        customer_personalization,
     ),
     Tool(
         "customer_timeline",

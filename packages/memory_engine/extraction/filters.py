@@ -7,6 +7,7 @@ meaningful events reach extraction.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 
 # Baseline importance per event type. Projects override these in project settings.
@@ -78,14 +79,20 @@ def score_event(
     event_type: str,
     data: dict[str, Any],
     overrides: dict[str, float] | None = None,
+    text_fields: Sequence[str] = (),
 ) -> float:
-    """Importance of a specific event, combining its type and its payload."""
+    """Importance of a specific event, combining its type and its payload. ``text_fields``
+    are paths a memory contract names as carrying the text (§26 7.1)."""
     score = base_importance(event_type, overrides)
 
+    named = [_at(data or {}, path) for path in text_fields]
     text = " ".join(
-        str(value)
-        for key, value in (data or {}).items()
-        if key.lower() in _TEXT_FIELDS and isinstance(value, str)
+        [str(value) for value in named if isinstance(value, str)]
+        + [
+            str(value)
+            for key, value in (data or {}).items()
+            if key.lower() in _TEXT_FIELDS and isinstance(value, str)
+        ]
     ).strip()
     if text:
         # A human wrote something: that is almost always worth remembering.
@@ -101,6 +108,15 @@ def score_event(
         score = _clamp(float(explicit))
 
     return round(_clamp(score), 4)
+
+
+def _at(data: dict[str, Any], path: str) -> Any:
+    current: Any = data
+    for part in path.split("."):
+        if not isinstance(current, dict):
+            return None
+        current = current.get(part)
+    return current
 
 
 def should_extract(importance: float, threshold: float) -> bool:

@@ -23,6 +23,7 @@ from typing import Any
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.services.contract_service import ContractService
 from app.services.settings_service import validate as validate_settings
 from common.enums import AuditAction, MemoryType
 from common.errors import ConflictError, NotFoundError, ValidationError
@@ -39,6 +40,7 @@ from database.repositories import (
     VocabularyRepository,
 )
 from memory_engine import MemoryEngine
+from memory_engine.contracts import Contract
 from memory_engine.evaluation import (
     EXPECTATION_FIELDS,
     PLANNED_ACTIONS,
@@ -375,9 +377,10 @@ class EvaluationService:
 
         results: list[Any] = []
         extractions: list[ExtractionResult] = []
+        contracts = await self._contracts(project, cases)
         for case in cases:
             if case.kind == "extraction":
-                scored = await self._extraction(engine, view, case)
+                scored = await self._extraction(engine, view, case, contracts)
                 extractions.append(scored)
                 results.append(scored)
                 continue
@@ -429,7 +432,22 @@ class EvaluationService:
         )
         return run
 
-    async def _extraction(self, engine: MemoryEngine, project: Any, case: EvalCase) -> ExtractionResult:
+    async def _contracts(self, project: Project, cases: list[EvalCase]) -> dict[str, Contract]:
+        """The memory contracts of the extraction cases' event types (§26 7.1): extraction is
+        measured as the pipeline runs it, reading the contract's text field and importance."""
+        service = ContractService(self.session)
+        wanted = [str((case.event or {}).get("event_type") or "") for case in cases if case.kind == "extraction"]
+        rows = await service.contracts.for_types(project_id=project.id, event_types=[name for name in wanted if name])
+        found: dict[str, Contract] = {}
+        for name, row in rows.items():
+            compiled = await service.compiled(project_id=project.id, event_type=name, row=row)
+            if compiled is not None:
+                found[name] = compiled[1]
+        return found
+
+    async def _extraction(
+        self, engine: MemoryEngine, project: Any, case: EvalCase, contracts: dict[str, Contract] | None = None
+    ) -> ExtractionResult:
         """The case's event through the real pipeline as a dry run, scored."""
         expectations = case.expectations or {}
         spec = ExtractionSpec(
@@ -446,12 +464,14 @@ class EvaluationService:
             return failed
         event = case.event or {}
         occurred = _moment(event.get("occurred_at"))
+        event_type = str(event.get("event_type") or "")
         explanation = await engine.preview_event(
             project=project,
             customer=customer,
-            event_type=str(event.get("event_type") or ""),
+            event_type=event_type,
             data=dict(event.get("data") or {}),
             occurred_at=occurred,
+            contract=(contracts or {}).get(event_type),
         )
         planned = [
             {

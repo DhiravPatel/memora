@@ -22,6 +22,8 @@ dependencies = [
     "prometheus-client>=0.20.0",
     "tenacity>=9.0.0",
     "python-multipart>=0.0.9",
+    # Memory contracts can be written in YAML (§26 7.1); safe_load only.
+    "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]

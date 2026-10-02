@@ -28,6 +28,8 @@ from memory_engine.lifecycle import (
     compile_lifecycle,
     compile_tracks,
 )
+from memory_engine.personalization import PersonalizationError
+from memory_engine.personalization import canonical as personalization_canonical
 from memory_engine.policy import PolicyError, compile_policy
 
 FieldKind = Literal[
@@ -41,6 +43,7 @@ FieldKind = Literal[
     "lifecycle",
     "lifecycle_tracks",
     "guardrails",
+    "personalization",
 ]
 
 # How long a person has to answer an agent's request before it lapses, by default.
@@ -89,6 +92,7 @@ GROUPS: tuple[tuple[str, str], ...] = (
     ("lifecycle", "Lifecycle"),
     ("agents", "Agents"),
     ("freshness", "Freshness and drift"),
+    ("personalization", "Personalization"),
 )
 
 RANKING_KEYS = ("similarity", "importance", "confidence", "recency", "relationship")
@@ -135,6 +139,8 @@ def defaults() -> dict[str, Any]:
         "drift_min_billing_events": DRIFT_DEFAULTS.min_billing_events,
         "drift_quiet_days": {"problem": DRIFT_DEFAULTS.quiet_problem_days, "usage": DRIFT_DEFAULTS.quiet_usage_days},
         "drift_min_activity": DRIFT_DEFAULTS.min_activity,
+        # Only what differs from the built-in rules is stored (§26 6.6).
+        "personalization": {},
     }
 
 
@@ -452,6 +458,21 @@ def schema() -> list[SettingField]:
             ),
         ),
         SettingField(
+            key="personalization",
+            label="Personalization rules",
+            group="personalization",
+            kind="personalization",
+            default=values["personalization"],
+            help=(
+                "What GET /v1/customers/{id}/personalization tells your product. Experience "
+                "levels and moods are tried in order, the first that holds wins; UI hints are "
+                "conditions over the customer's facts plus personalization.experience, "
+                "personalization.mood and guardrail.<action> — what the guardrails would say to "
+                "that action now. Built-in hints can be changed or switched off; add up to 20 "
+                "of your own."
+            ),
+        ),
+        SettingField(
             key="pii_redaction_enabled",
             label="Redact PII before extraction",
             group="privacy",
@@ -519,6 +540,8 @@ def validate(patch: dict[str, Any]) -> dict[str, Any]:
         cleaned["guardrails"] = validate_guardrails(cleaned["guardrails"])
     if "lifecycle_tracks" in cleaned:
         cleaned["lifecycle_tracks"] = validate_tracks(cleaned["lifecycle_tracks"])
+    if "personalization" in cleaned:
+        cleaned["personalization"] = validate_personalization(cleaned["personalization"])
     if "integrations" in cleaned:
         cleaned["integrations"] = _encrypt_provider_secrets(cleaned["integrations"])
     return cleaned
@@ -568,6 +591,17 @@ def new_project_settings(settings: dict[str, Any] | None = None) -> dict[str, An
     if settings:
         initial.update(validate(settings))
     return initial
+
+
+def validate_personalization(raw: Any) -> dict[str, Any]:
+    """Compile every rule now — a typo in a hint is a 422 when saved, not a hint that is
+    silently never on — and store only what differs from the built-in rules."""
+    if raw is not None and not isinstance(raw, dict):
+        raise ValidationError("Personalization rules must be an object.")
+    try:
+        return personalization_canonical(raw or {})
+    except PersonalizationError as exc:
+        raise ValidationError(str(exc)) from exc
 
 
 def validate_guardrails(raw: Any) -> dict[str, Any]:

@@ -44,6 +44,7 @@ def normalize_event(
     occurred_at: datetime,
     importance_overrides: dict[str, float] | None = None,
     redact_pii: bool = True,
+    text_fields: tuple[str, ...] = (),
 ) -> NormalizedEvent:
     payload: dict[str, Any] = redact_payload(data or {}) if redact_pii else dict(data or {})
     text = normalize(" \n".join(flatten_payload(payload)))[:MAX_TEXT_LENGTH]
@@ -51,7 +52,7 @@ def normalize_event(
         text = redact_text(text)
 
     importance = score_event(
-        event_type=event_type, data=data or {}, overrides=importance_overrides
+        event_type=event_type, data=data or {}, overrides=importance_overrides, text_fields=text_fields
     )
     return NormalizedEvent(
         event_id=event_id,
@@ -62,4 +63,5 @@ def normalize_event(
         text=text,
         occurred_at=occurred_at,
         importance=importance,
+        text_fields=tuple(text_fields),
     )

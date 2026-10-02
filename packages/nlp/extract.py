@@ -13,6 +13,7 @@ cues that classified it are attached to the memory's metadata.
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -139,12 +140,22 @@ ATTRIBUTED_FIELDS: frozenset[str] = frozenset(
 ATTRIBUTION_PREFIX = "The customer reported that"
 
 
-def collect_segments(data: dict[str, Any]) -> list[tuple[str, str]]:
-    """Human-written text from a payload as ``(field, text)``, in priority order."""
+def _at(data: dict[str, Any], path: str) -> Any:
+    current: Any = data
+    for part in path.split("."):
+        if not isinstance(current, dict):
+            return None
+        current = current.get(part)
+    return current
+
+
+def collect_segments(data: dict[str, Any], text_fields: Sequence[str] = ()) -> list[tuple[str, str]]:
+    """Human-written text from a payload as ``(field, text)``, in priority order — the
+    fields a memory contract names first (dotted paths allowed), then the usual ones."""
     seen: set[str] = set()
     segments: list[tuple[str, str]] = []
-    for field_name in TEXT_FIELDS:
-        value = (data or {}).get(field_name)
+    for field_name in (*text_fields, *TEXT_FIELDS):
+        value = _at(data or {}, field_name) if "." in field_name else (data or {}).get(field_name)
         if not isinstance(value, str):
             continue
         cleaned = normalize(value)
@@ -155,9 +166,9 @@ def collect_segments(data: dict[str, Any]) -> list[tuple[str, str]]:
     return segments
 
 
-def collect_text(data: dict[str, Any]) -> str:
+def collect_text(data: dict[str, Any], text_fields: Sequence[str] = ()) -> str:
     """Human-written text from a payload, in priority order, de-duplicated."""
-    return "\n".join(text for _, text in collect_segments(data))
+    return "\n".join(text for _, text in collect_segments(data, text_fields))
 
 
 def attribute(content: str) -> str:
@@ -402,10 +413,12 @@ def extract(
     text: str | None = None,
     max_memories: int = MAX_MEMORIES_PER_EVENT,
     customer_label: str = "The customer",
+    text_fields: Sequence[str] = (),
 ) -> ExtractionOutput:
-    """Everything this event tells us about the customer."""
+    """Everything this event tells us about the customer. ``text_fields`` are payload paths
+    a memory contract names as carrying the text (§26 7.1), read before the usual ones."""
     payload = data or {}
-    prose = text if text is not None else collect_text(payload)
+    prose = text if text is not None else collect_text(payload, text_fields)
     event_entities = entity_rules.extract(text=prose, data=payload)
 
     memories: list[MemoryCandidate] = []
@@ -424,7 +437,7 @@ def extract(
             )
         )
 
-    for field_name, segment in collect_segments(payload) if text is None else [("text", prose)]:
+    for field_name, segment in collect_segments(payload, text_fields) if text is None else [("text", prose)]:
         memories.extend(
             extract_statements(
                 segment,

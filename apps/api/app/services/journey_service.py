@@ -22,6 +22,7 @@ from app.services.changes_service import ChangesService
 from app.services.customer_state_service import snapshot_view, tracks_for
 from app.services.reader import Reader
 from app.services.state_views import sanitizing
+from app.services.usage import feature_usage
 from common.enums import MemoryType
 from common.errors import ValidationError
 from common.time import ensure_utc, utcnow
@@ -54,7 +55,6 @@ from memory_engine.journey import (
     within,
 )
 from memory_engine.lifecycle import PRIMARY_TRACK
-from nlp.templates import display_name
 
 DEFAULT_LIMIT = 100
 MAX_LIMIT = 500
@@ -266,32 +266,11 @@ class JourneyService:
 
     async def _first_uses(self, project: Project, customer: Customer, memories: list[Any]) -> list[FirstUse]:
         """First uses, from the events themselves — and, for what no event names, from what
-        the customer said they use."""
-        found: dict[str, FirstUse] = {}
-        for kind, key, name, event_id, first_at, last_at, uses, event_type in await self.events.first_uses(
-            project_id=project.id, customer_id=customer.id
-        ):
-            if key not in found:
-                found[key] = FirstUse(kind, display_name(name), first_at, event_id, last_at, uses, event_type)
-        for memory in memories:
-            if str(memory.type) not in (MemoryType.BEHAVIOR.value, MemoryType.FACT.value):
-                continue
-            meta = memory.meta or {}
-            name = meta.get("integration") or meta.get("feature")
-            if not name or not memory.source_event_ids:
-                continue
-            key = " ".join(str(name).lower().replace("_", " ").replace("-", " ").split())
-            if key in found:
-                continue
-            found[key] = FirstUse(
-                "integration" if meta.get("integration") else "feature",
-                str(name),
-                memory.first_seen_at,
-                str(memory.source_event_ids[0]),
-                memory.last_seen_at,
-                int(memory.evidence_count or 1),
-            )
-        return sorted(found.values(), key=lambda use: ensure_utc(use.first_at))
+        the customer said they use (``app.services.usage``, shared with personalization)."""
+        return [
+            FirstUse(use.kind, use.name, use.first_at, use.first_event_id, use.last_at, use.uses, use.event_type)
+            for use in await feature_usage(self.session, project=project, customer=customer, memories=memories)
+        ]
 
     async def _gaps(self, project: Project, customer: Customer, now: datetime) -> list[Gap]:
         scope = {"project_id": project.id, "customer_id": customer.id}

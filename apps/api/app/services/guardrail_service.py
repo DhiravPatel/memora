@@ -277,16 +277,7 @@ class GuardrailService:
         return found
 
     def _configuration(self, project: Project) -> tuple[Guardrails, int]:
-        raw = effective(project).get("guardrails") or {}
-        try:
-            compiled = compile_guardrails(raw)
-        except GuardrailError as exc:
-            # Validated when saved, so this means settings were written around the API.
-            # Fail towards caution: keep the built-ins, drop the unreadable project rules.
-            logger.error("agent.guardrails_invalid", project_id=project.id, error=str(exc))
-            compiled = Guardrails(disabled=frozenset())
-        ttl = raw.get("approval_ttl_hours") if isinstance(raw, dict) else None
-        return compiled, int(ttl or DEFAULT_APPROVAL_TTL_HOURS)
+        return configuration_for(project)
 
     # --------------------------------------------------------------- approvals
 
@@ -840,6 +831,21 @@ class GuardrailService:
             session_id=check.session_id,
             checked_at=check.created_at,
         )
+
+
+def configuration_for(project: Project) -> tuple[Guardrails, int]:
+    """The project's guardrails and approval window, compiled — shared with personalization,
+    which judges actions the way an agent's check would (§26 6.6)."""
+    raw = effective(project).get("guardrails") or {}
+    try:
+        compiled = compile_guardrails(raw)
+    except GuardrailError as exc:
+        # Validated when saved, so this means settings were written around the API.
+        # Fail towards caution: keep the built-ins, drop the unreadable project rules.
+        logger.error("agent.guardrails_invalid", project_id=project.id, error=str(exc))
+        compiled = Guardrails(disabled=frozenset())
+    ttl = raw.get("approval_ttl_hours") if isinstance(raw, dict) else None
+    return compiled, int(ttl or DEFAULT_APPROVAL_TTL_HOURS)
 
 
 def summary_of(decision: str, reasons: list[dict[str, Any]]) -> str:

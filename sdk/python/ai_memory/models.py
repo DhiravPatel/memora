@@ -18,12 +18,121 @@ def _get(data: dict[str, Any], *names: str, default: Any = None) -> Any:
 
 
 @dataclass(slots=True)
+class ContractViolation:
+    """One way a payload broke its event type's memory contract (§26 7.1)."""
+
+    path: str
+    rule: str  # required | type | enum | minimum | maximum | max_length | pattern | unknown_field
+    expected: str | None = None
+    received: str | None = None  # redacted and short: 'string ("₹500")', 'missing', 'null'
+    message: str = ""
+
+    @classmethod
+    def from_api(cls, data: dict[str, Any]) -> ContractViolation:
+        return cls(
+            path=data.get("path", ""),
+            rule=data.get("rule", ""),
+            expected=data.get("expected"),
+            received=data.get("received"),
+            message=data.get("message", ""),
+        )
+
+
+@dataclass(slots=True)
+class ContractCheck:
+    """A payload checked against its event type's memory contract (§26 7.1).
+
+    On a tracked event, on a preview, and from :meth:`MemoryClient.test_contract`. Falsy when
+    the payload breaks the contract, so ``if not check:`` reads right; each violation says
+    what was expected and what arrived.
+    """
+
+    mode: str
+    valid: bool
+    violations: list[ContractViolation] = field(default_factory=list)
+    version: int | None = None  # None when checked against a proposed contract
+    would_refuse: bool = False
+    text: str | None = None  # what the contract's text field holds, redacted (tests only)
+    definition: dict[str, Any] | None = None  # tests only: the contract as the server read it
+
+    def __bool__(self) -> bool:
+        return self.valid
+
+    @classmethod
+    def from_api(cls, data: dict[str, Any] | None) -> ContractCheck | None:
+        if not data:
+            return None
+        return cls(
+            mode=data.get("mode", "warn"),
+            valid=bool(data.get("valid", True)),
+            violations=[ContractViolation.from_api(item) for item in data.get("violations") or []],
+            version=data.get("version"),
+            would_refuse=bool(data.get("would_refuse", False)),
+            text=data.get("text"),
+            definition=data.get("definition"),
+        )
+
+
+@dataclass(slots=True)
+class EventContract:
+    """What one event type must look like (§26 7.1) — and, when read singly, what it found:
+    ``report`` holds the events checked in the window, those breaking it, and each way they
+    broke it with expected, received, how often and when last."""
+
+    id: str
+    event_type: str
+    mode: str  # warn | enforce | off
+    version: int
+    definition: dict[str, Any] = field(default_factory=dict)
+    rejected: dict[str, Any] = field(default_factory=dict)  # {count, last_at, recent}
+    events: int | None = None
+    violating: int | None = None
+    report: dict[str, Any] | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
+
+    @property
+    def required(self) -> list[str]:
+        return list(self.definition.get("required") or [])
+
+    @property
+    def fields(self) -> dict[str, dict[str, Any]]:
+        return dict(self.definition.get("fields") or {})
+
+    @property
+    def text_field(self) -> str | None:
+        return self.definition.get("text_field")
+
+    @property
+    def violations(self) -> list[dict[str, Any]]:
+        """Each way events broke it in the report's window, most frequent first."""
+        return list((self.report or {}).get("violations") or [])
+
+    @classmethod
+    def from_api(cls, data: dict[str, Any]) -> EventContract:
+        return cls(
+            id=data.get("id", ""),
+            event_type=data.get("event_type", ""),
+            mode=data.get("mode", "warn"),
+            version=int(data.get("version", 0)),
+            definition=dict(data.get("definition") or {}),
+            rejected=dict(data.get("rejected") or {}),
+            events=data.get("events"),
+            violating=data.get("violating"),
+            report=data.get("report"),
+            created_at=data.get("created_at"),
+            updated_at=data.get("updated_at"),
+        )
+
+
+@dataclass(slots=True)
 class TrackedEvent:
     event_id: str
     status: str
     customer_id: str
     importance: float = 0.0
     queued: bool = False
+    contract: ContractCheck | None = None  # set when a memory contract covers the type
 
     @classmethod
     def from_api(cls, data: dict[str, Any]) -> TrackedEvent:
@@ -33,6 +142,52 @@ class TrackedEvent:
             customer_id=data.get("customer_id", ""),
             importance=float(data.get("importance", 0.0)),
             queued=bool(data.get("queued", False)),
+            contract=ContractCheck.from_api(data.get("contract")),
+        )
+
+
+@dataclass(slots=True)
+class RejectedEvent:
+    """An event in a batch that an enforcing memory contract refused. It was not stored."""
+
+    index: int
+    event_type: str
+    customer_id: str
+    external_event_id: str | None = None
+    contract_version: int = 0
+    violations: list[ContractViolation] = field(default_factory=list)
+
+    @classmethod
+    def from_api(cls, data: dict[str, Any]) -> RejectedEvent:
+        return cls(
+            index=int(data.get("index", 0)),
+            event_type=data.get("event_type", ""),
+            customer_id=data.get("customer_id", ""),
+            external_event_id=data.get("external_event_id"),
+            contract_version=int(data.get("contract_version", 0)),
+            violations=[ContractViolation.from_api(item) for item in data.get("violations") or []],
+        )
+
+
+class TrackedBatch(list[TrackedEvent]):
+    """The accepted events of a batch, in order — a list, as it always was — with the events
+    an enforcing contract refused in :attr:`rejected` and the duplicates counted."""
+
+    __slots__ = ("duplicates", "rejected")
+
+    def __init__(
+        self, accepted: Any = (), *, rejected: Any = (), duplicates: int = 0
+    ) -> None:
+        super().__init__(accepted)
+        self.rejected: list[RejectedEvent] = list(rejected)
+        self.duplicates = duplicates
+
+    @classmethod
+    def from_api(cls, data: dict[str, Any]) -> TrackedBatch:
+        return cls(
+            [TrackedEvent.from_api(item) for item in data.get("accepted") or []],
+            rejected=[RejectedEvent.from_api(item) for item in data.get("rejected") or []],
+            duplicates=int(data.get("duplicates", 0)),
         )
 
 
@@ -142,6 +297,70 @@ class Change:
             importance=float(data.get("importance") or 0.0),
             topics=list(data.get("topics") or []),
         )
+
+
+@dataclass(slots=True)
+class Personalization:
+    """What a product should do differently for a customer (§26 6.6).
+
+    The values are flat, ready to branch on — ``experience``, ``mood``, ``known_frictions``,
+    ``ui["suppress_upsell"]`` — and ``details`` says why each is what it is.
+    """
+
+    customer_id: str
+    experience: str | None = None
+    mood: str | None = None
+    preferred_channel: str | None = None
+    opt_outs: list[str] = field(default_factory=list)
+    current_goal: str | None = None
+    known_frictions: list[str] = field(default_factory=list)
+    features_used: list[str] = field(default_factory=list)
+    relied_on_features: list[str] = field(default_factory=list)
+    stage: str | None = None
+    plan: str | None = None
+    health: str | None = None
+    ui: dict[str, bool] = field(default_factory=dict)
+    evidence: list[str] = field(default_factory=list)
+    details: dict[str, Any] | None = None
+    version: str = ""
+    computed_at: str | None = None
+    changed_at: str | None = None
+    raw: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_api(cls, data: dict[str, Any]) -> Personalization:
+        return cls(
+            customer_id=data.get("customer_id", ""),
+            experience=data.get("experience"),
+            mood=data.get("mood"),
+            preferred_channel=data.get("preferred_channel"),
+            opt_outs=list(data.get("opt_outs") or []),
+            current_goal=data.get("current_goal"),
+            known_frictions=list(data.get("known_frictions") or []),
+            features_used=list(data.get("features_used") or []),
+            relied_on_features=list(data.get("relied_on_features") or []),
+            stage=data.get("stage"),
+            plan=data.get("plan"),
+            health=data.get("health"),
+            ui={str(key): bool(value) for key, value in (data.get("ui") or {}).items()},
+            evidence=list(data.get("evidence") or []),
+            details=data.get("details"),
+            version=data.get("version", ""),
+            computed_at=data.get("computed_at"),
+            changed_at=data.get("changed_at"),
+            raw=data,
+        )
+
+    def hint(self, name: str, default: bool = False) -> bool:
+        """A UI hint's value — ``default`` for a hint the project does not define."""
+        return self.ui.get(name, default)
+
+    def because(self, name: str) -> list[str]:
+        """Why a UI hint is what it is, in words (needs ``details``)."""
+        return list((((self.details or {}).get("ui") or {}).get(name) or {}).get("because") or [])
+
+    def has_friction(self, key: str) -> bool:
+        return key in self.known_frictions
 
 
 @dataclass(slots=True)
@@ -525,6 +744,7 @@ class EventExplanation:
     entities: list[dict[str, Any]] = field(default_factory=list)
     entity_count: int = 0
     duration_ms: float = 0.0
+    contract: ContractCheck | None = None  # the type's memory contract, when one covers it
 
     def __bool__(self) -> bool:
         """Truthy when the event would produce something, so ``if not preview:`` reads right."""
@@ -547,6 +767,7 @@ class EventExplanation:
             entities=list(data.get("entities") or []),
             entity_count=int(data.get("entity_count", 0)),
             duration_ms=float(data.get("duration_ms", 0.0)),
+            contract=ContractCheck.from_api(data.get("contract")),
         )
 
 

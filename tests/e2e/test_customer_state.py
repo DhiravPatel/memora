@@ -237,9 +237,10 @@ def test_a_new_customer_is_placed_and_moved_by_the_rules(client, account):
     make_customer(
         client, account, "cus_risk", [("problem", "The customer will cancel if the Shopify sync is not fixed.")]
     )
+    # Writing the memory refreshed the customer there and then: a refresh now finds them moved.
     moved = refresh(client, account, "cus_risk")
     assert moved["state"] == "at_risk"
-    assert [step["transition"] for step in moved["transitions"]] == ["at_risk"]
+    assert moved["transitions"] == [], "already moved when the memory was written"
 
     state = client.get("/v1/customers/cus_risk/state", headers=h(account["key"])).json()
     assert state["current"]["state"] == "at_risk"
@@ -260,7 +261,8 @@ def test_a_plan_journey_moves_through_the_states_it_should(client, account):
     remember(client, account, "cus_trial", "subscription", "The customer upgraded from the Trial plan to the Pro plan.")
     converted = refresh(client, account, "cus_trial")
     assert converted["state"] == "onboarding"
-    assert converted["transitions"][0]["transition"] == "converted"
+    current = client.get("/v1/customers/cus_trial/state", headers=h(account["key"])).json()["current"]
+    assert current["transition"] == "converted", "moved when the upgrade was written"
 
 
 def test_nothing_changes_when_nothing_changed(client, account):

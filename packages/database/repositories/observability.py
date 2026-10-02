@@ -6,6 +6,7 @@ from datetime import date, datetime
 from typing import Any
 
 from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert
 
 from common.enums import AuditAction
 from common.ids import new_id
@@ -70,31 +71,26 @@ class UsageRepository(BaseRepository):
     async def increment(
         self, *, project_id: str, metric: str, amount: int = 1, day: date | None = None
     ) -> None:
+        # One atomic upsert. Reading the row and then writing it raced: two workers counting
+        # a project's first event of the day both inserted (a unique violation that failed
+        # the event), and two incrementing the same row each wrote count + 1 (a lost count).
         day = day or utcnow().date()
-        result = await self.session.execute(
-            select(UsageRecord).where(
-                UsageRecord.project_id == project_id,
-                UsageRecord.day == day,
-                UsageRecord.metric == metric,
+        now = utcnow()
+        statement = insert(UsageRecord).values(
+            id=new_id("usg"),
+            project_id=project_id,
+            day=day,
+            metric=metric,
+            count=amount,
+            created_at=now,
+            updated_at=now,
+        )
+        await self.session.execute(
+            statement.on_conflict_do_update(
+                constraint="uq_usage_records_project_day_metric",
+                set_={"count": UsageRecord.count + statement.excluded.count, "updated_at": now},
             )
         )
-        record = result.scalar_one_or_none()
-        now = utcnow()
-        if record is None:
-            record = UsageRecord(
-                id=new_id("usg"),
-                project_id=project_id,
-                day=day,
-                metric=metric,
-                count=amount,
-                created_at=now,
-                updated_at=now,
-            )
-            self.session.add(record)
-        else:
-            record.count += amount
-            record.updated_at = now
-        await self.session.flush()
 
     async def series(
         self, *, project_id: str, since: date, until: date | None = None

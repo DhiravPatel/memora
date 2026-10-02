@@ -121,7 +121,25 @@ def event_out(event: Event, mask: Any = None) -> EventOut:
         error=event.error,
         outcome=EventExplanationOut(**outcome) if outcome else None,
         withheld=withheld,
+        contract=_masked_contract(event.contract) if withheld else event.contract,
     )
+
+
+def _masked_contract(check: dict[str, Any] | None) -> dict[str, Any] | None:
+    """A contract check without the payload's words: what arrived is kept as its type only."""
+    if not check:
+        return check
+    violations = []
+    for item in check.get("violations") or []:
+        received = str(item.get("received") or "").split(" (", 1)[0] or None
+        violations.append(
+            {
+                **item,
+                "received": received,
+                "message": f"'{item.get('path')}' broke its {item.get('rule')} rule (expected {item.get('expected')}).",
+            }
+        )
+    return {**check, "violations": violations}
 
 
 def _masked_outcome(outcome: dict[str, Any], hidden: frozenset[str]) -> dict[str, Any]:

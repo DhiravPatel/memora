@@ -39,6 +39,7 @@ from worker.tasks import (
     refresh_customer_foresight,
     refresh_customer_states,
     refresh_customer_states_all,
+    report_contract_violations,
     report_queue_depth,
     reprocess_customer,
     reprocess_event,
@@ -122,6 +123,7 @@ class WorkerSettings:
         refresh_customer_states,
         run_evaluation,
         detect_drift,
+        report_contract_violations,
         backfill_memory_indexes,
         check_key_rotation,
         send_email,
@@ -141,6 +143,8 @@ class WorkerSettings:
         cron(sweep_stale_goals, hour=5, minute=0),
         # Before the lifecycle (05:15), which can read drift facts; after signals and goals.
         cron(detect_drift_all, hour=5, minute=5),
+        # Memory contracts (§26 7.1): an hourly digest of what broke them.
+        cron(report_contract_violations, minute=20),
         # After signals (04:30) and goals (05:00), because the lifecycle reads both.
         cron(refresh_customer_states_all, hour=5, minute=15),
         # After the summaries, so a project's newest memories are in the corpus.
